@@ -644,6 +644,7 @@ git commit -m "feat(connections): saved-host list and editor backed by a store"
 
 **Files:**
 - Create: `src/stores/projects.ts`
+- Create: `src/session/piLive.ts`
 - Create: `src/components/projects/ProjectsList.vue`
 - Test: `tests/unit/projectsStore.test.ts`
 
@@ -652,6 +653,50 @@ git commit -m "feat(connections): saved-host list and editor backed by a store"
 - Produces:
   - `useProjectsStore()` with `{ projects: PiProject[]; state: 'idle' | 'loading' | 'ready' | 'no-root' | 'error'; error: string | null; query: string }`, actions `discover()`, `setQuery(q)`, `addProject(path)`, getter `filtered`.
   - `state === 'no-root'` when `resolveSessionRoot` returns `null` (Review Focus 3).
+- **Deviations from this plan's earlier text (ruling R9):** the real seam is
+  thicker than the interface above.
+  1. `listProjects` takes the **resolved root**: `listProjects(root: string)`.
+     `PiRepository` is root-bound at construction
+     (`src/pi/piRepository.ts:58-62`), so the real binding is
+     `new PiRepository(transport, root).listProjects()`; re-probing inside
+     `listProjects` would double the root discovery. The Step 1 tests pass
+     unchanged: their `vi.fn`s ignore the extra argument.
+  2. The factory takes two **optional** dependencies beyond the two above.
+     `added?: { load(): Promise<string[]>; save(paths: string[]): Promise<void> }`
+     — per-host persistence of manually added projects (spec §9.1: an added
+     project is "listed even before it has a session" and must survive a
+     refresh). The Pinia wrapper binds a localStorage implementation under the
+     single key `pocketshell.android.pi.addedProjects.v1`
+     (`Record<hostName, string[]>`), keyed by the connections store's active
+     host. `discover()` merges discovered + added, de-duped by `path`,
+     discovered first. An `added.load()` failure degrades to an empty list;
+     it does not fail discovery.
+     `browse?: { home(): Promise<string>; listDirs(path: string): Promise<PiDirectoryEntry[]> }`
+     — the server directory browser behind 新增项目 (spec §9.1: "native
+     `sftpList`, rooted at `$HOME`"; native `sftpList` is implemented at
+     `SshCapabilityPlugin.java:798`).
+  3. The live-connection side comes from a new seam `src/session/piLive.ts`
+     (installed by the Task 5 shell, the same pattern as Task 6's
+     `connectionPort.ts`):
+     `interface PiLive { transport(): PiTransport; remoteContext(): Promise<{ home: string; env: Record<string, string | undefined> }>; listDirectories(path: string): Promise<PiDirectoryEntry[]> }`
+     plus `installPiLive(live: PiLive | null): void` and `piLive(): PiLive`
+     (throws while uninstalled). `type PiDirectoryEntry = { name: string; path: string }`
+     — directories only, sorted by name. `resolveSessionRoot(transport, home, env, override)`
+     needs the remote `$HOME` and env (at minimum
+     `PI_CODING_AGENT_SESSION_DIR`, `src/pi/sessionRoot.ts:1`), which only the
+     shell's live connection can answer; the per-host `override` is the active
+     `SavedHost.piSessionsDir`. The Pinia wrapper binds `resolveRoot` and
+     `listProjects` **lazily** (at call time) through `piLive()`.
+     `discover()` with no installed seam (or no live connection) lands in
+     `state: 'error'` with a "connect first" message (spec §8.4) — never a
+     throw.
+  4. The store also carries `selected: string | null` + `select(path)`
+     (spec §8.5 "requires a selected project"; Task 8's
+     `sessions.load(project)` reads it) and the browser state and actions:
+     `browse: { open: boolean; cwd: string | null; dirs: PiDirectoryEntry[] | null; error: string | null; busy: boolean }`,
+     `openBrowse()` (rooted at `browse.home()`), `browseEnter(path)`,
+     `browseUp()` (parent computed locally, clamped at the browser root),
+     `closeBrowse()`. `addProject(path)` also closes the browser.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -726,12 +771,15 @@ app's `unsupported` sftp group was the only blocker).
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm exec vitest run tests/unit/projectsStore.test.ts`
-Expected: PASS (5 tests).
+Expected: PASS (the 5 plan tests plus the R9 additions: the root-bound
+`listProjects(root)` call, `added` merge + de-dup, browse open/enter/up and
+adding from the browse cwd, `discover()` erroring when no seam is installed,
+and `select`). Still exactly one top-level `describe`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/stores/projects.ts src/components/projects tests/unit/projectsStore.test.ts
+git add src/stores/projects.ts src/session/piLive.ts src/components/projects tests/unit/projectsStore.test.ts
 git commit -m "feat(projects): discover, filter and add Pi projects"
 ```
 
