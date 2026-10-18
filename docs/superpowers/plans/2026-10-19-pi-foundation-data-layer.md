@@ -547,9 +547,49 @@ git commit -m "feat(pi): list projects/sessions and read a session over a transp
 2. **App shell, three tabs, WeChat visual layer** — remove the legacy/shared
    screens, add the bottom tab bar, Connections/Projects/Sessions/Chat
    screens, phone-layer WeChat tokens; wire key-auth connect and Tasks 2–5.
+   **Owns `resolveSessionRoot(transport, home, env, override)`**, which probes
+   the candidates from `candidateSessionRoots` (Task 3) in order with `test -d`
+   and returns the first that exists — Plan 1 exports the candidate list but
+   deliberately does not probe, so the spec §9.1 "first that exists" resolution
+   is unimplemented until this plan lands. Plan 2 also inherits the non-blocking
+   deferrals listed at the end of this document.
 3. **Chat send** — `PiTurnRunner` PTY turn (§9.4), refresh, and the
    Pi-command/PATH per-host config.
 4. **Native credentials** — remember passphrase + password auth (§7.1, §7.2).
 5. **Cleanup + Android acceptance** — delete remaining unneeded modules,
    relax the exact-manifest JS gate for the fork, install the Windows Android
    toolchain, packaged-APK emulator acceptance.
+
+## Deferred from Plan 1's final review (non-blocking)
+
+Plan 1 shipped with these recorded, non-blocking findings. The final
+whole-branch review triaged them and did not require a fix; they are carried
+here so a later plan can pick them up rather than rediscover them.
+
+- **Exact-manifest JS gate.** `tests/unit/pi*.test.ts` are not registered in
+  `scripts/js-unit-test-manifest.json`, and cannot be without collapsing their
+  multiple top-level `describe`s (the loader supports one level per file).
+  Ships red for `scripts/run-js-unit-gate.sh` only; the branch is unpushed.
+  Owned by follow-on plan 5.
+- **`parsePiSession.ts:76`** — F3 fixed the blank-`user` flush path, but no
+  test exercises a whitespace-only `user` message directly.
+- **`sessionRoot.ts`** — duplicate candidates, a trailing-slash `home`, and
+  the empty-`home` branch are handled but untested.
+- **`piCommands.ts`** — `maxBytes` is interpolated without a runtime guard
+  (`NaN`/negative/`Infinity` would yield a malformed `tail -c`); also
+  `encodePiCwd`'s `\`/`:` branches and the multi-leading-slash case are
+  untested.
+- **`piRepository.ts:42`** — `EXEC_TIMEOUT_MS = 15000` is an arbitrary value
+  the brief did not constrain (it does stay under the native 30 s exec cap).
+- **`piRepository.ts:78`** — `listProjects` probes each project dir's header
+  sequentially; the target server has 38 dirs, so this is up to 38 serial SSH
+  round-trips. Consider bounded concurrency if the Projects tab feels slow.
+- **`piRepository.ts`** — `readCwd` uses the first *non-empty* header line
+  where the plan says "the first line" (a strict superset; accepted).
+- **Commit `21ff479`** — an `--allow-empty` commit whose message
+  ("install dependencies against the core pin") describes no tree change,
+  because `node_modules/` is gitignored. Harmless history noise.
+- **No test against the captured real session fixture.** The parser is
+  exercised by hand-built and synthetic fixtures; the literal 52-entry capture
+  from the maintainer's server is deliberately not committed (it is real
+  conversation data).
