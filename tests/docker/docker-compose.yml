@@ -1,0 +1,373 @@
+# Local convenience compose file for the SSH + aplexer test targets.
+#
+# Used for manual smoke testing per docs/testing.md:
+#   docker compose -f tests/docker/docker-compose.yml up -d sshd
+#   ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1
+#
+# The Testcontainers-based integration tests in `shared/core-ssh` build their
+# own images and pick ephemeral ports — they
+# don't use this compose file.
+#
+# Issue #150: every service ships an SSH-shaped healthcheck so callers can
+# wait on `docker inspect --format='{{.State.Health.Status}}' <container>`
+# instead of polling SSH with retry loops. The check runs from inside the
+# container against `testuser@localhost` using `/root/test_key` (copied in
+# by the Dockerfile), so it exercises the same auth path as a real client
+# without depending on the host network.
+#
+# Issue #2150 — WHY THIS CHECK ALSO READS sshd's EFFECTIVE CONFIG.
+#
+# The `ssh testuser@localhost` probe above is structurally blind to the one
+# fixture failure that has actually cost us emulator runs. It originates
+# inside the container, so its source address is `::1`. Every client under
+# test — emulator or host — arrives instead through the published port from
+# the single docker gateway (172.17.0.1). Those are DIFFERENT sources, and
+# OpenSSH >= 9.8's PerSourcePenalties blocks per source. So sshd can be
+# refusing 100% of the traffic under test while this probe sails through, and
+# the container reports `healthy` throughout. Observed on the unfixed image,
+# same second, same log:
+#
+#   drop connection #0 from [172.17.0.1]:50426 ... penalty: failed authentication
+#   Accepted publickey for testuser from ::1 port 56122
+#
+# A fixture that reports healthy while refusing the traffic under test is the
+# "artifact that says fine when nothing works" class this repo keeps getting
+# burned by, and it is what turned #2150 into two wasted runs rather than one
+# obvious red. No probe originating inside the container can ever hold the
+# gateway's source address, so connectivity alone cannot close the gap. What
+# CAN be observed from in here is the causal precondition: whether sshd's
+# effective configuration permits penalties at all. `sshd -T` renders exactly
+# the config the running daemon parsed, so this asserts the fixture cannot
+# enter the penalising state — and fails loudly if it can.
+#
+# The assertion is deliberately version-shaped rather than value-shaped: it
+# fails only on an effective `persourcepenalties` whose value is not `no`. An
+# sshd predating the feature (an older Debian OpenSSH) emits no such
+# line and passes, while the same fixture rebased onto an OpenSSH >= 9.8 base
+# image starts failing immediately instead of silently penalising lanes. A
+# non-parsing config also fails, via the `|| exit 1`.
+#
+# Deliberately written without `$`: compose interpolates `$` in command
+# strings, so `grep -x` replaces an end-of-line anchor here.
+x-ssh-healthcheck:
+  &ssh-healthcheck
+  test:
+    - CMD-SHELL
+    - >-
+      /usr/sbin/sshd -T > /tmp/ps-sshd-effective.conf 2>/dev/null || exit 1;
+      grep -i "^persourcepenalties " /tmp/ps-sshd-effective.conf
+      | grep -qvix "persourcepenalties no" && exit 1;
+      ssh -o BatchMode=yes
+      -o ConnectTimeout=2
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -i /root/test_key
+      testuser@localhost true
+  interval: 2s
+  timeout: 5s
+  retries: 10
+  start_period: 5s
+
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: Dockerfile.ssh
+    image: pocketshell-test:ssh
+    container_name: pocketshell-test-ssh
+    ports:
+      - "2222:22"
+    healthcheck: *ssh-healthcheck
+
+  # Issue #1799 (prerequisite fixture for #1639 §H1 — SSH host-key
+  # verification): same as `sshd`, except its host keys are minted at container
+  # START rather than baked into an image layer, so two successive starts of the
+  # ONE image present DIFFERENT host keys. That is what makes an
+  # unknown-key / changed-key observation on the real SSH transport possible;
+  # with `sshd`/`Dockerfile.ssh` the key is fixed forever and the scenario is
+  # unreachable.
+  #
+  #   docker compose -f tests/docker/docker-compose.yml up -d --build sshd-rekeyed
+  #   ssh -i tests/docker/test_key -p 2246 -o StrictHostKeyChecking=no testuser@127.0.0.1
+  #   docker compose -f tests/docker/docker-compose.yml restart sshd-rekeyed
+  #   # ^ reconnect now and OpenSSH shouts REMOTE HOST IDENTIFICATION HAS CHANGED
+  #
+  # Host port 2246 is the first free port above the #724 journey pool
+  # (2243-2245); see the port map in the `agents-old-cli` / `agents-daemon`
+  # comments above.
+  #
+  # NOTE: `HostKeyTrustCharacterizationIntegrationTest` in
+  # `:shared:core-ssh:integrationTest` pins its Testcontainers fixture to this
+  # SAME host port (it needs a stable host:port so "the key for this endpoint
+  # changed" is the scenario under test). Run one or the other, not both — the
+  # same rule the `sshd` / `agents` pair already follows on 2222. Nothing in CI
+  # starts this service: the `integration` job is Testcontainers-only and builds
+  # `Dockerfile.ssh-rekeyed` itself, so there is no CI collision.
+  sshd-rekeyed:
+    build:
+      context: .
+      dockerfile: Dockerfile.ssh-rekeyed
+    image: pocketshell-test:ssh-rekeyed
+    container_name: pocketshell-test-ssh-rekeyed
+    ports:
+      - "2246:22"
+    healthcheck: *ssh-healthcheck
+
+  # Deterministic local target for emulator smoke tests. It exposes the
+  # same SSH port as `sshd`; run one or the other, not both:
+  #   docker compose -f tests/docker/docker-compose.yml up -d --build agents
+  #
+  # Issue #724 (agents-fixture pool): this service is bringable up as N
+  # ISOLATED instances on distinct host ports so parallel emulator lanes each
+  # get their OWN SSH/aplexer fixture and never share session state. Two knobs make
+  # that work, BOTH defaulted so the single-lane path is byte-for-byte unchanged:
+  #
+  #   * AGENTS_HOST_PORT  — host port to publish (default 2222). A lane sets its
+  #     claimed port, e.g. AGENTS_HOST_PORT=2243.
+  #   * AGENTS_CONTAINER_NAME — the daemon-global container name (default
+  #     `pocketshell-test-agents`, kept so the existing single-lane
+  #     `docker inspect pocketshell-test-agents` diagnostics still resolve). A
+  #     fixed name is global to the Docker daemon and ignores the compose
+  #     project, so two concurrent `docker compose up` invocations would COLLIDE
+  #     on it; a lane therefore overrides it to a per-lane name (e.g.
+  #     `pocketshell-test-agents-2243`) AND runs under a distinct
+  #     COMPOSE_PROJECT_NAME. With both overridden, lanes are fully independent.
+  #
+  # Bring up one lane (the lane allocator does this for you):
+  #   COMPOSE_PROJECT_NAME=psagents2243 \
+  #     AGENTS_HOST_PORT=2243 AGENTS_CONTAINER_NAME=pocketshell-test-agents-2243 \
+  #     docker compose -f tests/docker/docker-compose.yml up -d --build agents
+  # Tear it down:
+  #   COMPOSE_PROJECT_NAME=psagents2243 \
+  #     AGENTS_HOST_PORT=2243 AGENTS_CONTAINER_NAME=pocketshell-test-agents-2243 \
+  #     docker compose -f tests/docker/docker-compose.yml down -v
+  agents:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.agents
+    image: pocketshell-test:agents
+    container_name: ${AGENTS_CONTAINER_NAME:-pocketshell-test-agents}
+    # Issue #2381: the `pocketshell --version` this fixture reports must match
+    # the APK under test, or every journey against it lands on the bootstrap
+    # "Host setup needed" sheet instead of the screen it is asserting. The
+    # caller exports the value scripts/derive-version.sh produced for the same
+    # checkout that built the APK (see scripts/lib/agents-fixture-version.sh);
+    # unset falls through to the image's baked `0.0.0-dev`, which is what a
+    # tagless checkout's APK reports too.
+    environment:
+      POCKETSHELL_AGENT_FIXTURE_VERSION: ${POCKETSHELL_AGENT_FIXTURE_VERSION:-}
+    ports:
+      - "${AGENTS_HOST_PORT:-2222}:22"
+    healthcheck: *ssh-healthcheck
+
+  # Issue #847: agents fixture whose host `pocketshell` CLI is OLDER than the
+  # Android client — it lacks the new-in-0.4.10 `tree` / `agents kind`
+  # subcommands, reproducing the maintainer's 0.4.9-host scenario that made
+  # v0.4.10 hang on "loading tree". Bound on host port 2238 (distinct from
+  # `agents`/2222, bootstrap/2230-2236, `agents-daemon`/2239,
+  # agents-pool/2243-2245). A connected test against this
+  # fixture asserts the client connects + renders the LIVE tree on a CLI
+  # mismatch instead of hanging. NOT started by the default workflow; the
+  # connected test that uses it is gated accordingly.
+  agents-old-cli:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.agents-old-cli
+    image: pocketshell-test:agents-old-cli
+    container_name: pocketshell-test-agents-old-cli
+    # Issue #847: the image reports an OLDER `pocketshell --version` (0.4.9, baked
+    # into /opt/pocketshell-agent-fixture-version via the OLD_CLI_FIXTURE_VERSION
+    # build arg) than the app, so the bootstrap "Host setup needed" sheet appears
+    # on connect — the maintainer's 0.4.9-host scenario. Tapping Skip on that
+    # sheet RELEASES the warm `warm-host-connect` lease, the #847 timeout-
+    # inversion trigger the connected journey test
+    # (FolderListBootstrapSkipTreeLoadsDockerTest) exercises. The `tree` /
+    # `agents kind` commands are still rejected (old CLI), so the existing
+    # FolderListOldCliHydrateDockerTest is unaffected.
+    ports:
+      - "2238:22"
+    healthcheck: *ssh-healthcheck
+
+  # Issue #839: agents fixture whose host `pocketshell` is the REAL Python
+  # package (genuine `tree.py` daemon code), so `tree get|upsert|reconcile`
+  # actually PERSIST to a host-side JSON registry under
+  # `$XDG_STATE_HOME/pocketshell/tree/registry.json` (atomic temp-file +
+  # os.replace, 0600). That host-side state SURVIVES an Android app kill +
+  # relaunch — the #837 durable-tree property. The connected journey
+  # (FolderListDurableTreeDaemonDockerTest) collapses a folder + holds an order,
+  # KILLS + RELAUNCHES the app (a fresh FolderListViewModel + a NEW
+  # TreeRemoteSource binding the same host over a NEW SSH session), and asserts
+  # the cold-start hydrate reads the held order/collapse back INSTANTLY, then a
+  # reconcile diffs the registry against the LIVE aplexer list and returns
+  # gone/added deltas. Bound on host port 2239 (distinct from `agents`/2222,
+  # bootstrap/2230-2236, `agents-old-cli`/2238,
+  # agents-pool/2243-2245). NOT started by the default
+  # workflow; the connected test that uses it is gated accordingly (Assume).
+  agents-daemon:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.agents-daemon
+    image: pocketshell-test:agents-daemon
+    container_name: pocketshell-test-agents-daemon
+    ports:
+      - "2239:22"
+    healthcheck: *ssh-healthcheck
+
+  # Issue #632 (slice 2): the 7 bootstrap setup-detection fixtures bind disjoint
+  # host ports 2230-2236, so they can be sharded across multiple emulators and
+  # brought up concurrently under DISTINCT compose projects
+  # (COMPOSE_PROJECT_NAME). They deliberately carry NO `container_name:` — a
+  # fixed container name is global to the Docker daemon and ignores the compose
+  # project, which would make two concurrent `docker compose up` invocations
+  # collide on the same name. Without it, compose namespaces each container as
+  # `<project>_bootstrap-<scenario>_<n>`, so parallel shards don't conflict.
+  # Callers address these fixtures by host port, never by container name.
+  bootstrap-ready:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: ready
+    image: pocketshell-test:bootstrap-ready
+    ports:
+      - "2230:22"
+    healthcheck: *ssh-healthcheck
+
+  bootstrap-uv-install:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: uv-install
+    image: pocketshell-test:bootstrap-uv-install
+    ports:
+      - "2231:22"
+    healthcheck: *ssh-healthcheck
+
+  bootstrap-uv-upgrade:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: uv-upgrade
+    image: pocketshell-test:bootstrap-uv-upgrade
+    ports:
+      - "2236:22"
+    healthcheck: *ssh-healthcheck
+
+  bootstrap-unsupported:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: unsupported
+    image: pocketshell-test:bootstrap-unsupported
+    ports:
+      - "2232:22"
+    healthcheck: *ssh-healthcheck
+
+  bootstrap-daemon-disabled:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: daemon-disabled
+    image: pocketshell-test:bootstrap-daemon-disabled
+    ports:
+      - "2233:22"
+    healthcheck: *ssh-healthcheck
+
+  bootstrap-user-local-path:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: user-local-path
+    image: pocketshell-test:bootstrap-user-local-path
+    ports:
+      - "2234:22"
+    healthcheck: *ssh-healthcheck
+
+  bootstrap-fish-user-local-path:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: user-local-path
+        INSTALL_FISH: "true"
+        LOGIN_SHELL: /usr/bin/fish
+    image: pocketshell-test:bootstrap-fish-user-local-path
+    ports:
+      - "2235:22"
+    healthcheck: *ssh-healthcheck
+
+  # Issue #1236 (D26): a host with the pocketshell CLI ready but the
+  # agent stop/idle notification hooks NOT installed — a SILENT host under D21.
+  # Seeds a pre-existing foreign Claude hook so the bootstrap `hooks install`
+  # can be asserted to MERGE non-destructively. Bound on host port 2241
+  # (distinct from the other bootstrap variants 2230-2236, old-cli 2238,
+  # daemon 2239).
+  bootstrap-notifications:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: notifications
+    image: pocketshell-test:bootstrap-notifications
+    ports:
+      - "2241:22"
+    healthcheck: *ssh-healthcheck
+
+  # Issue #342: opt-in network fault proxy for connected Android proof tests.
+  # The emulator reaches the proxy at 10.0.2.2:2228, while the proxy forwards
+  # to the normal `agents` SSH fixture on the compose network. Tests control
+  # toxics through the HTTP API exposed on 10.0.2.2:8474.
+  #
+  # Issue #2128: a `--pool` lane cannot share this singleton. The host ports
+  # and container name are parameterized (defaults keep the single-lane
+  # identity) so `scripts/lib/agents-pool.sh` can bring up a per-lane proxy
+  # under the same COMPOSE_PROJECT_NAME as that lane's `agents` fixture.
+  # Inside the container the listen stays 2228 and the upstream stays
+  # `agents:22` — that hostname is the compose service on THIS project.
+  #
+  # The default GitHub workflow does not start this service, so the Android
+  # tests that use it are gated with `pocketshellNetworkFaultProofs=true` and
+  # skipped on CI unless the workflow is explicitly expanded later.
+  network-fault-proxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: ${NETWORK_FAULT_CONTAINER_NAME:-pocketshell-test-network-fault-proxy}
+    command: ["-host", "0.0.0.0"]
+    depends_on:
+      - agents
+    ports:
+      - "${NETWORK_FAULT_HOST_PORT:-2228}:2228"
+      - "${TOXIPROXY_API_HOST_PORT:-8474}:8474"
+
+  # Issue #346: true packet-loss proxy for opt-in connected Android proofs.
+  # The emulator reaches this proxy at 10.0.2.2:2229. Linux `tc netem loss`
+  # runs inside the Docker proxy container, not on the host or emulator
+  # network, which avoids the instrumentation process-kill behavior reproduced
+  # by the earlier host/Android netem attempt.
+  #
+  # This service is intentionally not part of the default GitHub workflow. The
+  # proof test is gated by `pocketshellNetworkFaultProofs=true` and skipped on
+  # CI unless the workflow starts this service explicitly in a future change.
+  packet-loss-proxy:
+    build:
+      context: .
+      dockerfile: packet-loss-proxy/Dockerfile
+    image: pocketshell-test:packet-loss-proxy
+    container_name: ${PACKET_LOSS_CONTAINER_NAME:-pocketshell-test-packet-loss-proxy}
+    cap_add:
+      - NET_ADMIN
+    environment:
+      PACKET_LOSS_RATE: "5%"
+      PACKET_LOSS_DELAY_MS: "${PACKET_LOSS_DELAY_MS:-}"
+      PACKET_LOSS_JITTER_MS: "${PACKET_LOSS_JITTER_MS:-}"
+      PACKET_LOSS_LISTEN_PORT: "2229"
+      PACKET_LOSS_TARGET_HOST: agents
+      PACKET_LOSS_TARGET_PORT: "22"
+    depends_on:
+      - agents
+    ports:
+      - "${PACKET_LOSS_HOST_PORT:-2229}:2229"

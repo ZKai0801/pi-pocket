@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Require the exact packaged shared-app journeys (#2936, #2952, #2953, #2954, #2955, #3039) to execute and pass once each.
+
+Also the host half of #2952's byte oracle: the raw-mode reader on the Docker
+fixture writes the bytes it received as hex, the runner copies that file next
+to the results (HOST_BYTES_NAME), and it must equal EXPECTED_IME_BYTES_HEX —
+independently of what the journey read back from the terminal.
+
+#3039: the session-end and client-drop journeys' phase traces (the Android
+connection journal after the event) are kept for passing runs too, so a red
+run always has a green one to compare against. Each must be present, a
+non-empty JSON array on one logical connection, and free of `reconnecting` and
+`lost` — the same verdict the journeys assert, re-read from the kept file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from collections import Counter
+from pathlib import Path
+
+
+REQUIRED_CLASS = "com.pocketshell.app.smoke.SharedAppDockerJourneyTest"
+REQUIRED_METHODS = frozenset(
+    {
+        "sharedAppListsAttachesAndTypesIntoFixtureSession",
+        "sharedTerminalDeliversImeEditsAsExactBytes",
+        # #2954: the D28 reconnect/EOF oracle on the shared shell.
+        "sharedAppRecoversAbruptServerDropWithOneControllerReconnect",
+        "sharedAppReportsARealSessionEndWithoutReconnecting",
+        # #3039: only the attach client dies; the pane silently re-joins.
+        "sharedAppSilentlyRejoinsWhenOnlyTheAttachClientDies",
+        # #2955: the D28 multi-session switch oracle (A -> B -> A -> B tabs).
+        "sharedAppSwitchesSessionTabsKeepingEachTerminal",
+        # #2953: the shared host-key prompt on first contact, and a changed key refused.
+        "firstContactHostKeyAsksAndHonoursRejectOnceAndAlways",
+        "changedHostKeyIsRefusedWithVisibleMessage",
+    }
+)
+# #3017: selection regressions supplement, never replace, the seven real journeys.
+REGRESSION_CLASS = "com.pocketshell.app.ime.ScriptedImeSelectionTest"
+REGRESSION_METHODS = frozenset({
+    "cleanSelectionNeedsNoRebind",
+    "observedStockSelectionGetsExactlyOneRebind",
+    "delayedDriftRecoversBeforeOriginalDeadline",
+    "persistentDriftFailsWithinOriginalDeadline",
+    "conflictingSettingsAndMethodNeverPass",
+    "driftAfterDeadlineCannotExtendSelectionBudget",
+    "slowRebindCommandsCannotCreateANewDeadline",
+})
+HOST_BYTES_NAME = "host-ime-bytes.hex"
+# #3039: kept by the journeys, pulled by scripts/connected-js-shared-app.sh.
+PHASE_TRACE_NAMES = ("ps3039-journal-session-end.json", "ps3039-journal-client-drop.json")
+FORBIDDEN_PHASES = frozenset({"reconnecting", "lost"})
+# SharedAppDockerJourneyTest.EXPECTED_IME_BYTES, as the host must have received it.
+EXPECTED_IME_BYTES = (
+    "echo "
+    "word\x7fk "
+    "teh\x7f\x7fhe "
+    "\x7fn "
+    "ls -la"
+    "\r"
+    "a1b"
+    "ok"
+    "\t\r"
+    "PASTE1"
+)
+EXPECTED_IME_BYTES_HEX = EXPECTED_IME_BYTES.encode("utf-8").hex()
+DEFAULT_RESULTS = Path("android/app/build/outputs/androidTest-results/connected/debug")
+
+
+class GateFailure(ValueError):
+    pass
+
+
+def _integer(node: ET.Element, name: str, report: Path) -> int:
+    try:
+        value = int(node.attrib.get(name, "0"))
+    except ValueError as error:
+        raise GateFailure(f"{report}: invalid {name} count") from error
+    if value < 0:
+        raise GateFailure(f"{report}: negative {name} count")
+    return value
+
+
+def _suite_cases(suite: ET.Element, report: Path) -> list[ET.Element]:
+    cases = list(suite.findall("testcase"))
+    declared = _integer(suite, "tests", report)
+    if declared != len(cases):
+        raise GateFailure(f"{report}: declares {declared} tests but contains {len(cases)} cases")
+    for summary, tag in (("failures", "failure"), ("errors", "error"), ("skipped", "skipped")):
+        reported = _integer(suite, summary, report)
+        actual = sum(1 for case in cases for child in case.iter(tag))
+        if reported != actual:
+            raise GateFailure(f"{report}: declares {reported} {summary} but contains {actual}")
+    return cases
+
+
+def validate_results(results: Path) -> list[Path]:
+    if not results.is_dir():
+        raise GateFailure(f"instrumentation results directory is missing: {results}")
+    reports = sorted(results.rglob("TEST-*.xml"))
+    if not reports:
+        raise GateFailure(f"no TEST-*.xml instrumentation results found under {results}")
+
+    cases: list[ET.Element] = []
+    for report in reports:
+        try:
+            root = ET.parse(report).getroot()
+        except (ET.ParseError, OSError) as error:
+            raise GateFailure(f"could not parse {report}: {error}") from error
+        if root.tag == "testsuite":
+            cases.extend(_suite_cases(root, report))
+        elif root.tag == "testsuites":
+            suites = list(root.findall("testsuite"))
+            if not suites:
+                raise GateFailure(f"{report}: testsuites report contains no testsuite")
+            suite_cases = [case for suite in suites for case in _suite_cases(suite, report)]
+            for summary, tag in (("tests", None), ("failures", "failure"), ("errors", "error"), ("skipped", "skipped")):
+                reported = _integer(root, summary, report)
+                actual = len(suite_cases) if tag is None else sum(
+                    1 for case in suite_cases for child in case.iter(tag)
+                )
+                if reported != actual:
+                    raise GateFailure(f"{report}: root declares {reported} {summary} but suites contain {actual}")
+            cases.extend(suite_cases)
+        else:
+            raise GateFailure(f"{report}: expected <testsuite> or <testsuites>, found <{root.tag}>")
+
+    actual = Counter((case.attrib.get("classname", ""), case.attrib.get("name", "")) for case in cases)
+    expected = Counter({(REQUIRED_CLASS, method): 1 for method in REQUIRED_METHODS})
+    expected.update({(REGRESSION_CLASS, method): 1 for method in REGRESSION_METHODS})
+    if actual != expected:
+        raise GateFailure(
+            f"expected exactly {sorted(expected.elements())}; found {sorted(actual.elements())}"
+        )
+
+    for case in cases:
+        name = f"{case.attrib.get('classname', '')}#{case.attrib.get('name', '')}"
+        if list(case.iter("failure")) or list(case.iter("error")):
+            raise GateFailure(f"{name} failed")
+        if list(case.iter("skipped")):
+            raise GateFailure(f"{name} was skipped")
+    return reports
+
+
+def validate_host_bytes(path: Path) -> None:
+    if not path.is_file():
+        raise GateFailure(f"the host reader's byte record is missing: {path}")
+    recorded = path.read_text(encoding="utf-8").strip()
+    if recorded != EXPECTED_IME_BYTES_HEX:
+        try:
+            decoded = repr(bytes.fromhex(recorded).decode("utf-8", "replace"))
+        except ValueError:
+            decoded = "<not hex>"
+        raise GateFailure(
+            f"the host received {decoded} ({recorded}); expected {EXPECTED_IME_BYTES!r} ({EXPECTED_IME_BYTES_HEX})"
+        )
+
+
+def validate_phase_traces(results: Path) -> list[Path]:
+    traces = []
+    for name in PHASE_TRACE_NAMES:
+        path = results / name
+        if not path.is_file():
+            raise GateFailure(f"the #3039 phase trace is missing: {path}")
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise GateFailure(f"{path}: not readable JSON: {error}") from error
+        if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) for e in entries):
+            raise GateFailure(f"{path}: expected a non-empty JSON array of journal entries")
+        connections = {entry.get("connectionId") for entry in entries}
+        if len(connections) != 1 or None in connections:
+            raise GateFailure(f"{path}: expected one logical connection, found {sorted(map(str, connections))}")
+        bad = [entry for entry in entries if entry.get("phase") in FORBIDDEN_PHASES]
+        if bad:
+            raise GateFailure(f"{path}: the trace reconnects: {bad[0]}")
+        traces.append(path)
+    return traces
+
+
+def _write_report(path: Path, identities: list[tuple[str, str, str]]) -> None:
+    failures = sum(status == "failed" for _class_name, _method, status in identities)
+    skipped = sum(status == "skipped" for _class_name, _method, status in identities)
+    suite = ET.Element(
+        "testsuite",
+        tests=str(len(identities)),
+        failures=str(failures),
+        errors="0",
+        skipped=str(skipped),
+    )
+    for class_name, method, status in identities:
+        case = ET.SubElement(suite, "testcase", classname=class_name, name=method)
+        if status == "failed":
+            ET.SubElement(case, "failure")
+        elif status == "skipped":
+            ET.SubElement(case, "skipped")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+
+
+def self_test() -> int:
+    every = [(REQUIRED_CLASS, method, "passed") for method in sorted(REQUIRED_METHODS)]
+    regressions = [(REGRESSION_CLASS, method, "passed") for method in sorted(REGRESSION_METHODS)]
+    every += regressions
+    good_bytes = EXPECTED_IME_BYTES_HEX
+    duplicated = ("echo PS2 PS936".encode() + EXPECTED_IME_BYTES.encode()).hex()
+    good_trace = [{"connectionId": "android-1", "phase": "connected", "transportId": "t-1"}]
+    reconnecting_trace = good_trace + [{"connectionId": "android-1", "phase": "reconnecting", "transportId": None}]
+    two_connections = good_trace + [{"connectionId": "android-2", "phase": "connected", "transportId": "t-2"}]
+    trace_cases = [
+        ("every phase trace present and clean passes", {}, True),
+        *(
+            (f"a missing {name} blocks", {name: None}, False)
+            for name in PHASE_TRACE_NAMES
+        ),
+        *(
+            (f"a reconnecting {name} blocks", {name: reconnecting_trace}, False)
+            for name in PHASE_TRACE_NAMES
+        ),
+        ("an empty phase trace blocks", {PHASE_TRACE_NAMES[0]: []}, False),
+        ("a trace across two logical connections blocks", {PHASE_TRACE_NAMES[1]: two_connections}, False),
+        ("an unreadable phase trace blocks", {PHASE_TRACE_NAMES[0]: "{not json"}, False),
+    ]
+    cases = [
+        ("every exact passing shared-app journey passes", every, good_bytes, True),
+        ("zero tests block", [], good_bytes, False),
+        *(
+            (f"a missing {method} blocks", [row for row in every if row[1] != method], good_bytes, False)
+            for method in sorted(REQUIRED_METHODS)
+        ),
+        *(
+            (f"a failed {method} blocks", [(c, m, "failed" if m == method else s) for c, m, s in every], good_bytes, False)
+            for method in sorted(REQUIRED_METHODS)
+        ),
+        *(
+            (f"a missing selection regression {method} blocks",
+             [row for row in every if row[1] != method], good_bytes, False)
+            for method in sorted(REGRESSION_METHODS)
+        ),
+        *(
+            (f"a failed selection regression {method} blocks",
+             [(c, m, "failed" if m == method else s) for c, m, s in every], good_bytes, False)
+            for method in sorted(REGRESSION_METHODS)
+        ),
+        ("selection regressions alone cannot replace real journeys", regressions, good_bytes, False),
+        ("real journeys alone cannot replace selection regressions",
+         [row for row in every if row[0] == REQUIRED_CLASS], good_bytes, False),
+        ("skipped selection regression blocks",
+         [(c, m, "skipped" if m == regressions[0][1] else s) for c, m, s in every], good_bytes, False),
+        ("unexpected class blocks", [("example.OtherJourney", every[0][1], "passed"), *every[1:]], good_bytes, False),
+        ("extra test blocks", every + [(REQUIRED_CLASS, "extra", "passed")], good_bytes, False),
+        ("duplicate test blocks", every + [every[0]], good_bytes, False),
+        ("skipped journey blocks", [(every[0][0], every[0][1], "skipped"), *every[1:]], good_bytes, False),
+        ("missing host byte record blocks", every, None, False),
+        ("duplicated host bytes block", every, duplicated, False),
+        ("empty host byte record blocks", every, "", False),
+    ]
+    failures = 0
+    with tempfile.TemporaryDirectory(prefix="pocketshell-js-shared-app-results-") as temporary:
+        root = Path(temporary)
+        for index, (label, identities, host_bytes, expected_pass) in enumerate(cases):
+            results = root / str(index)
+            results.mkdir(parents=True)
+            if identities:
+                _write_report(results / "TEST-shared-app.xml", identities)
+            if host_bytes is not None:
+                (results / HOST_BYTES_NAME).write_text(host_bytes + "\n", encoding="utf-8")
+            try:
+                validate_results(results)
+                validate_host_bytes(results / HOST_BYTES_NAME)
+                passed = True
+            except GateFailure:
+                passed = False
+            if passed != expected_pass:
+                failures += 1
+                print(f"FAIL: {label}", file=sys.stderr)
+            else:
+                print(f"ok: {label}")
+        for index, (label, overrides, expected_pass) in enumerate(trace_cases):
+            results = root / f"trace-{index}"
+            results.mkdir(parents=True)
+            for name in PHASE_TRACE_NAMES:
+                content = overrides.get(name, good_trace)
+                if content is None:
+                    continue
+                text = content if isinstance(content, str) else json.dumps(content)
+                (results / name).write_text(text, encoding="utf-8")
+            try:
+                validate_phase_traces(results)
+                passed = True
+            except GateFailure:
+                passed = False
+            if passed != expected_pass:
+                failures += 1
+                print(f"FAIL: {label}", file=sys.stderr)
+            else:
+                print(f"ok: {label}")
+    total = len(cases) + len(trace_cases)
+    print(f"Shared-app result guard self-test: {total - failures}/{total} checks passed")
+    return 1 if failures else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS)
+    parser.add_argument(
+        "--host-bytes",
+        type=Path,
+        help=f"the host reader's hex record (default: <results-dir>/{HOST_BYTES_NAME})",
+    )
+    parser.add_argument("--evidence-dir", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        return self_test()
+    host_bytes = args.host_bytes or args.results_dir / HOST_BYTES_NAME
+    try:
+        reports = validate_results(args.results_dir)
+        validate_host_bytes(host_bytes)
+        traces = validate_phase_traces(args.results_dir)
+        if args.evidence_dir:
+            args.evidence_dir.mkdir(parents=True, exist_ok=True)
+            for report in reports:
+                shutil.copy2(report, args.evidence_dir / report.name)
+            for trace in traces:
+                if trace.resolve() != (args.evidence_dir / trace.name).resolve():
+                    shutil.copy2(trace, args.evidence_dir / trace.name)
+            if host_bytes.resolve() != (args.evidence_dir / HOST_BYTES_NAME).resolve():
+                shutil.copy2(host_bytes, args.evidence_dir / HOST_BYTES_NAME)
+    except GateFailure as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    print(f"PASS: {REQUIRED_CLASS}#{{{', '.join(sorted(REQUIRED_METHODS))}}} each executed exactly once")
+    print(f"PASS: {REGRESSION_CLASS}#{{{', '.join(sorted(REGRESSION_METHODS))}}} each executed exactly once")
+    print(f"PASS: the host received exactly the scripted IME bytes ({EXPECTED_IME_BYTES_HEX})")
+    print(f"PASS: #3039 phase traces kept and free of reconnects: {', '.join(PHASE_TRACE_NAMES)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

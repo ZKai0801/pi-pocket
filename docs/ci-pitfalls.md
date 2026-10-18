@@ -1,0 +1,758 @@
+# CI / Gate Pitfalls
+
+A catalogue of ways a build, test, or gate run can report success while
+proving nothing. Check this before citing any run as evidence in a status
+comment or review verdict. The unifying rule: "I could not check" must
+never read the same as "I checked and it is fine." An absent, truncated,
+cached, or killed result must never render as a passing one.
+
+Most entries are incident history from the 0.5.x Kotlin line. The `app2`,
+`:shared:*`, root Gradle, Roborazzi and `scripts/render.sh` files and tasks
+they name no longer exist on the 0.6.0 branch. The failure shapes still apply
+to the JS unit gate and the packaged-APK lanes.
+
+## Never run a repository program through an inferred interpreter
+
+Run `.sh` files with `bash`/`sh` and `.py` files directly — never guess the
+interpreter from the filename. `bash <a python program>` mis-executes it
+line by line, and a stray `import os` invokes ImageMagick's `import`, which
+blocks forever waiting on X: a process that stays "active" with a ~1-line
+log, zero test XML, and — if it holds a shared `flock` — every sibling lane
+starved with it. Machine-enforced by `scripts/check-script-interpreter-hygiene.sh`
+(required `Unit tests` check, no allowlist). A ~1-line gate log is not a
+slow run and not a failure — it's a run that never happened; discard it.
+
+## Zero-tests-executed is the most dangerous "green"
+
+A build can report `BUILD SUCCESSFUL` having run zero tests, in several
+disguises that each look confident:
+
+- Wrong task — running `:app:testDebugUnitTest` when the required CI check
+  is `test` (both variants, including `testReleaseUnitTest`).
+- `UP-TO-DATE` skip — Gradle skips a passing test task on re-run while a
+  failing one always re-executes, so a naive "run it N times" loop
+  manufactures a fake "flaked once, then healthy" streak. Use `--rerun-tasks`.
+- Killed process — a backgrounded run gets killed by the session harness
+  and reports exit 0 with zero XML files.
+- `FROM-CACHE` — with Gradle build caching on, a cache-restored test task
+  unpacks the previous run's XML with a fresh mtime and real counts. This
+  defeats both a count check and a freshness-by-mtime check at once. The
+  console line itself (`FROM-CACHE`) is the only defense — the XML alone
+  can't tell you it's stale.
+- Stale XML from a killed daemon — a sibling's `gradlew --stop` (or any
+  process-killing on a shared box) kills your daemon mid-run; the build
+  dies but the previous run's XML survives on disk with an old mtime.
+  `FROM-CACHE` and this defeat opposite checks — no single check catches
+  both.
+- Honest partial counts from a killed run — a run killed partway can still
+  write truthful XML for tests it reached before dying, with a nonzero exit
+  code that gives it away (e.g. 143). Fresh XML, real counts, and no cache
+  markers still isn't enough; you also need the exit code and confirmation
+  the specific load-bearing test is in the results.
+
+Trust only: the console line for the task (no `UP-TO-DATE`/`FROM-CACHE`/
+`NO-SOURCE` suffix), a test count you asserted yourself > 0, proof the XML
+is from this run, and the specific load-bearing test named in the results.
+Missing any of those four, you don't have a result — say so.
+
+## Mutation testing has its own vacuous-pass shape
+
+- A mutation that never landed reads exactly like "my tests are
+  inadequate." Before concluding a mutant survived, prove it's live: a
+  unique in-code anchor you can grep for at a known line, an md5 delta on
+  the file, and the red outcome itself. "Gradle re-executed the compile
+  task" is not liveness proof in either direction — that's a build-cache
+  signal, not an edit signal.
+- Build mutant roots with `cp -a` into `mktemp -d`, never symlinks — a
+  symlinked mutant root lets an in-place edit (e.g. a guard's own
+  `--self-test`) write through into the tree under review.
+- A killed mutation loop can leave the mutation in the tree. Restore from a
+  backup and verify the restore (diffstat/md5) before trusting any
+  subsequent "clean" result.
+- Per-run test artifacts get overwritten. A pull taken after a mutant run
+  shows the mutant's output, not the prior clean run's — delete the
+  artifact directory between runs or stamp/copy to a per-run path
+  immediately.
+- Keep mutation tooling and artifacts inside your own worktree, never a
+  shared scratchpad — a sibling process can overwrite your mutated (or
+  unmutated) copy mid-run.
+
+## Systemd transient units: three separate failure modes, not one
+
+Running a gate as a `systemd-run --user` transient unit is the right move
+on a shared box (a plain background shell gets killed mid-run by the
+session harness), but it introduces its own artifact-authenticity problem:
+
+- Minimal environment — `systemd-run --user` doesn't inherit your shell
+  env. Export `ANDROID_HOME`/`ANDROID_SDK_ROOT`/`HOME` explicitly plus a
+  `MemoryMax` cap, or it dies fast with an error that reads like a broken
+  tree rather than a missing variable.
+- A never-loaded unit reads identical to a passing one — `systemctl --user
+  show <unit> -p LoadState -p Result -p ExecMainStatus` on a unit that
+  never existed (typo, GC'd, never started) returns
+  `Result=success`/`ExecMainStatus=0`, same as a real pass. Check
+  `LoadState` first.
+- But a successful unit also gets garbage-collected, so
+  `LoadState=not-found` after the run means either outcome. Sample
+  `systemctl show` while the unit is still alive (inside your wait loop),
+  or better: have the unit write its own exit status to a file you read
+  afterwards, so the artifact comes from the run itself. Don't reach for
+  `RemainAfterExit=yes` as the fix — it keeps the unit `active (exited)`
+  forever, hanging a naive `until ! systemctl is-active` wait loop. Poll
+  `SubState=exited`, or use `systemd-run --user --wait`.
+
+## Piping a long-running process launders its exit code and output
+
+`long-running-cmd | tail` (or any pipeline) gives you the last stage's exit
+code, not the one you care about — `set -o pipefail` fixes the code but not
+the lost output, since `tail` also discards everything upstream. Have the
+process write its own log/verdict file and read the verdict from there; use
+`pipefail`/`${PIPESTATUS[0]}` only as a secondary guard. Same family:
+`gh run view --job N --log` silently truncates a large job's log — use the
+`gh api .../actions/jobs/<id>/logs` endpoint whenever you're asserting a
+test count, and treat a log ending on a progress percentage (not a summary
+line) as truncated.
+
+## A console stack trace pointing inside `runBlocking`/`runTest` names the wrong line
+
+Gradle's console failure line for an assertion inside a coroutine builder
+names the enclosing builder line, not the actual assertion. The true
+location is only in `build/test-results/**/TEST-*.xml`'s `<failure>` stack
+— read that, not the console. This compounds with the XML-overwrite hazard
+above: capture the XML before re-running a failed test task, since a
+passing re-run skips the task (stale XML persists) while a failing one
+always re-executes (destroying the evidence).
+
+#2628 is the worked example of what a console-derived signature costs. The
+D36 auto-filer read the console and got it wrong TWICE. The line: the body
+blamed the scan/service-startup window (`PortForwardIntegrationTest.kt:258`),
+but the recorded XML showed the scan passing its first poll and the real
+failure at a later assertion — a fire-and-forget `printf|nc -l` fixture that
+answered on connection-accept without reading the request. The mechanism:
+the body said the Docker-lane failure cancelled the app2 journey job through
+its job dependency, but the journey job has no `needs:` edge to any Docker
+lane, and the run's own job timeline shows it dying ~8.5 minutes later in a
+run-level cancellation of the whole `workflow_dispatch` run (#2706). Each
+wrong attribution sends implementers at a seam that isn't broken. For both
+the failing line AND the cancellation mechanism, the authoritative sources
+are the test-results XML and the run's job started/completed times — never
+the console stack, and never job-order correlation.
+
+## Test determinism (the `runTest` virtual-clock class)
+
+The recurring "passes locally, flakes on CI" JVM failure is one class: a
+`runTest` virtual clock drives code whose owned background work runs on a
+real dispatcher/Handler/Thread not pinned to the test scheduler, so
+`advanceUntilIdle()` returns before the real work finishes and CI
+contention loses the race.
+
+- Default fix: inject a `StandardTestDispatcher(testScheduler)` into every
+  owned scope of the code under test.
+- When the worker is genuinely wall-clock (Android Handler/Looper/Thread):
+  drive it with a hard-failing, generously-bounded pump — never hand-roll
+  one; use the shared `drainMainLooperUntil` helper in `:shared:test-support`
+  (`SettlePump.kt`). Its wall-clock deadline is `GENEROUS_SETTLE_DEADLINE_MS`
+  (30s) — don't nudge a local constant up to paper over box contention.
+- Banned: a single `advanceUntilIdle()` plus an assert on real-thread
+  output; a bare `Thread.sleep(N)` as the only sync before a load-bearing
+  assert. `scripts/check-test-validity.sh`'s `TIMING1` check flags the
+  smell and hard-fails a new bare sleep with no bounded loop.
+- Run any connect/lease/reconnect change ≥3× locally, and the full test
+  suite (not just the changed class) — a contended dev box often masks
+  determinism bugs a CI runner's idle state exposes.
+- For any change introducing randomness/timing/jitter, a single green run
+  isn't evidence: run N≥20 consecutive reps, or — better when the outcome
+  is monotonic in the varied quantity — pin both extremes and run once each.
+
+## Contended-box hazards when multiple agents share the machine
+
+- The Kotlin daemon OOMs under ~20G `MemoryMax`, and the failure looks like
+  a compiler bug (`BackendException: Exception during IR lowering`) with
+  the real cause buried in the last line (`Not enough memory to run
+  compilation`). Tells: zero tests executed, and the same tree compiles
+  fine with a larger cap. Use `-p MemoryMax=20G`+ for a full gate — still
+  capped, so a bad run can't starve sibling lanes.
+- Never hand-roll `./gradlew` in place of `scripts/full-jvm-gate.py` — the
+  canonical gate sets explicit `kotlin.daemon.jvmargs`/`org.gradle.jvmargs`
+  that the repo's `gradle.properties` doesn't set at all; an ad-hoc
+  invocation leaves the daemon on its default heap and OOMs regardless of
+  cgroup size.
+- Give every on-call/heavy agent its own worktree and log paths. Concurrent
+  writers sharing the root checkout or scratchpad have silently reverted
+  each other's in-flight edits, unlinked each other's log files mid-run,
+  and overwritten same-named scratch files. Working files live inside your
+  own worktree; evidence you cite in a verdict must be copied to a durable
+  per-agent path (e.g. `~/.cache/pocketshell/evidence/issue-<N>-<role>/`)
+  before you post, since the worktree is pruned on merge.
+- Prefer one on-call per merge train over one per push.
+- A `Process crashed`/signal-9 through the AVD-lock/connected-test wrapper
+  is now a real signal (the lock is machine-anchored, not per-worktree) —
+  capture the signature, don't just re-run it away.
+- **Elapsed time is not a property of the code alone.** Record the load
+  average at both ends of any timing measurement you intend to cite, and
+  state it in the verdict. A duration measured on a contended box is a
+  superimposition of two things — what the code did, and what the host had
+  left to give — and the two are not separable after the fact.
+
+  Worked example (#2549, 2026-09-06): a journey method parked for **961 s**
+  against a 15 s budget, with the emulator logging `app_time_stats
+  avg=60012.00ms` — a 60-second Choreographer frame. That was measured at
+  box load 47, while a sibling project's session recorded the same evening
+  peaking near 55 with six of its runs OOM-killed. Part defect, part
+  starvation, and the run alone cannot say how much of each.
+
+  Two consequences that pull in opposite directions, so hold both:
+  1. **It does not excuse the defect.** The bound has to fire regardless of
+     *why* a frame is slow; a starved host producing 60 s frames is exactly
+     the condition the bound exists to survive. "It was only slow because
+     the box was loaded" is not a defence for an unbounded wait.
+  2. **It does weaken the after-measurement.** A clean number at load 14 is
+     not comparable to a 961 s outlier at load 47 — those are effectively
+     different machines. Report "outlier absent under lighter load" when
+     that is what the evidence supports, not "outlier fixed".
+
+  The same shape appears without an emulator: a sibling project's agents saw
+  120 s `faulthandler` dumps mid-run the same evening and correctly
+  attributed them to CPU starvation rather than product hangs; the tests
+  passed on rerun. A timeout on a shared box is a hypothesis, not a verdict.
+
+## Shared-literal / default-flip regressions that no per-PR check catches
+
+Changing a shared string, content description, diagnostic event name, or a
+default that selects between two code paths can silently re-point a test's
+oracle: nothing fails to compile, the changed test's own assertions pass,
+and a pre-existing, unrelated journey on the same production path goes red
+only in the batched post-merge run, because its wait/gate depended on the
+literal or path you just changed. When you change a shared literal or a
+default, grep the whole test tree for the old value and for oracles that
+depended on the path you stopped taking, and say what you found.
+
+## Newly-registered journey tests haven't run on CI yet by definition
+
+A test that is both added and wired into `scripts/ci-app2-journey-suite.sh` in
+the same commit gets its first-ever CI execution only after merging —
+compiling it (`:app:compileDebugAndroidTestKotlin`) proves it links, not
+that it passes under swiftshader frame timing. Run any newly-registered
+journey class on a real emulator (`scripts/connected-test.sh --suffix
+i<issue>`) before merge.
+
+## A DERIVED failure signature recurs whenever its cause does
+
+Some gate signatures are computed from the run's own measurements, so they
+reappear for any upstream cause that moves those measurements — matching on
+the string re-files the wrong issue. The emulator gate's
+`insufficient_remaining_budget` is the worked example: it is a function of
+observed suite elapsed, so it recurs whenever the suite is long, whether that
+is per-shard overload (#1833/#1850, the matrix is the lever) or genuine
+journey failures each paying two full per-class attempts (#2374, the failing
+classes are the lever). Run 33181062826 was triaged as a recurrence of #1833
+on a byte-identical string while all six shards had in fact already written a
+`Failed BOTH attempts` summary; no budget constant had moved.
+
+Before treating a repeated signature as a repeated cause, check the
+discriminator the gate emits alongside it — for this one,
+`retry_denial_class` (`gate_capacity` vs `journey_failure_inflated_suite`) on
+the shard verdict token and in the aggregate's annotations. A signature with
+no discriminator is a defect in the gate's evidence, not a mystery.
+
+## A guard's own self-test fixtures read as real failures in a grep
+
+The counterpart to the section below, and the one that costs triage time
+rather than coverage. A guard that proves it can go red does so by running
+deliberately malformed fixtures, and those emit exactly the strings someone
+scanning a log greps for. Two independent instances in one evening
+(2026-09-06), both requiring an agent to stop and disambiguate:
+
+- `scripts/check-app2-lane-execution.py --self-test` emits
+  `red: files=1 tests=5 ... failures=1` and several `FAIL few/stale/multi`
+  lines under both app2 jobs, ending in `self-test: 10 checks PASSED`.
+- `scripts/check-executed-test-counts.sh`'s self-test emits a block of
+  `FAIL empty: ... FAIL few: ... FAIL multi:` inside an otherwise green
+  `core-transport` integration job whose real verdict is
+  `tests=23 executed=23 failures=0`.
+
+A naive `grep -E 'FAIL|failures=[1-9]'` over either log reports a failing
+run. Both are the guard working — the same discipline as a reviewer's
+mutation check, just built in and always on.
+
+So: never conclude "this run failed" from a grep for failure shapes alone.
+Find the job's own verdict line, and check whether a `self-test` /
+`PASSED` summary immediately follows the block you matched. When you cite a
+failure, cite the verdict line, not the first red-looking string in the log
+— and if you are writing a guard, put its self-test output behind a marker
+that a scan can exclude.
+
+## Untriggered guards: a self-test that runs nowhere proves nothing
+
+`scripts/test-*.sh` are ordinary scripts, not Gradle tests, so nothing runs
+one unless a workflow step names it. Two #2356 self-tests sat in the repo
+un-invoked by any job, and the one covering `ci-nightly-rc-mark.sh` also
+inherited the developer's ambient `~/.gitconfig` — so it never exercised the
+hosted-runner case where git has no tagger identity and `git tag -a` refuses.
+The result was a marker mechanism that had never worked and never could.
+Grep `.github/workflows/` for any self-test you rely on, and give a
+harness that depends on ambient machine state (git identity, `$HOME`, PATH
+tools, locale) an isolated environment plus a live-precondition assertion, or
+it will pass for a reason unrelated to the code.
+
+## An unterminated markdown-section scan silently annexes the next section
+
+Report parsers in the journey harness key on a header line and then read the
+`- ` bullets under it. Setting the "in section" flag on the header without ever
+CLEARING it makes the scan run to EOF, so every later section's bullets are
+read as if they were the first section's. `summary.md` keeps writing after
+`Failed BOTH attempts`: #2355's `Quarantined failures (non-blocking …)` and
+#2143's `Shared SSH/tmux fixture was WEDGED …` both follow it with bullets. An
+unterminated scan therefore reads a QUARANTINED (deliberately non-blocking)
+failure as a blocking one — re-coupling a classifier to exactly the section a
+previous issue decoupled it from, and doing it silently, because the wording
+that section avoids is the HEADER phrase, not the bullet syntax.
+
+Always clear the flag at the first non-bullet, non-blank line (`f && !/^- /
+&& NF { f = 0 }`), reduce each bullet to the identifier the consumer actually
+needs (an FQCN, not the bullet's trailing metadata), and build the fixture with
+the REAL summary writer rather than a hand-typed header — a handwritten header
+drifts out of sync with the producer and the guard then proves nothing.
+
+## A diagnostic stamp read as a verdict puts a failure heading on a GREEN run
+
+The inverse of a vacuous green: a run that passed but whose own artifact reads
+like it failed. Two individually-correct decisions compose into it. The
+emulator gate's classify step computes `SHARD_BUILD_ATTRIBUTION` *before* every
+`write_verdict` branch (so no branch can forget it), and
+The deleted journey lane's build-phase timeout helper deliberately read the *preserved
+attempt-1* tree (so a retry cannot hide what happened on the first attempt).
+Together they mean a shard cut mid-Gradle-build on attempt 1 whose retry then
+PASSED writes `CLEAN` + `build_attribution=cold_build_timeout`. An aggregate
+rollup keyed on the stamp alone then prints "investigate the build cost" into
+the step summary of a fully green run — the artifact a release owner reads
+before tagging `validated-rc`.
+
+Attempt-scoped evidence is not the run's outcome. Roll a diagnostic stamp up
+into a run-level notice only where it explains the FINAL verdict; leave it in
+the shard's own log otherwise, where it is still findable and cannot be
+mistaken for a cause. When adding such a branch, enumerate every
+`(verdict token x stamp value)` pair the producer can actually emit — including
+the recovered/CLEAN ones — and diff the notice count against the pre-change
+script for each; "the case I built it for changed and nothing else did" is a
+claim that needs the table, not an assumption.
+
+## One wall-clock sample against a hard bound is a coin flip, and hides a mode
+
+A timing assertion of the form "this run took N ms, N must be under BOUND" is
+only a measurement when the quantity has a light tail. Over a shaped/lossy link
+(or on a shared runner) the noise is STRICTLY ADDITIVE — TCP loss recovery with
+exponential backoff, CPU steal, a retry the code takes internally — so a sample
+is `structural cost + non-negative noise`, and one sample says almost nothing
+about the structure it claims to constrain. Issue #2422's chain measured 12 545 ms
+against a hard 12 000 ms bound on a scheduled run, then 6 496 ms on the very next
+measurement of the SAME commit, JVM, container and shaper.
+
+Two lessons, and the second matters more:
+
+- Judge such an assertion on the MINIMUM of N samples (the maximum-likelihood
+  estimate of a cost with one-sided noise), record the observed distribution next
+  to the constant, and add a mutation arm proving a genuinely slower run still
+  fails. A budget applied to the minimum can then be TIGHTER than the production
+  bound — strictly stronger than the single-sample form it replaces, not a
+  widened band.
+- Before re-baselining, check whether the outlier is a TAIL or a separate MODE.
+  #2422's was a mode: forcing the failing condition put the chain in a
+  15.2-17.0 s band with no overlap against the 5.9-8.5 s healthy band, because
+  one over-run exec made production evict a warm SSH lease and re-run the whole
+  chain on a fresh dial. "Flaky test, widen the bound" would have closed the
+  issue and kept shipping the defect. If the outlier band is disjoint from the
+  healthy band, you have a bug, not noise.
+
+See also [worktrees.md](worktrees.md) for merge-mechanics pitfalls and
+[review-standards.md](review-standards.md) for reviewer-side acceptance
+bars this catalogue feeds into.
+
+## A cheap fast push can cancel an expensive slow run and report green in its place
+
+A concurrency group that mixes cheap and expensive triggers turns any quick
+push into a silent cancellation of whatever heavy validation is in flight —
+and the replacement run reports `success` while proving strictly less.
+
+The 2026-09-06 shape: `.github/workflows/app2.yml` put `push` and
+`workflow_dispatch` in the SAME concurrency group with
+`cancel-in-progress: true` (only `schedule` had its own). The journey lane
+takes ~18 minutes. A docs-only push finishes in ~20 seconds with the journey
+lane correctly SKIPPED by lane selection — and reports `success`. Four
+commits landing ~90 seconds apart each killed the run validating an espresso
+3.5.0 → 3.6.1 bump, and each left a green in its place that said nothing
+about the journeys:
+
+```
+34058211101  1d95d26b3  CANCELLED at 9m47s, mid-journey
+34058728989  100e4bf2f  success — 20s, journey lane skipped
+34058966546  aade79892  success — journey lane skipped
+34059055948  316cfef90  success — journey lane skipped
+```
+
+It had already cost a real regression: #2595 merged with its own `Tests` run
+cancelled, shipping a broken fixture guard that turned
+`Integration tests (Docker)` red on `main` and kept it red across two
+commits.
+
+Two things make this hard to see. A cancelled run reads as "not failed"
+rather than failed, so it does not alarm anyone. And a run whose heavy lane
+was legitimately skipped is indistinguishable, from its conclusion alone,
+from a run that validated that lane — `success` means both.
+
+What to do:
+
+- Treat "did the lane actually run?" as a separate question from "was the run
+  green". Check the job list, not the conclusion. `schedule` having its own
+  group in `app2.yml:75-80` already makes this argument in a comment: a
+  cadence that silently does not run "would look green (cancelled, not
+  failed) while doing it."
+- The selection itself is now published to each `app2.yml` run's summary,
+  with a warning annotation whenever the journey lane is skipped (#2600) —
+  the run summary is the first thing an on-call reads, so a skip no longer
+  hides behind the conclusion. The summary is written by the run itself and
+  inherits its blind spots; it is where to look, not independent proof.
+- Do not push to `main` while a validation you care about is in flight,
+  including docs-only commits. When several agents share a repo, say so
+  explicitly and hold the window — the burst that caused this was two
+  sessions landing small commits neither could see the other queueing.
+- When a merge needs its own post-merge run to mean something, let that run
+  finish before pushing anything behind it.
+
+`app2.yml`'s specific grouping is fixed by #2600; the shape recurs anywhere a
+concurrency group spans triggers with different costs.
+
+## The cancelled-run vacuous green: a superseded push run was that commit's ONLY validation
+
+The sequel to the shape above, and worse: even when every run in the burst is
+a `main` push, cancellation does not just replace a validation — it DELETES
+one, and nothing after it ever re-does it.
+
+The mechanics: a push run's lane selector (`scripts/ci-app2-changed-modules.sh`
+for `app2.yml`, `scripts/ci-plan.sh` for `tests.yml`) diffs against
+`github.event.before` — the tree of the commit the push REPLACED. A tree diff
+against that commit shows only the NEW commit's changes, because the old
+commit's changes are already IN its tree. So when push B cancels run A and
+then selects lanes from its own diff:
+
+- run A (commit X's changes) died cancelled — X never validated;
+- run B (tools-only) selects no heavy lanes — correct for ITS diff, and
+  `success`;
+- X's changes are now permanently invisible to selection: every later run's
+  `before` tree contains them.
+
+Every run involved reads green. Nothing is red, nothing is cancelled-after-
+failure, and the lane's last execution predates a real app2 change that is on
+`main`. Observed as #2593: `2adafd86d` (#2587, app2 code) cancelled by
+`d09471e2b`'s tools-only push, zero journey execution, covered only by an
+unrelated later push that fail-opened all lanes.
+
+`success` on a lane-selected run answers "were the SELECTED lanes green", not
+"was this commit's diff validated". Those differ by exactly the selection
+decision — a run that validated nothing and a run that validated everything
+wear the same conclusion.
+
+What to do:
+
+- The mechanical fix (decision D40): `main` push runs never cancel and are
+  never cancelled (`cancel-in-progress` is PR-only in `app2.yml` and
+  `tests.yml`). Every push run completes and validates exactly its own diff;
+  a queued run is a delayed validation, never a lost one. The procedural
+  mitigations above ("hold the window", "let that run finish") are what a
+  solo maintainer does while the mechanism is still cancellable — they are
+  habits, not guarantees, and two agents sharing the repo break them.
+- Sequel (2026-09-16, #2736): `cancel-in-progress: false` never protected
+  QUEUED runs. GitHub's default collapses a concurrency group's pending
+  (never-started) run when a newer run joins the group — event-independent,
+  even with cancelling off. Five `app2` push/dispatch runs on `main` died
+  `cancelled` with `"jobs":[]` in one morning this way. Where the D40
+  promise matters, pin `queue: max` (FIFO, up to 100 pending runs, nothing
+  cancelled; PR heads then queue serially — accepted trade). Note that
+  `queue` and `cancel-in-progress: true` are mutually exclusive — GitHub
+  rejects the workflow. `scripts/check-nightly-workflow.sh` guards the pin
+  for both heavy workflows: `app2.yml` via check 7, `tests.yml` via the
+  #2739 concurrency check (its latent shape was closed the same day).
+- When reading history, never reconstruct "was change X validated?" from run
+  conclusions alone. Find the newest run where X's lane JOB executed
+  (`gh run view --json jobs`), and check its head SHA is at or before X...
+  anything else can read a selection-skip as coverage.
+- If lane selection ever grows a non-git base (an Actions-API "last executed"
+  walk), re-audit this entry: the pure-git/fail-open selector is what kept
+  the failure mode a concurrency problem instead of also an API-dependency
+  problem.
+
+## A wedged DEVICE reads as N identical product failures (app2-journey)
+
+`app2-journey` run 35435668085 went red twice on the SAME tree (`9424a3900`),
+5 failures over 2 classes and then 17 over 8 — a failure count that GREW on a
+rerun of an unchanged commit, which no commit-bound defect can do. 14 of the
+17 carried one byte-identical message, `awaitWindowFocus`'s `the window never
+took focus … the focus-settle signal stayed false`, and none of them had
+reached a product assertion. The cause was one line in the logcat ARTIFACT:
+
+```
+E ActivityManager: ANR in com.google.android.apps.nexuslauncher (…/.NexusLauncherActivity)
+E ActivityManager: Reason: Input dispatching timed out (Application does not have a focused window).
+E ActivityManager: Load: 10.52 / 2.4 / 0.79
+E ActivityManager: some avg10=77.71 avg60=30.47 avg300=7.60
+```
+
+A CPU-starved runner, the emulator's own LAUNCHER ANR'd, and a window manager
+left with no focused window at all. Every window-sensitive journey then failed
+its precondition, in the vocabulary of a product defect, once per class.
+
+`hasWindowFocus() == false` cannot be the discriminator — it is false whether
+the device granted focus to nobody or this screen merely did not get it. The
+window manager's own `mCurrentFocus` is: `null` everywhere is the environment;
+a named window (even the launcher's) is a product-shaped answer, deliberately,
+because `J06BackgroundGraceReturnJourney` backgrounds the app on purpose and
+"the launcher holds focus" is exactly what its own bug would leave behind.
+
+Since issue #2830 the harness asks that question at the timeout
+(`app2/src/androidTest/.../connect/DeviceFocus.kt`), fails the first waiter
+with `INFRA: device window-focus outage` — one grep-able signature, a distinct
+`DeviceWindowFocusOutageException` type — and SKIPS every later waiter against
+that one report while the device is still wedged, so a lane collapse is one
+line instead of fourteen. `scripts/ci-app2-journey-suite.sh
+--report-primary-cause` puts the same finding at the top of the job summary.
+
+Two things to expect when reading such a run:
+
+- The execution guard (`check-app2-lane-execution.py --min 26`) also reddens —
+  but on `failures>0`, NOT on the executed-count floor. The first waiter's
+  outage failure is in the result XML, and the guard reds any run whose XML
+  reports failures or errors. Do not go looking for an "executed N < 26"
+  line: the skips do not come close to breaching that floor. A realistic
+  wedged shape `tests=96 skipped=34 failures=0` gives `executed=62 ≥ 26`,
+  rc=0; you would need 71 of 96 skipped before the count itself failed. The
+  same XML with `failures=1` gives rc=1, `result XML reports failures=1
+  errors=0`. Either way the guard is SECONDARY: the primary-cause block is
+  written before it, by the earlier step.
+- The verdict is retryable by construction, but it is not a licence to rerun
+  blind — a device that wedges on every attempt is a lane capacity problem
+  (see the contended-box section above), not a flake.
+
+### …and the real ANR wears a focused window (issue #2838)
+
+Run 35462083590 was the first REAL launcher ANR after #2830 landed, and all
+three pieces of that instrumentation underperformed at once — `tests=96
+skipped=5 executed=91 failures=19` across 12 classes, with **zero** outage
+skips (the 5 skips are the standing D36 quarantine a HEALTHY run also
+reports), `--report-primary-cause` printing `no device-wedge evidence …
+nothing to report`, and `DeviceFocusOutageReproTest` itself contributing two
+of the 19. One mis-classification caused all three:
+
+```
+mCurrentFocus=Window{a491573 u0 Application Not Responding: com.google.android.apps.nexuslauncher}
+```
+
+The launcher ANR'd and the platform put up its "isn't responding" dialog — and
+that dialog **is a focused window**. `mCurrentFocus` was not null, #2830's
+`verdict == NO_FOCUSED_WINDOW` test said "product", so nothing was recorded,
+nobody skipped, and `INFRA: device window-focus outage` appeared in no
+artifact for the triage step to find (`grep -c` over the run's 16 MB
+`logcat.txt` and its `gradle.log`: zero). The failures did name the dialog,
+19 times, in the vocabulary of a product defect.
+
+Two facts from that run's own artifacts, both load-bearing:
+
+- **The dialog is durable, the banner is not.** Two dialogs (`a491573`, then
+  `ec8e38c`) held focus across 25 minutes and 12 classes — nothing in an
+  unattended instrumentation run dismisses an ANR dialog. That same
+  `logcat.txt` carried **zero** `ANR in ` lines: the launcher ANR'd during the
+  install/boot churn, *before* the suite's own `adb logcat -c` destroyed the
+  evidence. So "no ANR banner in the log" is not evidence of a healthy device,
+  and a wedge detector that needs the banner will miss the common case.
+- **Whose ANR it is decides the verdict.** A dialog for the LAUNCHER (or any
+  package that is not the app under test) is the environment. A dialog naming
+  the app under test means OUR app stopped responding — a product defect this
+  lane exists to catch, and calling it infra would launder it into a rerun.
+  `DeviceFocusState.appUnderTest` is what keeps the two apart.
+
+Since #2838 the classifier has a second outage verdict
+(`ANR_DIALOG_HOLDS_FOCUS`) and callers ask `DeviceFocusState.isOutage` rather
+than comparing against one enum constant — #2830 shipped two hand-written
+`verdict == NO_FOCUSED_WINDOW` comparisons, and growing the classifier had to
+find both. `scripts/ci-app2-journey-suite.sh` now snapshots the pre-existing
+ANR evidence *before* `logcat -c`
+(`artifacts/app2-journey/logcat-pre-suite.txt`), counts the dialog title as
+wedge evidence in its own right, and scans `logcat.txt` for the marker —
+`DeviceFocusOutage.record` echoes the report (with its pid, so "did the record
+carry across classes?" is answerable from the artifacts) under the
+`DeviceFocusOutage` tag.
+
+A third of run 35462083590's failures were not `awaitWindowFocus` calls at
+all, and fixing the classifier alone would not have moved them: they are
+classes whose OWN preconditions presume a device where focus is obtainable —
+`assertTrue(view.hasWindowFocus())` as a fixture check, or an assertion on the
+TEXT of a product-shaped focus failure. Those oracles are not wrong about the
+product; they are inapplicable. `assumeNoRecordedDeviceFocusOutage(<what>)` is
+the `@Before` for them: it stands the class aside against a report that
+ALREADY exists and never creates one, so the first discovery stays a failure
+and the run cannot end green-with-skips. A `runCatching` around a focus oracle
+must hand `DeviceWindowFocusOutageException` and `AssumptionViolatedException`
+straight back for the same reason.
+
+Reading a future wedged run: the primary-cause block should name the dialog
+even with no banner, the XML should carry ONE
+`DeviceWindowFocusOutageException` and many skips rather than N identical
+assertion errors, and `logcat.txt` should hold exactly one
+`E DeviceFocusOutage:` line. Any of those missing is a regression in this
+chain, not a new wedge class.
+
+Measured on a live `com.android.systemui` ANR during #2838's own validation
+(emulator-5554, same three classes, same tree but for the classifier branch):
+**11 failures / 0 skips** with the branch deleted — the 35462083590 shape,
+including its two verbatim signatures `expected:<NO_FOCUSED_WINDOW> but
+was:<FOCUSED_ELSEWHERE>` and `expected:<DeviceWindowFocusOutageException> but
+was:<java.lang.AssertionError>` — against **1 failure / 8 skips** with it, the
+one failure being the diagnosis itself.
+
+## A wedged RENDER reads as a coroutine failure in an unrelated test class
+
+`:shared:ui-kit:recordRoborazziDebug` was red on clean `main` (#2834) with a
+signature that names nothing involved in the defect:
+
+```
+QuietThemeTokenTest > quietShapeTokensMatchTheDesignKit FAILED
+    kotlinx.coroutines.test.UncaughtExceptionsBeforeTest at TestScope.kt:242
+```
+
+`QuietThemeTokenTest` is innocent, and so are its token assertions.
+`UncaughtExceptionsBeforeTest` means kotlinx-coroutines-test's process-wide
+collector was ALREADY holding a report when this class opened its `TestScope`
+(it owns a `createComposeRule`), so the next scope in the worker inherits
+whatever leaked earlier. The cause appears only in
+`build/test-results/**/TEST-*.xml`, as a *suppressed* throwable — here
+`java.lang.OutOfMemoryError: Java heap space`, thrown inside a Compose
+window-recomposer coroutine several test classes back.
+
+The chain, which no single artifact shows end to end:
+
+1. `DesignRenders.sessionSurfaceReconnectAffordance` rendered the LIVE
+   `LoadingIndicator.Spinner`. An M3 indeterminate indicator reposts a frame
+   from every frame callback.
+2. The bare `captureRoboImage(path) { … }` harness composes under the
+   PRODUCTION choreographer frame clock, so those reposts never stop.
+3. Roborazzi idles Robolectric's paused looper to quiescence before it captures
+   (`captureScreenIfMultipleWindows` -> `ShadowPausedLooper.idle`). Quiescence
+   never arrives. A `jcmd Thread.print` on the worker showed one `SDK 26 Main
+   Thread` at ~100% CPU — 1519 s of CPU in 1527 s of wall clock — parked in
+   that drain, inside `DesignRenders.render`.
+4. The spin allocates, so the heap fills, and the `OutOfMemoryError` lands in a
+   coroutine rather than on the test thread — collected, not reported.
+5. The next `TestScope` re-throws it under its own name.
+
+Four things worth carrying forward:
+
+- **Read the XML's suppressed throwables before believing the console.** Same
+  rule as the `runTest` stack-trace section above, with a nastier variant: the
+  cause is not merely on a different line, it is in a different test class, and
+  the console never mentions it.
+- **Raising the heap makes this WORSE, not better.** On the 512m Gradle default
+  the OOM arrives fast and breaks the spin, so the suite finishes (195 tests,
+  9m55s) carrying one misattributed failure. Raising the worker to 2g was tried
+  during #2834: the same run reached 30 of 81 renders in 25 minutes before it
+  was killed, with a ~966 MB live set and two cores in G1. A bigger heap buys a
+  longer spin. A change that makes a wedge quieter rather than shorter is not a
+  fix.
+- **"Green in the unit lane, red only in record mode" is a mode difference, not
+  a flake.** Outside record mode `captureRoboImage` is a no-op, so an ordinary
+  unit run never composes a render — which is exactly why the very same class
+  was green in the hosted unit shards.
+- **Fixing the module in front of you does not fix the class.** #2733 hit this
+  wedge in `:app2` and fixed it structurally: capture from inside the compose
+  test rule, whose recomposer runs on a test-driven frame clock no animation
+  can outrun. Nothing carried that harness across to `:shared:ui-kit`, which
+  kept a hand-listed static-painter convention (#1772) covering two named
+  fixtures — and #2834 was a third fixture that list never mentioned. ui-kit
+  now captures through its own `captureFrozenRender`, and both modules have a
+  `RenderHarnessPolicyTest` that reds if a render class reaches the bare
+  harness again.
+
+Two traps specific to writing such a harness, both hit while fixing #2834:
+
+- A capture scoped to `onRoot()` silently drops Compose `Dialog`/`Popup`
+  windows. `confirm-dialog-destructive.png` and `form-dialog.png` came back as
+  two byte-identical empty frames. ui-kit's helper uses
+  `captureScreenRoboImage`, which composites every Robolectric window root.
+- A clock frozen at t=0 captures an overlay that animates IN before it has
+  arrived — same empty PNG, different cause. The helper pumps a fixed, bounded
+  amount of virtual time (`SETTLE_MILLIS`) so entry animations settle while an
+  infinite one lands on a reproducible phase. A render harness that quietly
+  renders nothing is worse than one that wedges: the wedge announces itself.
+
+No CI job runs `recordRoborazziDebug`, so none of this reddened a lane. It was
+paid entirely by people running `scripts/render.sh` locally and routing around
+it.
+
+## `var | grep -q` under `pipefail` fails a PASSING suite once the var passes 64 KiB
+
+Scheduled REV run 35461332171 red on the `connected-app-walkthrough-app2-instrumented-suite`
+step with
+
+```
+Instrumentation failure reason: the app2 instrumented suite did not report an
+'OK (N tests)' summary with N >= 1
+```
+
+against an artifact whose line 1385 reads `OK (91 tests)` — 96 tests, 5 D36 quarantine
+skips, **zero failures**. The suite passed. The gate rejected it.
+
+The guard was
+
+```bash
+if ! printf '%s\n' "$output" | grep -Eq '^OK \([1-9][0-9]* tests?\)'; then
+```
+
+inside a step whose first line is `set -euo pipefail`. Three facts combine:
+
+1. A pipe holds **64 KiB**. The unfiltered app2 suite's `$output` is 67,708 bytes, so
+   `printf` cannot hand grep the whole thing in one write — it blocks mid-stream.
+2. `grep -q` exits **the instant it matches**. The match is near the end, so grep leaves
+   while `printf` still has bytes queued; the writer can no longer finish, so the
+   pipeline's status becomes **nonzero** — `printf` dies of SIGPIPE (status **141**) on
+   some machines, while elsewhere (ubuntu-latest runners, observed in issue #2841) the
+   shell's printf reports the broken-pipe write error and the status is **1**. Which one
+   you get is an environment property (shell/grep build, SIGPIPE disposition,
+   scheduling), not a code property; only the nonzero-ness is the defect.
+3. `pipefail` promotes that nonzero writer status to the pipeline's status, and the
+   leading `!` turns "grep matched" into **"the guard failed."**
+
+So the failure rate is a function of *output size*, not of anything the tests did — every
+test added to the suite makes it likelier. It is a race, so any rate you measure is a
+sample, not a constant. On a fixture of the run's own shape, two independent measurements
+of the same pre-fix bytes gave **13 and 10 false failures per 60 end-to-end step runs**,
+and **0 in 60** after the fix both times. In isolation the same pipeline non-matched
+**43/200** and **36/200** times with `pipefail` on, and **0/400** with it off — same bytes,
+same regex. On the run's real captured artifact the on-call measured **2/200**: where the
+match happens to land relative to a 64 KiB boundary moves the odds by an order of
+magnitude, which is why this reached production as an occasional red rather than a hard
+failure.
+
+**The fix is to take the variable off the pipe: `grep -Eq '…' <<<"$output"`.** A here-string
+is a file the shell hands grep; there is no second process to signal, so an early exit
+cannot poison the status. All eleven quiet greps over a variable in
+`scripts/pre-release-confidence-gate.sh` now use that shape.
+
+Three things to carry forward:
+
+- **The `-q` is the trigger, not the `grep`.** The same step's
+  `grep -E '^OK \([0-9]+ tests?\)'` that *echoes* the summary reads to EOF and never raced.
+  Do not "fix" a loud grep; do not make a loud grep quiet.
+- **A hand-kept list of sites is how this survives.** The first triage tabulated seven
+  racing sites and missed an eighth, `instrumentation_has_gl_compose_failure_signature`,
+  purely because it was split across two lines. `scripts/check-gate-pipe-buffer-race.sh`
+  scans instead, so a new site cannot be added without reddening `guards-static`; it then
+  runs the gate's own emitted step both ways and requires the pre-fix twin to reject a
+  passing suite, so the check is provably able to see the defect.
+- **Assert the twin's failure as a property, never as a magic exit status.** The first
+  land of the guard hardcoded the counter-arm as "the reverted twin exits **141**"; true
+  30/30 on the dev box, but ubuntu-latest runners return **1**, so the guard's own PASS
+  path reds'd every CI run for an environment detail (issue #2841) — the exact class of
+  lie this file catalogues. The reland derives the twin's actual rc once at guard start
+  and asserts only the environment-independent property: the fixed form succeeds where
+  the twin form fails on identical bytes, whatever the twin's nonzero status is.
+- **The same shape is a latent bug anywhere `set -o pipefail` is on**, which in this repo
+  is nearly everywhere. Any early-exiting reader behind a pipe — `| head`, `| grep -m1`,
+  `| sed -n 1p` — races identically once the writer outgrows one pipe buffer.

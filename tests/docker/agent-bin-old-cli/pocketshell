@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+# Issue #847 / #849: deterministic fixture for a host whose `pocketshell` CLI is
+# OLDER than (or mismatched with) the Android client — it predates the
+# new-in-0.4.10 `tree` and `agents kind` subcommands.
+#
+# This is the MISSING fixture that let the v0.4.10 connect-hang ship: the
+# normal `agents` fixture always carries the matching 0.4.10 CLI, so the
+# old-CLI / command-missing path on the cold-start tree HYDRATE was never
+# exercised in review (#837 gate gap). On a real old host, `pocketshell tree
+# get` (the cold-start hydrate read added in #837) errors with Click's
+#   `Error: No such command 'tree'.`
+# and exits non-zero — and the v0.4.10 client hung on "loading tree" instead
+# of degrading to the live tree.
+#
+# ## Connect-path RPC failure modes (issue #849)
+#
+# #849 generalizes the fixture to reproduce the WHOLE connect-path failure
+# class, not just unknown-command. The mode governs HOW the new connect-path
+# RPCs (`tree`, `agents kind`, and — in hang/slow modes — `profiles`) fail.
+# The mode is resolved at exec time (sshd does not preserve a container `ENV`,
+# so the version/mode are read from files baked at build time, with an optional
+# `OLD_CLI_MODE` env override for direct local probes):
+#
+#   * unknown  — (DEFAULT) `tree` / `agents kind` are rejected the way an older
+#                Click CLI rejects an unknown subcommand (stderr `No such
+#                command` + exit 2). `profiles` still delegates to the real
+#                fixture so the rest of the connect/probe path behaves like a
+#                current host. This is the v0.4.10 connect-hang trigger and the
+#                default the existing #847 tests rely on.
+#   * hang     — the connect-path RPCs (`tree`, `agents`, `profiles`) produce
+#                NO output and never return within the connect window (sleep
+#                past any reasonable client timeout), modelling a wedged host
+#                where the subcommand exists but emits nothing — an un-bounded
+#                client hangs on "loading tree".
+#   * slow     — the connect-path RPCs eventually reject (unknown-command), but
+#                only after a delay, modelling a slow-responding host where a
+#                too-tight client timeout would falsely surface a connect
+#                failure.
+#
+# Every OTHER subcommand (usage / sessions / agent-log / agent, and
+# `profiles` in `unknown` mode) delegates byte-for-byte to the REAL fixture stub
+# so the rest of the connect / probe path behaves identically to a current host.
+
+real_fixture="${POCKETSHELL_REAL_FIXTURE:-/usr/local/bin/pocketshell-real}"
+mode_file="/opt/pocketshell-old-cli-mode"
+
+# Resolve the connect-path failure mode: explicit env override (local probes)
+# > build-baked mode file > default `unknown`.
+if [ -n "${OLD_CLI_MODE:-}" ]; then
+  old_cli_mode="$OLD_CLI_MODE"
+elif [ -f "$mode_file" ]; then
+  old_cli_mode="$(cat "$mode_file" 2>/dev/null || echo unknown)"
+else
+  old_cli_mode="unknown"
+fi
+
+# How long the hang mode blocks before (never) returning, and how long the slow
+# mode waits before rejecting. Both are bounded so a container teardown is never
+# stuck, but well past any reasonable connect timeout the client applies.
+HANG_SECS="${OLD_CLI_HANG_SECS:-120}"
+SLOW_SECS="${OLD_CLI_SLOW_SECS:-12}"
+
+reject_unknown() {
+  # Click's exact shape for an unknown top-level command (stderr + exit 2).
+  printf "Error: No such command '%s'.\n" "$1" >&2
+  exit 2
+}
+
+# Apply the configured failure mode to a connect-path RPC named $1.
+fail_connect_rpc() {
+  rpc_name="$1"
+  case "$old_cli_mode" in
+    hang)
+      # No output, never returns within the window.
+      sleep "$HANG_SECS"
+      exit 0
+      ;;
+    slow)
+      sleep "$SLOW_SECS"
+      reject_unknown "$rpc_name"
+      ;;
+    *)
+      # unknown (default): immediate Click rejection.
+      reject_unknown "$rpc_name"
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  tree)
+    # New in 0.4.10 — absent on this old CLI.
+    fail_connect_rpc tree
+    ;;
+  agents)
+    # `agents kind` is new in 0.4.10 (#827). An old CLI has no `agents` group.
+    fail_connect_rpc agents
+    ;;
+  send)
+    # Issue #2124 (G10 unhappy fixture): the acknowledged outbound send is new
+    # in #2122, so an OLD host CLI has no `send` command at all. This is the
+    # runtime-lockstep case the client must fail CLOSED on — a plain retryable
+    # `Failed` naming the host-CLI upgrade, never a hang and never a new
+    # "unknown" row state. A happy fixture cannot enter this state, which is
+    # exactly why G10 requires the fixture that can.
+    #
+    # Deliberately NOT routed through fail_connect_rpc: `send` is not a
+    # connect-path RPC, and the hang/slow modes exist to model the connect
+    # break. Click's exact unknown-command shape (stderr + exit 2) is what a
+    # real old CLI produces here.
+    reject_unknown send
+    ;;
+  profiles)
+    # `profiles` exists on the old CLI, so in the default `unknown` mode it
+    # delegates normally (the connect/probe path must still work). Only the
+    # hang/slow modes make it a connect-path fault — modelling a wedged or
+    # slow-responding host on a real connect-path RPC that DOES exist.
+    case "$old_cli_mode" in
+      hang|slow) fail_connect_rpc profiles ;;
+    esac
+    ;;
+esac
+
+# Everything else behaves exactly like the current fixture.
+exec "$real_fixture" "$@"

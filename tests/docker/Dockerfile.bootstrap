@@ -1,0 +1,31 @@
+FROM alpine:latest
+
+ARG SCENARIO=ready
+ARG INSTALL_FISH=false
+ARG LOGIN_SHELL=/bin/sh
+ENV POCKETSHELL_BOOTSTRAP_SCENARIO=${SCENARIO}
+
+RUN packages="openssh-server openssh-client procps python3" \
+    && if [ "$INSTALL_FISH" = "true" ]; then packages="$packages fish"; fi \
+    && apk add --no-cache $packages \
+    && ssh-keygen -A \
+    && adduser -D -s "$LOGIN_SHELL" testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+COPY sshd_config /etc/ssh/sshd_config
+COPY test_key.pub /home/testuser/.ssh/authorized_keys
+# Issue #150: see Dockerfile.ssh — same rationale for the in-container
+# compose healthcheck. The private key is a committed test fixture.
+COPY test_key /root/test_key
+COPY bootstrap-bin/ /opt/pocketshell-bootstrap-bin/
+COPY bootstrap-entrypoint.sh /usr/local/bin/pocketshell-bootstrap-entrypoint
+
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
+    && chmod +x /opt/pocketshell-bootstrap-bin/* /usr/local/bin/pocketshell-bootstrap-entrypoint \
+    && chown -R testuser:testuser /home/testuser/.ssh
+
+EXPOSE 22
+
+CMD ["/usr/local/bin/pocketshell-bootstrap-entrypoint"]

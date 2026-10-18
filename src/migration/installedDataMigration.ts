@@ -1,0 +1,967 @@
+import { Capacitor } from '@capacitor/core';
+import { reactive } from 'vue';
+import { parseBackgroundGraceMs, parseSubmitEnterDelayMs, parseUsageWarnPercent } from '@pocketshell/core';
+import { normalizeVoiceLanguage, normalizeVoiceSilenceSeconds } from '../stores/appSettings';
+import {
+  installedDataMigrationNative,
+  type NativeAssetChunk,
+  type NativeInstalledDataMigrationPlugin,
+  type NativeLegacyAsset,
+  type NativeLegacySnapshot,
+} from '../native/installedDataMigration';
+import {
+  parseSshKeyMetadata,
+  sshKeyVault,
+  type NativeSshKeyVaultPlugin,
+  type SshKeyMetadata,
+} from '../native/sshKeyVault';
+
+export const SETTINGS_STORAGE_KEY = 'pocketshell.js.settings.v1';
+/** The shared app's settings store (core packages/ui `stores/settings.ts`). */
+export const SHARED_SETTINGS_STORAGE_KEY = 'pocketshell.settings.v1';
+export const IMPORT_DATABASE_NAME = 'pocketshell-installed-data-v1';
+export const IMPORT_RECORD_ID = 'legacy-import-v1';
+export const IMPORT_STATUS_KEY = 'records';
+export const IMPORT_ASSET_STORE = 'assets';
+export const SETTINGS_RELOAD_SESSION_KEY = 'pocketshell.installed-data-settings-reload.v1';
+export const MAX_ASSET_CHUNK_BYTES = 32 * 1024;
+const SUPPORTED_APPLICATION_ID = /^com\.pocketshell\.app(?:\.[A-Za-z0-9_]+)*$/;
+
+const ROOM_IDENTITY_HASHES: Readonly<Record<number, string>> = {
+  16: 'afc67c7758ec9cfe23ecb21326abe06d',
+  17: '274c6967510073a57e89482cbfd30958',
+  18: '05f1073ebb70b0b41033a4e4bbe22082',
+  19: 'de42603f8ceee22afa2a074bcc9be30e',
+  20: 'be97992383b7a66363efbe2cbb142d0b',
+  21: '08d40b0e3508acf5ffa4f2378d79325e',
+  22: '998a588a2d2f383454698ea11820fca9',
+};
+
+export interface StringStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+export interface ImportedAsset {
+  assetId: string;
+  category: string;
+  relativePath: string;
+  byteLength: number;
+  sha256: string;
+  content: Blob;
+}
+
+export interface ImportRecord {
+  id: typeof IMPORT_RECORD_ID;
+  status: 'staged' | 'complete' | 'partial' | 'empty';
+  importedAt: number;
+  snapshot: NativeLegacySnapshot;
+  warnings: string[];
+  /** Legacy database key id to opaque Android vault id; null means unavailable or detached. */
+  credentialHandles?: Record<string, string | null>;
+  /** Legacy key IDs explicitly removed by the user; startup repair must not resurrect them. */
+  credentialHandleTombstones?: number[];
+}
+
+export interface ImportPersistence {
+  readRecord(): Promise<ImportRecord | undefined>;
+  stage(record: ImportRecord, assets: ImportedAsset[]): Promise<void>;
+  updateRecord(record: ImportRecord): Promise<void>;
+  compareAndSetCredentialHandles(
+    expected: Record<string, string | null>,
+    next: Record<string, string | null>,
+    /** Optional second CAS value used when user deletion must persist a tombstone atomically. */
+    tombstones?: { expected: number[]; next: number[] },
+  ): Promise<boolean>;
+  markComplete(status?: 'complete' | 'partial'): Promise<void>;
+}
+
+export interface MigrationDependencies {
+  native: NativeInstalledDataMigrationPlugin;
+  keyVault: NativeSshKeyVaultPlugin;
+  persistence: ImportPersistence;
+  storage: StringStorage;
+  nativePlatform: boolean;
+  now: () => number;
+  pixelRatio: () => number;
+  refreshPartial?: boolean;
+  /**
+   * Decides whether written settings need the one-time page reload. Only a shell
+   * that actually reloads (the legacy App.vue) opts in; the default never does.
+   */
+  requestSettingsReload: (settingsWritten: boolean) => boolean;
+}
+
+export interface ImportedLegacyHost {
+  id: number;
+  name: string;
+  hostname: string;
+  port: number;
+  username: string;
+  keyId: number;
+  keyName: string;
+  keyHasPassphrase: boolean;
+  keySha256: string;
+  keyHandleId: string | null;
+}
+
+export const installedDataMigrationState = reactive({
+  status: 'pending' as 'pending' | 'complete' | 'partial' | 'failed',
+  error: '',
+  retrying: false,
+  // True when this run wrote imported settings and the page must reload once to
+  // apply them. It is decided in the same synchronous step that publishes the
+  // settled status, so the soon-discarded document never presents a settled
+  // migration the user (or a journey) could act on (issue #3005).
+  reloadPending: false,
+});
+
+export class InstalledDataMigrationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InstalledDataMigrationError';
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function typedEntry(
+  snapshot: NativeLegacySnapshot,
+  storeName: string,
+  key: string,
+  expectedType: string,
+): unknown | undefined {
+  const store = snapshot.preferences[storeName];
+  const entry = store?.entries?.[key];
+  if (!entry) return undefined;
+  if (entry.type !== expectedType) {
+    throw new InstalledDataMigrationError(`Legacy preference ${storeName}.${key} has an unexpected value type.`);
+  }
+  return entry.value;
+}
+
+function decodeEscapedField(value: string): string {
+  let output = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== '\\') {
+      output += character;
+      continue;
+    }
+    const escape = value[index + 1];
+    if (escape === undefined) throw new InstalledDataMigrationError('A saved draft attachment ends with an incomplete escape.');
+    if (escape === '\\') output += '\\';
+    else if (escape === 't') output += '\t';
+    else if (escape === 'n') output += '\n';
+    else throw new InstalledDataMigrationError('A saved draft attachment contains an unknown escape.');
+    index += 1;
+  }
+  return output;
+}
+
+export function validateLegacyPreferences(snapshot: NativeLegacySnapshot): void {
+  const composer = snapshot.preferences.composer_drafts?.entries ?? {};
+  for (const [key, entry] of Object.entries(composer)) {
+    if (key.startsWith('@migrated/')) {
+      if (entry.type !== 'boolean' || typeof entry.value !== 'boolean') {
+        throw new InstalledDataMigrationError('A saved draft migration marker has an unexpected type.');
+      }
+      continue;
+    }
+    if (entry.type !== 'string' || typeof entry.value !== 'string') {
+      throw new InstalledDataMigrationError('A saved composer draft has an unexpected value type.');
+    }
+    if (!key.startsWith('@att/')) continue;
+    if (entry.value.length === 0) continue;
+    for (const row of entry.value.split('\n')) {
+      const fields = row.split('\t');
+      if (fields.length !== 3) {
+        throw new InstalledDataMigrationError('A saved draft attachment row is malformed.');
+      }
+      const [path] = fields.map(decodeEscapedField);
+      if (!path) throw new InstalledDataMigrationError('A saved draft attachment has no path.');
+    }
+  }
+
+  const rawSelection = typedEntry(snapshot, 'next_sync_selection', 'sync_selected_hosts', 'string');
+  if (rawSelection !== undefined) {
+    if (typeof rawSelection !== 'string') {
+      throw new InstalledDataMigrationError('The selected-host sync preference is not text.');
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(rawSelection) as unknown;
+    } catch {
+      throw new InstalledDataMigrationError('The saved list of hosts to sync could not be read.');
+    }
+    if (!Array.isArray(decoded) || decoded.some((alias) => typeof alias !== 'string')) {
+      throw new InstalledDataMigrationError('The selected-host sync preference must be an ordered list of aliases.');
+    }
+  }
+
+  const settingTypes: Record<string, string> = {
+    terminal_text_size_px: 'int',
+    voice_language: 'string',
+    voice_silence_seconds: 'float',
+    usage_warn_threshold_percent: 'int',
+    background_grace_millis: 'long',
+    agent_submit_enter_delay_ms: 'int',
+    default_host_id: 'long',
+    last_workspace_path: 'string',
+    last_session_id: 'string',
+    show_common_keys: 'boolean',
+    reconnect_when_return: 'boolean',
+  };
+  for (const [key, expectedType] of Object.entries(settingTypes)) {
+    typedEntry(snapshot, 'next_settings', key, expectedType);
+  }
+  typedEntry(snapshot, 'app_settings', 'voice_silence_seconds', 'float');
+
+  const workspaceOrder = snapshot.preferences.workspace_order?.entries ?? {};
+  for (const [key, entry] of Object.entries(workspaceOrder)) {
+    if (key.startsWith('host-root-') && (entry.type !== 'string' || typeof entry.value !== 'string')) {
+      throw new InstalledDataMigrationError('A workspace-order preference has an unexpected value type.');
+    }
+  }
+  const showAllPorts = typedEntry(snapshot, 'port_forward_panel', 'show_all_ports', 'boolean');
+  if (showAllPorts !== undefined && typeof showAllPorts !== 'boolean') {
+    throw new InstalledDataMigrationError('The port-panel preference has an invalid value.');
+  }
+}
+
+function readLegacySetting(snapshot: NativeLegacySnapshot, key: string): unknown | undefined {
+  const current = snapshot.preferences.next_settings?.entries?.[key];
+  if (current) return current.value;
+  if (key === 'voice_silence_seconds') {
+    const legacy = snapshot.preferences.app_settings?.entries?.[key];
+    if (legacy) return legacy.value;
+  }
+  return undefined;
+}
+
+export interface PreparedLocalStorageWrites {
+  settings?: string;
+  /** Carried-over preferences only the shared app's settings store owns. */
+  sharedSettings?: string;
+  trustPins: Array<{ key: string; value: string }>;
+  warnings: string[];
+}
+
+export function prepareLocalStorageWrites(
+  snapshot: NativeLegacySnapshot,
+  storage: StringStorage,
+  pixelRatio: number,
+): PreparedLocalStorageWrites {
+  validateLegacyPreferences(snapshot);
+  const warnings: string[] = [];
+  const serialized = storage.getItem(SETTINGS_STORAGE_KEY);
+  let settings: Record<string, unknown> = {};
+  if (serialized !== null) {
+    try {
+      const parsed: unknown = JSON.parse(serialized);
+      if (!isRecord(parsed)) throw new Error('Expected a settings object.');
+      settings = { ...parsed };
+    } catch {
+      throw new InstalledDataMigrationError('This version\'s existing settings could not be read; they were left unchanged.');
+    }
+  }
+  const originalSettings = { ...settings };
+
+  const oldFontPx = readLegacySetting(snapshot, 'terminal_text_size_px');
+  if (oldFontPx !== undefined && !hasOwn(settings, 'terminalFontSize')) {
+    if (!Number.isInteger(oldFontPx) || (oldFontPx as number) < 16 || (oldFontPx as number) > 48) {
+      throw new InstalledDataMigrationError('The saved terminal text size is outside the legacy range.');
+    }
+    const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+    const cssPixels = Math.round((oldFontPx as number) / ratio);
+    if (cssPixels >= 8 && cssPixels <= 32) settings.terminalFontSize = cssPixels;
+    else warnings.push('The legacy terminal text size is preserved in the migration record but cannot be represented by the current settings range.');
+  }
+
+  // Grace and reconnect-on-return have ONE owner: the shared settings store
+  // (pocketshell.settings.v1) that the Android lifecycle reads and the shared
+  // Settings screen edits (D42). A value an earlier JS build kept in the local
+  // blob still counts as already set.
+  const lifecycle: Record<string, unknown> = {};
+  const oldGrace = readLegacySetting(snapshot, 'background_grace_millis');
+  if (oldGrace !== undefined) {
+    const grace = parseBackgroundGraceMs(oldGrace);
+    if (grace === undefined) {
+      throw new InstalledDataMigrationError('The saved background grace period is not supported by the current settings.');
+    }
+    if (!hasOwn(settings, 'backgroundGraceMs')) lifecycle.backgroundGraceMs = grace;
+  }
+  const oldReconnect = readLegacySetting(snapshot, 'reconnect_when_return');
+  if (typeof oldReconnect === 'boolean' && !hasOwn(settings, 'reconnectOnReturn')) {
+    lifecycle.reconnectOnReturn = oldReconnect;
+  }
+
+  const oldVoiceLanguage = readLegacySetting(snapshot, 'voice_language');
+  if (oldVoiceLanguage !== undefined && !hasOwn(settings, 'voiceLanguage')) {
+    settings.voiceLanguage = normalizeVoiceLanguage(oldVoiceLanguage);
+  }
+
+  const oldVoiceSilenceSeconds = readLegacySetting(snapshot, 'voice_silence_seconds');
+  if (oldVoiceSilenceSeconds !== undefined && !hasOwn(settings, 'voiceSilenceSeconds')) {
+    settings.voiceSilenceSeconds = normalizeVoiceSilenceSeconds(oldVoiceSilenceSeconds);
+  }
+
+  const settingsChanged = settings.terminalFontSize !== originalSettings.terminalFontSize
+    || settings.voiceLanguage !== originalSettings.voiceLanguage
+    || settings.voiceSilenceSeconds !== originalSettings.voiceSilenceSeconds;
+  const settingsWrite = settingsChanged || (serialized === null && (
+    oldFontPx !== undefined || oldVoiceLanguage !== undefined || oldVoiceSilenceSeconds !== undefined
+  ))
+    ? JSON.stringify(settings)
+    : undefined;
+
+  const sharedSettingsWrite = prepareSharedSettingsWrite(snapshot, storage, lifecycle);
+
+  const trustPins: PreparedLocalStorageWrites['trustPins'] = [];
+  const hosts = snapshot.database.tables.hosts ?? [];
+  for (const candidate of hosts) {
+    if (!isRecord(candidate)) throw new InstalledDataMigrationError('A saved host row is malformed.');
+    const hostId = candidate.id;
+    const algorithm = candidate.trustedHostKeyAlgorithm;
+    const fingerprint = candidate.trustedHostKeySha256;
+    if (algorithm == null && fingerprint == null) continue;
+    if (typeof hostId !== 'number' || !Number.isSafeInteger(hostId) ||
+      algorithm !== 'SHA256' || typeof fingerprint !== 'string' ||
+      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) {
+      throw new InstalledDataMigrationError('A saved host has an incomplete or unsupported SSH trust pin.');
+    }
+    const key = `pocketshell.ssh.host-key.${hostId}`;
+    const value = JSON.stringify({ kind: 'sha256-fingerprint', fingerprintSha256: fingerprint });
+    const existing = storage.getItem(key);
+    if (existing !== null) {
+      const existingFingerprint = readStoredFingerprint(existing);
+      if (existingFingerprint !== fingerprint) {
+        throw new InstalledDataMigrationError(`A trusted host key saved by this version conflicts with the saved host ${hostId}; neither key was overwritten.`);
+      }
+      continue;
+    }
+    trustPins.push({ key, value });
+  }
+
+  return {
+    settings: settingsWrite,
+    ...(sharedSettingsWrite !== undefined ? { sharedSettings: sharedSettingsWrite } : {}),
+    trustPins,
+    warnings,
+  };
+}
+
+/**
+ * The 0.5.x lifecycle (grace, reconnect-on-return) and Advanced values (usage
+ * warning threshold, composer Enter delay) go to the shared settings store,
+ * parsed by core's policy. An existing shared value always wins; an
+ * unreadable shared blob is left untouched.
+ */
+function prepareSharedSettingsWrite(
+  snapshot: NativeLegacySnapshot,
+  storage: StringStorage,
+  lifecycle: Record<string, unknown>,
+): string | undefined {
+  const mapped: Record<string, unknown> = { ...lifecycle };
+  const warn = parseUsageWarnPercent(readLegacySetting(snapshot, 'usage_warn_threshold_percent'));
+  if (warn !== undefined) mapped.usageWarnPercent = warn;
+  const delay = parseSubmitEnterDelayMs(readLegacySetting(snapshot, 'agent_submit_enter_delay_ms'));
+  if (delay !== undefined) mapped.submitEnterDelayMs = delay;
+  if (Object.keys(mapped).length === 0) return undefined;
+  const serialized = storage.getItem(SHARED_SETTINGS_STORAGE_KEY);
+  let current: Record<string, unknown> = {};
+  if (serialized !== null) {
+    try {
+      const parsed: unknown = JSON.parse(serialized);
+      if (!isRecord(parsed)) return undefined;
+      current = parsed;
+    } catch {
+      return undefined;
+    }
+  }
+  const next = { ...current };
+  let changed = false;
+  for (const [key, value] of Object.entries(mapped)) {
+    if (hasOwn(current, key)) continue;
+    next[key] = value;
+    changed = true;
+  }
+  return changed ? JSON.stringify(next) : undefined;
+}
+
+function readStoredFingerprint(raw: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'string') return parsed;
+    if (isRecord(parsed) && typeof parsed.fingerprintSha256 === 'string') return parsed.fingerprintSha256;
+    return null;
+  } catch {
+    return raw.startsWith('SHA256:') ? raw : null;
+  }
+}
+
+function applyLocalStorageWrites(
+  snapshot: NativeLegacySnapshot,
+  storage: StringStorage,
+  pixelRatio: number,
+): PreparedLocalStorageWrites {
+  const writes = prepareLocalStorageWrites(snapshot, storage, pixelRatio);
+  if (writes.settings !== undefined) storage.setItem(SETTINGS_STORAGE_KEY, writes.settings);
+  if (writes.sharedSettings !== undefined) storage.setItem(SHARED_SETTINGS_STORAGE_KEY, writes.sharedSettings);
+  for (const pin of writes.trustPins) storage.setItem(pin.key, pin.value);
+  return writes;
+}
+
+function validateSnapshot(snapshot: NativeLegacySnapshot): void {
+  if (!isRecord(snapshot) || snapshot.schemaVersion !== 1 ||
+    typeof snapshot.environment?.applicationId !== 'string' ||
+    !SUPPORTED_APPLICATION_ID.test(snapshot.environment.applicationId)) {
+    throw new InstalledDataMigrationError('The installed-data reader returned an unsupported package or payload version.');
+  }
+  if (snapshot.database?.present) {
+    const version = snapshot.database.version;
+    const expected = typeof version === 'number' ? ROOM_IDENTITY_HASHES[version] : undefined;
+    if (!expected || expected !== snapshot.database.identityHash) {
+      throw new InstalledDataMigrationError('The installed Room database schema is unknown or inconsistent.');
+    }
+  }
+  if (!isRecord(snapshot.preferences) || !isRecord(snapshot.encryptedPreferences) ||
+    !Array.isArray(snapshot.assets) || !Array.isArray(snapshot.nativeFiles) || !isRecord(snapshot.database.tables)) {
+    throw new InstalledDataMigrationError('The saved app data could not be read completely.');
+  }
+  const assetIds = new Set<string>();
+  for (const asset of snapshot.assets) {
+    if (!isRecord(asset) || typeof asset.assetId !== 'string' || assetIds.has(asset.assetId) ||
+      typeof asset.category !== 'string' || typeof asset.relativePath !== 'string' ||
+      !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 0 ||
+      typeof asset.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(asset.sha256)) {
+      throw new InstalledDataMigrationError('A private data file entry is malformed.');
+    }
+    assetIds.add(asset.assetId);
+  }
+  for (const store of Object.values(snapshot.encryptedPreferences)) {
+    if (!Array.isArray(store.keys) || store.keys.some((key) => typeof key !== 'string')) {
+      throw new InstalledDataMigrationError('An encrypted preference store returned invalid key metadata.');
+    }
+    if (!store.present) {
+      if (store.status !== 'absent') {
+        throw new InstalledDataMigrationError('An absent encrypted preference store has an inconsistent status.');
+      }
+      continue;
+    }
+    if (store.status === 'unavailable') {
+      if (typeof store.error !== 'string' || store.error.length === 0) {
+        throw new InstalledDataMigrationError('An encrypted preference store could not be verified.');
+      }
+    } else if (store.status !== 'decrypted-native-retained') {
+      throw new InstalledDataMigrationError('An encrypted credential store could not be verified.');
+    }
+  }
+  validateLegacyKeyReferences(snapshot);
+  validateLegacyPreferences(snapshot);
+}
+
+function validateLegacyKeyReferences(snapshot: NativeLegacySnapshot): void {
+  const tables = snapshot.database.tables;
+  if (!snapshot.database.present) return;
+  const hosts = tables.hosts;
+  const keys = tables.ssh_keys;
+  if (!Array.isArray(hosts) || !Array.isArray(keys)) {
+    throw new InstalledDataMigrationError('The installed database is missing its saved hosts or SSH key rows.');
+  }
+
+  const keyIds = new Set<number>();
+  for (const value of keys) {
+    if (!isRecord(value) || typeof value.id !== 'number' || !Number.isSafeInteger(value.id) || value.id < 1 ||
+      typeof value.name !== 'string' || typeof value.privateKeyPath !== 'string' ||
+      typeof value.hasPassphrase !== 'boolean') {
+      throw new InstalledDataMigrationError('A saved SSH key row is malformed.');
+    }
+    keyIds.add(value.id);
+  }
+
+  const indexedFiles = new Set<number>();
+  for (const value of snapshot.nativeFiles) {
+    if (!isRecord(value) || typeof value.category !== 'string' || typeof value.relativePath !== 'string' ||
+      !Number.isSafeInteger(value.byteLength) || (value.byteLength as number) < 0 ||
+      !Number.isSafeInteger(value.lastModified)) {
+      throw new InstalledDataMigrationError('A saved app file could not be located.');
+    }
+    if (value.category === 'ssh-private-key') {
+      if (typeof value.keyId !== 'number' || !Number.isSafeInteger(value.keyId) ||
+        !keyIds.has(value.keyId) || indexedFiles.has(value.keyId) ||
+        typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+        throw new InstalledDataMigrationError('A saved SSH key file could not be located, or is listed twice.');
+      }
+      indexedFiles.add(value.keyId);
+    }
+  }
+  if (indexedFiles.size !== keyIds.size) {
+    throw new InstalledDataMigrationError('A saved SSH key file could not be found.');
+  }
+
+  const hostIds = new Set<number>();
+  for (const value of hosts) {
+    if (!isRecord(value) || typeof value.id !== 'number' || !Number.isSafeInteger(value.id) || value.id < 1 ||
+      hostIds.has(value.id) || typeof value.name !== 'string' || typeof value.hostname !== 'string' ||
+      typeof value.username !== 'string' || typeof value.port !== 'number' || !Number.isSafeInteger(value.port) ||
+      value.port < 1 || value.port > 65_535 || typeof value.keyId !== 'number' ||
+      !Number.isSafeInteger(value.keyId) || !keyIds.has(value.keyId)) {
+      throw new InstalledDataMigrationError('A saved host has an invalid SSH key or connection identity.');
+    }
+    hostIds.add(value.id);
+  }
+}
+
+export async function readImportedLegacyHosts(
+  persistence: ImportPersistence = createImportPersistence(),
+): Promise<ImportedLegacyHost[]> {
+  const record = await persistence.readRecord();
+  if (!record || (record.status !== 'complete' && record.status !== 'partial')) return [];
+  validateSnapshot(record.snapshot);
+  const filesByKeyId = new Map<number, string>();
+  for (const file of record.snapshot.nativeFiles) {
+    if (file.category === 'ssh-private-key' && Number.isSafeInteger(file.keyId) && typeof file.sha256 === 'string') {
+      filesByKeyId.set(file.keyId as number, file.sha256);
+    }
+  }
+  const keysById = new Map<number, Record<string, unknown>>();
+  for (const row of record.snapshot.database.tables.ssh_keys ?? []) {
+    if (isRecord(row) && typeof row.id === 'number') keysById.set(row.id, row);
+  }
+  const result: ImportedLegacyHost[] = [];
+  for (const candidate of record.snapshot.database.tables.hosts ?? []) {
+    if (!isRecord(candidate) || typeof candidate.keyId !== 'number' || !filesByKeyId.has(candidate.keyId)) continue;
+    const key = keysById.get(candidate.keyId);
+    const keySha256 = filesByKeyId.get(candidate.keyId);
+    if (!key || typeof candidate.id !== 'number' || typeof candidate.name !== 'string' ||
+      typeof candidate.hostname !== 'string' || typeof candidate.username !== 'string' ||
+      typeof candidate.port !== 'number' || typeof key.name !== 'string' ||
+      typeof key.hasPassphrase !== 'boolean' || !keySha256) continue;
+    result.push({
+      id: candidate.id,
+      name: candidate.name,
+      hostname: candidate.hostname,
+      port: candidate.port,
+      username: candidate.username,
+      keyId: candidate.keyId,
+      keyName: key.name,
+      keyHasPassphrase: key.hasPassphrase,
+      keySha256,
+      keyHandleId: typeof record.credentialHandles?.[String(candidate.keyId)] === 'string'
+        ? record.credentialHandles[String(candidate.keyId)] as string
+        : null,
+    });
+  }
+  return result;
+}
+
+interface LegacyKeyHandleImport {
+  handles: Record<string, string | null>;
+  tombstones: number[];
+  warnings: string[];
+}
+
+/** Move each old credential into the native encrypted vault without exposing key bytes to JS. */
+async function importLegacyKeyHandles(
+  snapshot: NativeLegacySnapshot,
+  vault: NativeSshKeyVaultPlugin,
+  previous: Record<string, string | null> = {},
+  previousTombstones: number[] = [],
+): Promise<LegacyKeyHandleImport> {
+  const filesByKeyId = new Map<number, string>();
+  for (const file of snapshot.nativeFiles) {
+    if (file.category === 'ssh-private-key' && Number.isSafeInteger(file.keyId) && typeof file.sha256 === 'string') {
+      filesByKeyId.set(file.keyId as number, file.sha256);
+    }
+  }
+  const allCandidates: Array<{ legacyKeyId: number; sha256: string; label: string; passphraseRequired: boolean }> = [];
+  const labels = new Map<number, string>();
+  for (const value of snapshot.database.tables.ssh_keys ?? []) {
+    if (!isRecord(value) || typeof value.id !== 'number' || typeof value.name !== 'string' ||
+      typeof value.hasPassphrase !== 'boolean') continue;
+    const sha256 = filesByKeyId.get(value.id);
+    if (!sha256) continue;
+    allCandidates.push({
+      legacyKeyId: value.id,
+      sha256,
+      label: value.name,
+      passphraseRequired: value.hasPassphrase,
+    });
+    labels.set(value.id, value.name);
+  }
+  const handles: Record<string, string | null> = {};
+  const tombstones = [...new Set(previousTombstones.filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b);
+  const deleted = new Set(tombstones);
+  for (const candidate of allCandidates) {
+    if (deleted.has(candidate.legacyKeyId)) handles[String(candidate.legacyKeyId)] = null;
+  }
+  const candidates = allCandidates.filter((candidate) => !deleted.has(candidate.legacyKeyId));
+  if (candidates.length === 0) return { handles, tombstones, warnings: [] };
+
+  let result: Awaited<ReturnType<NativeSshKeyVaultPlugin['importLegacyKeys']>>;
+  try {
+    result = await vault.importLegacyKeys({ keys: candidates });
+  } catch {
+    for (const key of candidates) handles[String(key.legacyKeyId)] = previous[String(key.legacyKeyId)] ?? null;
+    return {
+      handles,
+      tombstones,
+      warnings: candidates.map((key) => `Saved SSH key “${key.label}” could not be copied into Android secure storage; the original file remains in place.`),
+    };
+  }
+
+  const knownIds = new Set(candidates.map((key) => key.legacyKeyId));
+  const seenIds = new Set<number>();
+  for (const key of result.keys) {
+    if (!knownIds.has(key.legacyKeyId) || seenIds.has(key.legacyKeyId)) {
+      throw new InstalledDataMigrationError('The Android key vault returned an invalid legacy-key mapping.');
+    }
+    const metadata: SshKeyMetadata = parseSshKeyMetadata(key.key);
+    handles[String(key.legacyKeyId)] = metadata.handleId;
+    seenIds.add(key.legacyKeyId);
+  }
+  const failedIds = new Set<number>();
+  for (const failure of result.failures) {
+    if (!knownIds.has(failure.legacyKeyId) || seenIds.has(failure.legacyKeyId) || failedIds.has(failure.legacyKeyId)) {
+      throw new InstalledDataMigrationError('The Android key vault returned an invalid legacy-key failure list.');
+    }
+    handles[String(failure.legacyKeyId)] = previous[String(failure.legacyKeyId)] ?? null;
+    failedIds.add(failure.legacyKeyId);
+  }
+  if (seenIds.size + failedIds.size !== candidates.length) {
+    throw new InstalledDataMigrationError('The Android key vault did not finish every saved SSH-key import.');
+  }
+  const warnings = [...failedIds].map((id) =>
+    `Saved SSH key “${labels.get(id) ?? `#${id}`}” could not be copied into Android secure storage; the original file remains in place.`,
+  );
+  return { handles, tombstones, warnings };
+}
+
+function encryptedCredentialWarnings(snapshot: NativeLegacySnapshot): string[] {
+  return Object.entries(snapshot.encryptedPreferences)
+    .filter(([, store]) => store.present)
+    .map(([name, store]) => store.status === 'unavailable'
+      ? `Encrypted credential store ${name} remains unchanged but could not be opened: ${store.error ?? 'Android reported it as unavailable.'}`
+      : `Encrypted credential store ${name} remains in Android secure storage and is not available to this version yet.`);
+}
+
+function unresolvedCredentialWarnings(snapshot: NativeLegacySnapshot): string[] {
+  const warnings = encryptedCredentialWarnings(snapshot);
+  if (snapshot.nativeFiles.some((file) => file.category === 'ssh-private-key-unindexed')) {
+    warnings.push('An unindexed SSH private key remains in Android private storage and is not linked to a saved host.');
+  }
+  return warnings;
+}
+
+function hasLegacyData(snapshot: NativeLegacySnapshot): boolean {
+  return snapshot.database.present
+    || Object.values(snapshot.preferences).some((store) => store.present)
+    || Object.values(snapshot.encryptedPreferences).some((store) => store.present)
+    || snapshot.assets.length > 0
+    || snapshot.nativeFiles.length > 0;
+}
+
+function decodeBase64(value: string): Uint8Array {
+  let decoded: string;
+  try {
+    decoded = atob(value);
+  } catch {
+    throw new InstalledDataMigrationError('Part of a saved app file could not be read.');
+  }
+  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+}
+
+async function copyAsset(
+  native: NativeInstalledDataMigrationPlugin,
+  asset: NativeLegacyAsset,
+): Promise<ImportedAsset> {
+  if (!Number.isSafeInteger(asset.byteLength) || asset.byteLength < 0 || asset.byteLength > 20 * 1024 * 1024) {
+    throw new InstalledDataMigrationError('A private data file exceeds the supported import size.');
+  }
+  const bytes = new Uint8Array(asset.byteLength);
+  for (let offset = 0; offset < bytes.length;) {
+    const maxBytes = Math.min(MAX_ASSET_CHUNK_BYTES, bytes.length - offset);
+    let chunk: NativeAssetChunk;
+    try {
+      chunk = await native.readAssetChunk({ assetId: asset.assetId, offset, maxBytes });
+    } catch {
+      throw new InstalledDataMigrationError(`Could not read private file ${asset.relativePath}; the source was left in place.`);
+    }
+    const chunkBytes = decodeBase64(chunk.base64);
+    if (chunk.assetId !== asset.assetId || chunk.offset !== offset ||
+      chunk.byteLength !== chunkBytes.length || chunkBytes.length !== maxBytes) {
+      throw new InstalledDataMigrationError(`The saved app file ${asset.relativePath} could not be read completely.`);
+    }
+    bytes.set(chunkBytes, offset);
+    offset += chunkBytes.length;
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const hash = Array.from(digest, (value) => value.toString(16).padStart(2, '0')).join('');
+  if (hash !== asset.sha256) throw new InstalledDataMigrationError(`Private file ${asset.relativePath} changed during import.`);
+  return { ...asset, content: new Blob([bytes]) };
+}
+
+function requestResult<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed.'));
+  });
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error('IndexedDB transaction failed.'));
+    transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction was aborted.'));
+  });
+}
+
+export function createImportPersistence(factory: IDBFactory = indexedDB): ImportPersistence {
+  const open = async (): Promise<IDBDatabase> => {
+    const request = factory.open(IMPORT_DATABASE_NAME, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(IMPORT_STATUS_KEY)) {
+        database.createObjectStore(IMPORT_STATUS_KEY, { keyPath: 'id' });
+      }
+      if (!database.objectStoreNames.contains(IMPORT_ASSET_STORE)) {
+        database.createObjectStore(IMPORT_ASSET_STORE, { keyPath: 'assetId' });
+      }
+    };
+    return requestResult(request);
+  };
+  return {
+    async readRecord() {
+      const database = await open();
+      try {
+        const transaction = database.transaction(IMPORT_STATUS_KEY, 'readonly');
+        const done = transactionDone(transaction);
+        const record = await requestResult(transaction.objectStore(IMPORT_STATUS_KEY).get(IMPORT_RECORD_ID)) as ImportRecord | undefined;
+        await done;
+        return record;
+      } finally {
+        database.close();
+      }
+    },
+    async stage(record, assets) {
+      const database = await open();
+      try {
+        const transaction = database.transaction([IMPORT_STATUS_KEY, IMPORT_ASSET_STORE], 'readwrite');
+        const recordStore = transaction.objectStore(IMPORT_STATUS_KEY);
+        const staged = { ...record, status: 'staged' as const };
+        recordStore.put(staged);
+        const assetStore = transaction.objectStore(IMPORT_ASSET_STORE);
+        assetStore.clear();
+        for (const asset of assets) {
+          assetStore.put({
+            assetId: asset.assetId,
+            category: asset.category,
+            relativePath: asset.relativePath,
+            byteLength: asset.byteLength,
+            sha256: asset.sha256,
+            content: asset.content,
+          });
+        }
+        await transactionDone(transaction);
+      } finally {
+        database.close();
+      }
+    },
+    async updateRecord(record) {
+      const database = await open();
+      try {
+        const transaction = database.transaction(IMPORT_STATUS_KEY, 'readwrite');
+        transaction.objectStore(IMPORT_STATUS_KEY).put(record);
+        await transactionDone(transaction);
+      } finally {
+        database.close();
+      }
+    },
+    async compareAndSetCredentialHandles(expected, next, tombstones) {
+      const database = await open();
+      try {
+        const transaction = database.transaction(IMPORT_STATUS_KEY, 'readwrite');
+        const done = transactionDone(transaction);
+        const store = transaction.objectStore(IMPORT_STATUS_KEY);
+        const record = await requestResult(store.get(IMPORT_RECORD_ID)) as ImportRecord | undefined;
+        if (!record) {
+          transaction.abort();
+          await done.catch(() => undefined);
+          return false;
+        }
+        const current = record.credentialHandles ?? {};
+        const currentTombstones = record.credentialHandleTombstones ?? [];
+        if (JSON.stringify(current) !== JSON.stringify(expected) ||
+          (tombstones && JSON.stringify(currentTombstones) !== JSON.stringify(tombstones.expected))) {
+          transaction.abort();
+          await done.catch(() => undefined);
+          return false;
+        }
+        store.put({
+          ...record,
+          credentialHandles: { ...next },
+          ...(tombstones ? { credentialHandleTombstones: [...tombstones.next] } : {}),
+        });
+        await done;
+        return true;
+      } finally {
+        database.close();
+      }
+    },
+    async markComplete(requestedStatus = 'complete') {
+      const database = await open();
+      try {
+        const transaction = database.transaction(IMPORT_STATUS_KEY, 'readwrite');
+        const done = transactionDone(transaction);
+        const store = transaction.objectStore(IMPORT_STATUS_KEY);
+        const record = await requestResult(store.get(IMPORT_RECORD_ID)) as ImportRecord | undefined;
+        if (!record || record.status !== 'staged') {
+          transaction.abort();
+          await done.catch(() => undefined);
+          throw new InstalledDataMigrationError('Installed data import could not be committed. Retry the import.');
+        }
+        const status = record.snapshot.database.present || hasLegacyData(record.snapshot)
+          ? requestedStatus
+          : 'empty';
+        store.put({ ...record, status });
+        await done;
+      } finally {
+        database.close();
+      }
+    },
+  };
+}
+
+export function shouldReloadForImportedSettings(
+  settingsWritten: boolean,
+  storage?: Pick<Storage, 'getItem' | 'setItem'>,
+): boolean {
+  if (!settingsWritten) return false;
+  try {
+    const session = storage ?? globalThis.sessionStorage;
+    if (session.getItem(SETTINGS_RELOAD_SESSION_KEY) === '1') return false;
+    session.setItem(SETTINGS_RELOAD_SESSION_KEY, '1');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function runInstalledDataMigration(
+  overrides: Partial<MigrationDependencies> = {},
+): Promise<boolean> {
+  const nativePlatform = overrides.nativePlatform ?? (Capacitor.getPlatform() === 'android');
+  if (!nativePlatform) {
+    installedDataMigrationState.status = 'complete';
+    installedDataMigrationState.error = '';
+    return false;
+  }
+  const dependencies: MigrationDependencies = {
+    native: overrides.native ?? installedDataMigrationNative,
+    keyVault: overrides.keyVault ?? sshKeyVault,
+    persistence: overrides.persistence ?? createImportPersistence(),
+    storage: overrides.storage ?? globalThis.localStorage,
+    nativePlatform,
+    now: Date.now,
+    pixelRatio: () => globalThis.devicePixelRatio || 1,
+    requestSettingsReload: () => false,
+    ...overrides,
+  };
+  // The reload decision and the settled status are published together: a page
+  // that is about to reload must keep presenting the migration as pending.
+  const publish = (warnings: string[], settingsWritten: boolean): boolean => {
+    installedDataMigrationState.reloadPending = dependencies.requestSettingsReload(settingsWritten);
+    installedDataMigrationState.status = warnings.length > 0 ? 'partial' : 'complete';
+    installedDataMigrationState.error = warnings.join(' ');
+    return settingsWritten;
+  };
+  installedDataMigrationState.retrying = true;
+  try {
+    const priorRecord = await dependencies.persistence.readRecord();
+    if (priorRecord?.status === 'complete' || priorRecord?.status === 'partial' || priorRecord?.status === 'empty') {
+      if ((priorRecord.status === 'partial' || priorRecord.warnings.length > 0) && dependencies.refreshPartial) {
+        // An explicit retry rechecks encrypted storage and source files. Normal
+        // launches repair from the durable record without rereading large files.
+      } else {
+        validateSnapshot(priorRecord.snapshot);
+        const writes = applyLocalStorageWrites(priorRecord.snapshot, dependencies.storage, dependencies.pixelRatio());
+        const imported = await importLegacyKeyHandles(
+          priorRecord.snapshot,
+          dependencies.keyVault,
+          priorRecord.credentialHandles ?? {},
+          priorRecord.credentialHandleTombstones ?? [],
+        );
+        const warnings = [
+          ...priorRecord.warnings.filter((warning) => !warning.startsWith('Saved SSH key “')),
+          ...imported.warnings,
+        ];
+        const status = warnings.length > 0 ? 'partial' : priorRecord.status === 'empty' ? 'empty' : 'complete';
+        const updated: ImportRecord = {
+          ...priorRecord,
+          status,
+          warnings,
+          credentialHandles: imported.handles,
+          credentialHandleTombstones: imported.tombstones,
+        };
+        if (JSON.stringify(priorRecord.credentialHandles ?? {}) !== JSON.stringify(imported.handles) ||
+          JSON.stringify(priorRecord.warnings) !== JSON.stringify(warnings) || priorRecord.status !== status) {
+          await dependencies.persistence.updateRecord(updated);
+        }
+        return publish(warnings, writes.settings !== undefined || writes.sharedSettings !== undefined);
+      }
+    }
+    const snapshot = await dependencies.native.readLegacyInstalledData();
+    validateSnapshot(snapshot);
+    let writes = prepareLocalStorageWrites(snapshot, dependencies.storage, dependencies.pixelRatio());
+    const imported = await importLegacyKeyHandles(
+      snapshot,
+      dependencies.keyVault,
+      priorRecord?.credentialHandles ?? {},
+      priorRecord?.credentialHandleTombstones ?? [],
+    );
+    const assets: ImportedAsset[] = [];
+    for (const asset of snapshot.assets) assets.push(await copyAsset(dependencies.native, asset));
+    const record: ImportRecord = {
+      id: IMPORT_RECORD_ID,
+      status: 'staged',
+      importedAt: dependencies.now(),
+      snapshot,
+      credentialHandles: imported.handles,
+      credentialHandleTombstones: imported.tombstones,
+      warnings: [
+        ...writes.warnings,
+        ...unresolvedCredentialWarnings(snapshot),
+        ...imported.warnings,
+      ],
+    };
+    await dependencies.persistence.stage(record, assets);
+    // Re-read local settings after asynchronous asset staging so a setting
+    // created or changed during this migration attempt always wins.
+    const warnings = record.warnings;
+    await dependencies.persistence.markComplete(warnings.length > 0 ? 'partial' : 'complete');
+    writes = applyLocalStorageWrites(snapshot, dependencies.storage, dependencies.pixelRatio());
+    return publish(warnings, writes.settings !== undefined || writes.sharedSettings !== undefined);
+  } catch (error) {
+    installedDataMigrationState.reloadPending = false;
+    installedDataMigrationState.status = 'failed';
+    installedDataMigrationState.error = error instanceof Error
+      ? error.message
+      : 'Installed data could not be imported. Original data was left untouched.';
+    return false;
+  } finally {
+    installedDataMigrationState.retrying = false;
+  }
+}
+
+export function retryInstalledDataMigration(
+  overrides: Partial<MigrationDependencies> = {},
+): Promise<boolean> {
+  return runInstalledDataMigration({ ...overrides, refreshPartial: true });
+}

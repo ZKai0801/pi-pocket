@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+# Issue #869: a MINIMAL, deterministic "fake agent" input box for the connected
+# submit-journey proof. The real `claude` / `codex` TUIs are unauthenticated in
+# the sandbox (they wedge on a sign-in / connectivity screen and never render an
+# input box), and the plain `agents` fixture shell does not present an agent
+# input line that echoes typed-but-not-yet-submitted text. Without such a pane
+# the #869 ack-gate's load-bearing property — does the `capture-pane` needle
+# actually match a REAL agent input-box echo, especially a WRAPPED/reflowed long
+# prompt? — cannot be proven on-device. This fixture closes that gap.
+#
+# Behaviour (intentionally tiny + deterministic):
+#   * Presents a single visible input line: `> <typed-text>`. As the user types
+#     (literal characters from the terminal composer Send), the characters
+#     are ECHOED into that line so `capture-pane -p` shows the typed-but-not-yet-
+#     submitted payload — exactly what the #869 ack-gate polls for.
+#   * The line WRAPS/REFLOWS naturally: when the buffer exceeds the pane width
+#     the terminal wraps it across visible rows, so `capture-pane` returns the
+#     payload split across rows. This is the most likely real-world needle MISS
+#     (a substring spanning a wrap boundary), so the proof MUST exercise it.
+#   * A SINGLE-LINE bracketed paste (`\e[200~` ... `\e[201~` with no embedded
+#     newline) is shown as plain text, like a readline agent input box, not the
+#     literal escape sequence.
+#   * Issue #1687 — a MULTI-LINE bracketed paste is COLLAPSED to a Claude-Code
+#     placeholder chip `[Pasted text #N +M lines]` and the body is NOT echoed,
+#     EXACTLY as the real `claude` TUI does (verified against the shipped Claude
+#     Code 2.1.150 binary: `jgH(H,$){...return`[Pasted text #${H} +${$} lines]`}`,
+#     `#N` a session-relative paste counter, `+M` the extra-line count). This is
+#     the case the #1687 ack-gate fix hinges on: the payload-tail needle can
+#     NEVER match a collapsed paste (the body is not on the pane), so before the
+#     fix the ack polled to its full timeout + fallback floor on EVERY multi-line
+#     send — the maintainer's "takes too long to send even when the connection is
+#     okay". The pane now reproduces that exact chip so the connected journey can
+#     prove the ack recognises it (the collapsed-marker count-baseline) and fires
+#     the submit Enter WITHOUT the stall. The real (multi-line) body is retained
+#     internally so the submit still lands the real content.
+#   * On Enter (`\r` / `\n`) it SUBMITS: prints a `FAKE-AGENT SUBMITTED: <text>`
+#     line into the scrollback and clears the input box. The connected test
+#     asserts this submitted marker appears AND the input box is left empty —
+#     proving the composer Send actually submitted the line (the maintainer's
+#     "when I click Send it's not really sending" symptom), not left it unsent.
+#   * Issue #1662: on an EMPTY prompt, two consecutive raw Ctrl-D / EOT bytes
+#     exit through the normal cleanup path. One EOT alone never exits; ordinary
+#     input or a non-empty prompt resets/does not arm the sequence. EOT bytes
+#     inside bracketed-paste bodies remain paste CONTENT, never control input.
+#
+# The DEFAULT mode deliberately does NOT use the alternate screen (no smcup):
+# keeping its transcript in the main buffer means `capture-pane -p` reads the
+# input box and submitted markers directly, which is what the ack-gate + the
+# existing tests inspect.
+#
+# Issue #1769 adds one opt-in render mode for the #1153 render-heal journey:
+# `POCKETSHELL_FAKE_AGENT_RENDER_MODE=issue1153-incremental`. Its INITIAL render
+# paints the dense ISSUE1153 frame into the upper rows. Later paste/submit
+# renders touch ONLY three lower rows, preserving that authoritative upper frame
+# in the terminal without streaming a full-screen redraw that could itself repair the
+# journey's synthetic local-only black band. The default mode remains byte-for-
+# byte behaviour-compatible with the #869/#1526/#1687 journeys above.
+set -u
+
+PROMPT_PREFIX="> "
+SUBMIT_PREFIX="FAKE-AGENT SUBMITTED: "
+READY_MARKER="${POCKETSHELL_FAKE_AGENT_READY_MARKER:-FAKE-AGENT-READY}"
+RENDER_MODE="${POCKETSHELL_FAKE_AGENT_RENDER_MODE:-default}"
+SUBMIT_LEDGER="${POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER:-}"
+TRANSCRIPT_PATH="${POCKETSHELL_FAKE_AGENT_TRANSCRIPT:-}"
+HEARTBEAT="${POCKETSHELL_FAKE_AGENT_HEARTBEAT:-0}"
+ISSUE1153_RENDER_MODE="issue1153-incremental"
+ISSUE1944_RENDER_MODE="issue1944-framed-input"
+ISSUE1153_FRAME_MARKER="ISSUE1153-FRAME"
+ISSUE1153_FRAME_ROWS=20
+issue1153_full_render_count=0
+
+old_tty="$(stty -g 2>/dev/null || true)"
+
+cleanup() {
+  if [ -n "${old_tty:-}" ]; then
+    stty "$old_tty" 2>/dev/null || true
+  else
+    stty sane 2>/dev/null || true
+  fi
+  printf '\033[?25h'
+  printf '\r\nFAKE-AGENT-EXIT\r\n'
+  exit 0
+}
+trap cleanup INT TERM
+
+# Raw, no-echo: we draw the input box ourselves so the echo is deterministic.
+stty -echo -icanon -icrnl min 1 time 0 2>/dev/null || true
+
+# `buffer` is what the input box DISPLAYS (`> <buffer>`). For normal typing and a
+# single-line paste it equals the entered text. For a #1687 collapsed multi-line
+# paste it holds the `[Pasted text #N +M lines]` chip. `submit_buffer` is what a
+# submit Enter actually sends — always the REAL entered/pasted content, so a
+# collapsed paste still submits its real multi-line body.
+buffer=""
+submit_buffer=""
+last_submitted=""
+last_submitted_display=""
+# Issue #1687: session-relative paste counter, mirroring Claude Code's `#N`.
+paste_counter=0
+submit_counter=0
+heartbeat_counter=0
+
+# Redraw the whole viewport cleanly: home + clear screen, print the readiness
+# marker, the most-recent submitted line (if any), then the input box. Clearing
+# the whole screen each render keeps the reflowed input box artifact-free as the
+# buffer wraps (a partial `\033[J` leaves stale wrapped rows above the cursor).
+# The terminal wraps the buffer when it exceeds the pane width, producing the
+# reflowed input box the #869 needle must survive.
+render_default() {
+  printf '\033[H\033[2J'
+  printf '%s\r\n' "$READY_MARKER"
+  [ "$HEARTBEAT" = "1" ] && printf 'FAKE-AGENT HEARTBEAT: %s\r\n' "$heartbeat_counter"
+  if [ -n "$last_submitted" ]; then
+    printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
+  fi
+  printf '%s%s' "$PROMPT_PREFIX" "$buffer"
+}
+
+# The real Claude/Codex input surface is framed rather than a readline `>`
+# prompt. This mode keeps pasted text observable to the paste-ingestion gate,
+# while deliberately remaining Unknown to the generic submit-turnover oracle.
+# The #1944 outage journey must therefore wait for the authoritative transcript
+# event appended on Enter, including when its tail starts after reconnect.
+#
+# Issue #2056 — WHY THIS MODE IS NOW LOAD-BEARING FOR THE LATE-AUTHORITY JOURNEYS.
+# #2056 made the PANE a real late-delivery authority: when a row's submit outcome
+# is ambiguous the product re-reads the pane, and an input surface that no longer
+# holds the payload proves the agent consumed the submit. That is correct, and it
+# is exactly what the readline `render_default` surface now reports — so a submit
+# to the DEFAULT fixture is no longer ambiguous for more than one poll.
+#
+# The framed surface models the state where the product genuinely CANNOT decide,
+# which is the real Claude/Codex shape while the agent is working: the box is
+# drawn but no marker glyph is rendered, so
+# `agentInputSurfaceState` answers Unknown BOTH before and after Enter (the frame
+# row strips to empty once the buffer clears, so there is no prompt line at all).
+# The late-authority chain then fails CLOSED on the pane arm and only an
+# authoritative transcript turn can resolve the row — which is precisely the path
+# the #1944/#2037/#1819 journeys exist to protect. Keep this surface free of any
+# `AGENT_INPUT_PROMPT_GLYPHS` marker (`> › ❯ ➜ ❭ $`); adding one would silently
+# hand those journeys a pane authority and stop them exercising the late arm.
+#
+# The heartbeat line mirrors `render_default` so the #2042 busy-agent hold can
+# prove the agent kept producing output throughout on this surface too.
+render_issue1944_framed() {
+  printf '\033[H\033[2J'
+  printf '%s\r\n' "$READY_MARKER"
+  [ "$HEARTBEAT" = "1" ] && printf 'FAKE-AGENT HEARTBEAT: %s\r\n' "$heartbeat_counter"
+  if [ -n "$last_submitted" ]; then
+    printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
+  fi
+  printf '┃ %s' "$buffer"
+}
+
+# Initial #1769 frame: the SAME dense marker shape the journey previously
+# printed from its inert sleep pane, plus the real fake-agent input surface in
+# the lower rows. Enter the alternate buffer just like the old #1153 fixture.
+render_issue1153_initial() {
+  issue1153_full_render_count=$((issue1153_full_render_count + 1))
+  printf '\033[?1049h\033[H\033[2J'
+  row=1
+  while [ "$row" -le "$ISSUE1153_FRAME_ROWS" ]; do
+    # Keep every logical row narrower than the smallest journey viewport. This
+    # avoids manufacturing a soft-wrap mismatch in the #966 line-hash oracle:
+    # the fixture is proving missing ROWS, not terminal reflow.
+    printf '\033[%d;1H%s row %d render %d' \
+      "$row" "$ISSUE1153_FRAME_MARKER" "$row" "$issue1153_full_render_count"
+    row=$((row + 1))
+  done
+  render_issue1153_incremental
+}
+
+# Later #1769 renders MUST NOT clear/home or repaint the upper frame. Resolve the
+# current PTY height on each render (the app may resize after attach), reserve
+# the bottom three rows, and update only those rows. `last_submitted_display`
+# retains Claude's collapsed multi-line chip instead of printing the real body,
+# so a multi-line submit can never scroll/repaint the upper frame.
+render_issue1153_incremental() {
+  size="$(stty size 2>/dev/null || printf '40 80')"
+  rows="${size%% *}"
+  case "$rows" in
+    ''|*[!0-9]*) rows=40 ;;
+  esac
+  if [ "$rows" -lt $((ISSUE1153_FRAME_ROWS + 3)) ]; then
+    rows=$((ISSUE1153_FRAME_ROWS + 3))
+  fi
+  ready_row=$((rows - 2))
+  submitted_row=$((rows - 1))
+  prompt_row="$rows"
+
+  printf '\033[%d;1H\033[2K%s' "$ready_row" "$READY_MARKER"
+  printf '\033[%d;1H\033[2K' "$submitted_row"
+  if [ -n "$last_submitted_display" ]; then
+    printf '%s%s' "$SUBMIT_PREFIX" "$last_submitted_display"
+  fi
+  printf '\033[%d;1H\033[2K%s%s' "$prompt_row" "$PROMPT_PREFIX" "$buffer"
+}
+
+render() {
+  if [ "$RENDER_MODE" = "$ISSUE1153_RENDER_MODE" ]; then
+    render_issue1153_incremental
+  elif [ "$RENDER_MODE" = "$ISSUE1944_RENDER_MODE" ]; then
+    render_issue1944_framed
+  else
+    render_default
+  fi
+}
+
+if [ "$RENDER_MODE" = "$ISSUE1153_RENDER_MODE" ]; then
+  render_issue1153_initial
+elif [ "$RENDER_MODE" = "$ISSUE1944_RENDER_MODE" ]; then
+  render_issue1944_framed
+else
+  render_default
+fi
+
+# Bash ANSI-C quoting ($'...') preserves the control byte EXACTLY. Command
+# substitution `$(printf '\r')` would strip the trailing CR, leaving an empty
+# string — so the CR/submit case would never match.
+CR=$'\r'
+LF=$'\n'
+DEL=$'\177'
+BS=$'\b'
+CU=$'\025'
+ESC=$'\033'
+EOT=$'\004'
+
+# Issue #1662: a lone Ctrl-D at an empty prompt is only the first half of the
+# deliberate doubled-EOF gesture. This state is reset by every non-EOT byte.
+empty_prompt_eot_pending=0
+
+# Read ONE byte. Returns it in REPLY (empty for a NUL / EOF). Uses bash `read`
+# rather than a per-byte `dd` so a long pasted prompt (hundreds of chars) is
+# ingested fast enough for `capture-pane` to see it within the ack-gate window.
+read_byte() {
+  IFS= read -r -s -N 1 REPLY
+}
+
+# Issue #1687: read a bracketed-paste body until the `\e[201~` end marker. The
+# body may arrive across several `send-keys -H` chunks (the composer chunks the
+# paste by BODY_CHUNK_BYTES), so this blocks until the end marker — which the
+# composer always writes. Returns the body in PASTE_BODY and whether it spanned
+# more than one line in PASTE_HAD_LF (a `\n`/`\r` inside the paste is CONTENT
+# here, NOT a submit — a multi-line paste is one paste, not many submits).
+read_paste_body() {
+  PASTE_BODY=""
+  PASTE_HAD_LF=0
+  while true; do
+    read_byte || cleanup
+    b="$REPLY"
+    # Real ESC, or a terminal paste-buffer caret-ESC (`^[`, issue #2205).
+    if [ "$(printf '%d' "'$b")" = "27" ] || [ "$b" = "^" ]; then
+      if [ "$b" = "^" ]; then
+        read_byte || cleanup
+        if [ "$REPLY" != "[" ]; then
+          PASTE_BODY="$PASTE_BODY^$REPLY"
+          continue
+        fi
+      fi
+      read_byte || cleanup
+      if [ "$REPLY" = "[" ]; then
+        csi=""
+        while true; do
+          read_byte || cleanup
+          case "$REPLY" in
+            [@A-Za-z~]) fin="$REPLY"; break ;;
+            *) csi="$csi$REPLY" ;;
+          esac
+        done
+        # `201~` closes the paste; any other CSI inside the body is ignored.
+        if [ "$fin" = "~" ] && [ "$csi" = "201" ]; then return 0; fi
+        continue
+      fi
+      continue
+    fi
+    case "$b" in
+      "$CR"|"$LF") PASTE_HAD_LF=1; PASTE_BODY="$PASTE_BODY$LF" ;;
+      "") : ;;
+      *) PASTE_BODY="$PASTE_BODY$b" ;;
+    esac
+  done
+}
+
+# Consume a CSI escape sequence. A bracketed-paste START (`\e[200~`) reads the
+# whole paste body (see read_paste_body) and then either:
+#   * COLLAPSES a MULTI-LINE paste to the Claude-Code `[Pasted text #N +M lines]`
+#     chip in the DISPLAY buffer while keeping the real body for submit (#1687), or
+#   * echoes a SINGLE-LINE paste inline (the pre-#1687 readline-box behaviour the
+#     #869 / #1526 journeys rely on).
+# Any other CSI (bracketed-paste markers aside — cursor keys etc.) is ignored,
+# same as before.
+handle_esc() {
+  read_byte || cleanup
+  [ "$REPLY" = "[" ] || return 0
+  local csi="" fin=""
+  while true; do
+    read_byte || cleanup
+    case "$REPLY" in
+      [@A-Za-z~]) fin="$REPLY"; break ;;
+      *) csi="$csi$REPLY" ;;
+    esac
+  done
+  if [ "$fin" = "~" ] && [ "$csi" = "200" ]; then
+    read_paste_body
+    if [ "$PASTE_HAD_LF" = "1" ]; then
+      # Extra-line count = number of newlines, matching Claude Code's `+M`.
+      extra=$(printf '%s' "$PASTE_BODY" | tr -cd "$LF" | wc -c | tr -d ' ')
+      paste_counter=$((paste_counter + 1))
+      buffer="${buffer}[Pasted text #$paste_counter +$extra lines]"
+      submit_buffer="$submit_buffer$PASTE_BODY"
+    else
+      buffer="$buffer$PASTE_BODY"
+      submit_buffer="$submit_buffer$PASTE_BODY"
+    fi
+    dirty=1
+  fi
+}
+
+# Handle one input byte. Shared by the initial read and the debounce drain so a
+# paste is parsed identically no matter which loop sees its leading ESC.
+# The caller leaves the byte in REPLY (do not pass it as $1 — an ESC argument
+# is lossy on some bash/PTY combinations).
+process_byte() {
+  ch="$REPLY"
+  [ -z "$ch" ] && return 0
+  if [ "$ch" != "$EOT" ]; then
+    empty_prompt_eot_pending=0
+  fi
+  # Real ESC (0x1b). Also accept a terminal paste-buffer's vis-encoding of ESC
+  # as the two-byte caret sequence `^[` (0x5e 0x5b) — issue #2205. Without
+  # that, a framed `\e[200~`…`\e[201~` is typed, the embedded newline submits
+  # the first line, and the paste-ack needle fires without a collapsed chip.
+  if [ "$(printf '%d' "'$ch")" = "27" ]; then
+    handle_esc
+    return 0
+  fi
+  if [ "$ch" = "^" ]; then
+    read_byte || cleanup
+    if [ "$REPLY" = "[" ]; then
+      handle_esc
+      return 0
+    fi
+    buffer="$buffer^"
+    submit_buffer="$submit_buffer^"
+    dirty=1
+    process_byte
+    return 0
+  fi
+  case "$ch" in
+    "$EOT")
+      if [ -z "$buffer" ] && [ -z "$submit_buffer" ]; then
+        if [ "$empty_prompt_eot_pending" = "1" ]; then
+          cleanup
+        fi
+        # First EOT: remain visibly alive at the same empty prompt.
+        empty_prompt_eot_pending=1
+        return 0
+      fi
+      # On a non-empty prompt preserve the previous generic-data behaviour,
+      # but never let that byte arm a later empty-prompt exit.
+      empty_prompt_eot_pending=0
+      buffer="$buffer$ch"
+      submit_buffer="$submit_buffer$ch"
+      dirty=1
+      ;;
+    "$CR"|"$LF")
+      # Submit: record the submitted line (shown by the next render) and clear
+      # the input box, so `capture-pane` shows the SUBMITTED marker AND an empty
+      # input — proving the composer Send actually submitted the line. The
+      # submitted text is the REAL content (submit_buffer), so a #1687 collapsed
+      # paste still lands its real multi-line body.
+      last_submitted="$submit_buffer"
+      last_submitted_display="$buffer"
+      if [ -n "$SUBMIT_LEDGER" ] || [ -n "$TRANSCRIPT_PATH" ]; then
+        submit_counter=$((submit_counter + 1))
+      fi
+      if [ -n "$SUBMIT_LEDGER" ]; then
+        encoded_submit=$(printf '%s' "$submit_buffer" | base64 | tr -d '\r\n')
+        printf '%s|%s\n' "$submit_counter" "$encoded_submit" >> "$SUBMIT_LEDGER"
+      fi
+      if [ -n "$TRANSCRIPT_PATH" ]; then
+        transcript_text=$(json_escape "$submit_buffer")
+        printf '{"uuid":"fake-agent-user-%s","timestamp":"%s","message":{"role":"user","content":"%s"}}\n' \
+          "$submit_counter" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$transcript_text" >> "$TRANSCRIPT_PATH"
+      fi
+      buffer=""
+      submit_buffer=""
+      dirty=1
+      ;;
+    "$DEL"|"$BS")
+      buffer="${buffer%?}"
+      submit_buffer="${submit_buffer%?}"
+      dirty=1
+      ;;
+    "$CU")
+      # Ctrl-U: clear the whole input line (readline kill-line). Lets a test
+      # reset the input box between cases deterministically.
+      buffer=""
+      submit_buffer=""
+      dirty=1
+      ;;
+    *)
+      buffer="$buffer$ch"
+      submit_buffer="$submit_buffer$ch"
+      dirty=1
+      ;;
+  esac
+}
+
+# Render is debounced: after each byte we keep reading any IMMEDIATELY-available
+# bytes (a burst from `send-keys -l` arrives back-to-back) and only redraw once
+# the burst drains, so a 300-char paste renders once, not 300 times.
+dirty=0
+flush() {
+  if [ "$dirty" = "1" ]; then
+    render
+    dirty=0
+  fi
+}
+
+# Encode one transcript string without external jq/python dependencies (the
+# agents fixture is intentionally Alpine-minimal). Literal newlines in a JSON
+# string made multiline submits unparsable, so transcript authority could never
+# acknowledge the exact row after Enter.
+json_escape() {
+  local input="$1" output="" ch=""
+  while [ -n "$input" ]; do
+    ch="${input%"${input#?}"}"
+    input="${input#?}"
+    case "$ch" in
+      \\) output="$output\\\\" ;;
+      '"') output="$output\\\"" ;;
+      "$LF") output="$output\\n" ;;
+      "$CR") output="$output\\r" ;;
+      $'\t') output="$output\\t" ;;
+      *) output="$output$ch" ;;
+    esac
+  done
+  printf '%s' "$output"
+}
+
+while true; do
+  if [ "$HEARTBEAT" = "1" ]; then
+    if ! IFS= read -r -s -N 1 -t 0.2 REPLY; then
+      heartbeat_counter=$((heartbeat_counter + 1))
+      render
+      continue
+    fi
+  elif ! read_byte; then
+    # EOF on the channel — exit; the outer `exec sh` keeps the pane alive.
+    cleanup
+  fi
+  process_byte
+  # Drain any back-to-back burst bytes before redrawing (debounce).
+  while IFS= read -r -s -N 1 -t 0.02 REPLY; do
+    process_byte
+  done
+  flush
+done

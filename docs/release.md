@@ -1,0 +1,580 @@
+# Release
+
+This is how PocketShell ships a version.
+
+## Branch layout (since #2934)
+
+| Branch | Carries | Released? |
+|---|---|---|
+| `main` | JS-first 0.6.0 development (Vue/TypeScript + Capacitor, pinned `vendor/` submodules) | No. Untagged and unreleased until the 0.6.0 gates below pass. |
+| `release/0.5.x` | The pre-rewrite Kotlin `app2`/`shared` line: v0.5.6 plus #2870 and #2913 (old `main` at `43af72c3f`) | Only 0.5.x hotfixes, see [Release 0.5.x hotfixes](#release-05x-hotfixes). |
+
+Everything below the two branch sections ("Signing" onward) is the
+pre-#2934 procedure. It was written for the Kotlin line on the old `main`;
+its commands (`release-emulator-validation.sh`, `validated-rc`, `app2`
+paths) now only make sense on `release/0.5.x`, subject to the gaps listed in
+the 0.5.x section.
+
+## 0.6.0 on `main` is not releasable yet
+
+`main` runs `.github/workflows/js-first-rewrite.yml` on every push and pull
+request: the exact JS unit suite, typecheck, fail-closed result-guard
+self-tests, debug APK identity/version/signature, the packaged API 35 lanes
+(shell smoke, lifecycle, Files, Usage/Ports, Composer against Docker) and the
+pinned Docker agents fixture. That is development CI, not a release verdict.
+The 24 replacement feature journey classes are registered in
+`scripts/js-journey-class-manifest.json`;
+`scripts/check-js-journey-results.py --json` still reports them missing.
+
+Since #2863 the D36/D37 replacement producers exist on `main`:
+
+- `.github/workflows/js-full-suite.yml` is the **D36 replacement**: the same
+  battery as push CI, on a nightly schedule (`02:17 UTC`) plus manual
+  dispatch, in its own never-cancelled `queue: max` concurrency group with no
+  path filters. Its redness is the D36 feature-merge-freeze signal.
+- `.github/workflows/js-release-validation.yml` is the **D37 replacement and
+  release-verdict producer**: it reacts to a green `JS full suite` completion
+  (or a manual dispatch), checks out that exact SHA, verifies it is an
+  ancestor of `origin/main`, rebuilds and re-checks the debug APK identity,
+  runs the same packaged API 35 lanes with the same per-lane fail-closed
+  result guards, and runs the fail-closed 24-journey qualification checker.
+  Only a fully green run flips its summary artifact
+  (`js-release-validation-<run>` — exactly one `summary.md`) to
+  `Automated status: PASS`; the summary records the commit SHA, the
+  nightly-fault run line at that SHA, the `origin/main` ancestry, and a
+  `Journey qualification: required=24 executed=24 failed=0 result=PASS` line.
+  There is deliberately no input or knob that waives the journey
+  qualification or the fault verdict (D37), and
+  `scripts/check-tag-release-authorization.py --self-test` pins the producer
+  wiring (no waive input, no own schedule, no `continue-on-error`, no
+  cancellable/collectible runs, unconditional qualification step).
+
+The release stays blocked until the registered journey classes actually
+execute: `check-js-journey-results.py` still BLOCKs at 0/24, which keeps every
+`js-release-validation` run red and the publisher below fail-closed. Porting
+those classes is the remaining 0.6.0 journey scope (#2959 and the other
+journey issues); until then a red `js-release-validation` run is the expected
+"release not ready" signal, **not** a D36 freeze — only a red `js-full-suite`
+run freezes feature merges.
+
+`tests.yml`, `app2.yml`, `release-emulator-validation.yml` and
+`full-suite-notify.yml` exercised only the deleted Kotlin modules and were
+hard-cut from `main` by #2934 (they remain on `release/0.5.x`). Do not tag
+0.6.0 until the replacement gates above are green on a validated `main`
+commit and the rest of the 0.6.0 scope is done. Known stale leftovers from
+the old line, to be repointed or cut in #2863 follow-up slices (all inert on
+`main` today): `scripts/check-nightly-workflow.sh` and
+`scripts/check-nightly-fault-run.sh` still name `app2.yml`, and
+`scripts/check-test-execution-ledger-wiring.py --self-test` still expects
+deleted Kotlin trees and fails outside CI. The bare (non-`--j1-only`)
+`scripts/check-test-validity.sh --self-test` is green, not stale: it passes
+on `main` and with this diff (131 passed, 0 failed, in a git checkout); it
+fails only when run outside a git checkout (e.g. a git-archive extraction),
+because its fixture-repo probes require git.
+
+The legacy tag-triggered `Build` workflow on `main` builds the JS APKs, is
+artifact-only, and its GitHub workflow ID `280774562` remains disabled. Keep
+it disabled: historical tag commits carry older definitions of that
+workflow.
+
+`.github/workflows/publish-release.yml` is the only publication path. It
+accepts a `vMAJOR.MINOR.PATCH` tag through `workflow_dispatch`, and every job
+requires `github.ref == refs/heads/main`. It verifies the fetched tag commit
+is both the dispatched SHA and the exact current `origin/main` head, then
+requires a trusted exact-SHA summary artifact from a successful
+`release-emulator-validation.yml` run with D37 PASS. It builds and checks the
+JS debug and signed release APKs (`scripts/check-js-apk-metadata.py`,
+`scripts/check-apk-signing.sh`, derived version name equal to the tag); only
+the final publish job has `contents: write`. That job repeats authorization,
+runs `scripts/check-release-absence.py` (an authenticated exact-tag lookup
+that blocks on an existing release and on any inconclusive API error), then
+creates the release with create-only `gh release create --verify-tag`. A
+direct tag push cannot create a GitHub Release. The authorization checker
+consumes the JS release verdict: it selects the newest completed/successful
+`js-release-validation.yml` run for the exact release SHA with a green
+`JS release validation` job, downloads its single `js-release-validation-*`
+artifact, and requires the summary contract above (exact SHA, `main`,
+`Automated status: PASS`, the D37 fault-run record and a full green journey
+qualification). Until such a run exists at the release SHA, the publisher
+fails closed for every tag.
+
+## Release 0.5.x hotfixes
+
+A 0.5.x hotfix is developed in a worktree off `origin/release/0.5.x` and
+merged by PR into `release/0.5.x`, never into `main`:
+
+```bash
+git fetch origin
+git worktree add /data/agents/pocketshell/worktrees/issue-<N>-0.5.x \
+  -b issue-<N>-0.5.x origin/release/0.5.x
+# ... implement, test with that branch's Kotlin tooling ...
+gh pr create --base release/0.5.x
+```
+
+The 0.5.x release tooling was built for a `main`-only release line and does
+**not** work from `release/0.5.x` yet. These gaps block a sanctioned 0.5.x
+release until a follow-up changes them; do not hand-publish around them:
+
+1. `scripts/push-release-tag.sh` refuses unless the checkout is on `main` with
+   `HEAD` equal to `origin/main`.
+2. `publish-release.yml` requires `refs/heads/main` in every job and a tag at
+   the exact `origin/main` head, on both branches. Dispatching it with
+   `--ref release/0.5.x` skips every job.
+3. GitHub only dispatches a `workflow_dispatch` workflow that exists on the
+   default branch. `release-emulator-validation.yml` is gone from `main`, so
+   the 0.5.x D37 release validation cannot be dispatched against
+   `release/0.5.x` any more.
+4. `release/0.5.x`'s `tests.yml` and `app2.yml` trigger push/PR runs only for
+   `main` and `stable`, so pushes and PRs to `release/0.5.x` get no CI. GitHub
+   also never runs `schedule:` on a non-default branch, so 0.5.x has no
+   nightly.
+5. versionCode is the count of `v*` tags reachable from the build commit
+   (`scripts/derive-version.sh`). A `v0.5.7` tag on `release/0.5.x` is not
+   reachable from `main`, so a later `v0.6.0` would get the same versionCode
+   and fail to install over 0.5.7. After every 0.5.x tag, merge that tag into
+   `main` with its tree ignored so the tag becomes an ancestor:
+
+   ```bash
+   git worktree add /data/agents/pocketshell/worktrees/merge-v0.5.7 \
+     -b merge-v0.5.7-ancestry origin/main
+   git -C /data/agents/pocketshell/worktrees/merge-v0.5.7 \
+     merge -s ours --no-ff -m "Record v0.5.7 in main's tag ancestry" v0.5.7
+   gh pr create --base main --head merge-v0.5.7-ancestry
+   ```
+
+   `-s ours` records the ancestry without bringing any Kotlin file into
+   `main`. Check `scripts/derive-version.sh version-code` on `main` before
+   tagging 0.6.0: it must exceed the newest 0.5.x versionCode.
+
+`main` keeps moving; other people merge there. We don't freeze `main` and
+don't tag whatever `origin/main` happens to be after a long stabilize fight,
+and the root checkout never switches off `main` to do this work (locked,
+see `process.md`).
+
+Version numbers come from the git tag (`scripts/derive-version.sh`); there
+is no version-bump PR (see gap 5 above for the two-branch caveat).
+`scripts/push-release-tag.sh` only runs from a
+checkout on `main` whose `HEAD` already equals `origin/main` — it does not
+accept a release-branch worktree, so tagging always happens after that
+branch's SHA has reached `main`, never before.
+
+## Signing (issue #2638)
+
+Two APKs ship from the default-branch-only `Publish release` workflow after it
+validates the pushed tag and exact-SHA release evidence. Each APK has its own
+signing identity:
+
+| | debug APK | release APK |
+|---|---|---|
+| applicationId | `com.pocketshell.app` | `com.pocketshell.app.release` |
+| launcher label | PocketShell | PocketShell |
+| signer | committed `debug.keystore` | dedicated release keystore |
+
+The separate application IDs allow both APKs to install side by side. The
+release package can only be updated by an APK signed with the dedicated
+release key.
+
+Before publishing, the workflow verifies repository access and checks the
+exact tag's GitHub Release endpoint. Only its JSON `404 Not Found` response
+means the release is absent; an existing release or any inconclusive response
+stops publication. It then uses `gh release create --verify-tag`, which creates
+a release and fails if one already exists, so a release created after the
+preflight check is not updated by this workflow.
+
+The release keystore is NOT in the repo. It lives on this box at
+`/home/alexey/.pocketshell/keys/pocketshell-release.keystore` (PKCS12, alias
+`pocketshell-release`, valid to 2056; cert SHA256
+`0F:91:16:9C:6A:73:19:10:43:55:BB:55:11:11:DE:A8:FF:EC:12:98:00:69:A2:6D:FD:C5:AF:D3:16:A0:94:E4`).
+Losing it means every existing release install (`com.pocketshell.app.release`)
+can never be updated in place again — back it up somewhere off this box.
+
+Signing material reaches the build through exactly one of two paths, checked
+in this order by `android/app/build.gradle` (no debug-keystore fallback, D22):
+
+1. **Local**: a gitignored `keystore.properties` in the repository root.
+   Schema: `storeFile` / `storePassword` / `keyAlias` / `keyPassword`.
+   `keystore.properties` is gitignored, so a fresh worktree does not have
+   it — copy it from the root checkout before building a release APK there,
+   then verify `storeFile` resolves from that worktree's root. A relative path
+   copied unchanged may point at the wrong location in a deeper worktree.
+2. **CI**: the four GitHub secrets `ANDROID_RELEASE_KEYSTORE_BASE64` (the
+   PKCS12 keystore, base64-encoded), `ANDROID_RELEASE_STORE_PASSWORD`,
+   `ANDROID_RELEASE_KEY_ALIAS`, `ANDROID_RELEASE_KEY_PASSWORD`, exported by
+   `.github/workflows/publish-release.yml` around `assembleRelease`.
+
+A checkout with neither still configures and builds `assembleDebug` (and the
+confidence gate's release-compile lanes) fine; any task that would package a
+release APK fails loudly instead of silently producing an unsigned APK.
+
+Verify a built APK's identity with:
+
+```bash
+scripts/check-apk-signing.sh --variant release --apk android/app/build/outputs/apk/release/app-release.apk
+scripts/check-apk-signing.sh --variant debug --js-first --apk android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+The release package job also runs `scripts/check-js-apk-metadata.py` against both
+variants and compares their embedded version code/name to
+`scripts/derive-version.sh`. Debug is checked with `--js-first` because the
+generated Capacitor manifest labels it `PocketShell`, matching the release
+launcher label; the package IDs and signatures remain distinct.
+
+## Product note for the next release
+
+The #2561 session-runtime cut ships an aplexer-only product contract. The host
+CLI, Android schema, Room storage, Docker agents fixture, and app2 journeys all
+use real aplexer sessions. Existing Room databases migrate from schema 20 to
+21; that migration rebuilds `hosts` and drops the obsolete `tmuxInstalled`
+capability column. Earlier migration SQL and exported schemas keep that column
+name only because Room must first open databases at versions 1–20. It is not a
+runtime compatibility path and does not appear in the current entity, DAO, or
+schema 21.
+
+## Correcting a published release
+
+The Android `versionCode` uses the count of reachable `v*` tags. If a GitHub
+release is withdrawn, retain its annotated Git tag so later APKs keep unique
+installation codes; remove the public release and APK assets. Tag the
+correction on a later validated `main` commit with one exact-match release
+tag, since the APK's `versionName` derives from that exact tag.
+
+Issue #2853 tracks the `v1.0.0` retraction and `v0.5.6` correction; the
+upcoming shared-JavaScript migration is reserved for `v0.6.0`.
+
+## The nightly fault gate blocks the tag, full stop (D37)
+
+`scripts/release-emulator-validation.sh` runs
+`scripts/check-nightly-fault-run.sh` as its first required step. That guard
+reads the `app2 journey suite` job of the latest `app2` workflow run — the
+lane the rewrite moved the toxiproxy network-fault proofs plus the bootstrap
+coverage into, where the job's own conclusion IS the fault verdict (#2474:
+one unfiltered instrumentation pass, no phases to combine). It BLOCKS when
+that verdict is red, cancelled, stale (the run tested a line that does not
+contain the release HEAD), or missing.
+
+A `cancelled` verdict is a **gap, not a red** (#2706): a run-level
+cancellation (a manual or API cancel of the whole run — no workflow
+configuration can shield a job from one) kills the journey job mid-flight,
+so the suite neither passed nor failed. The guard steps past such runs to
+the newest run that produced a real verdict — so a cancel cannot erase an
+older covering green — and prints a `NOTE (#2706)` line for every gap so the
+release state shows it explicitly. It never reads a gap as a pass: if no run
+in the window carries a verdict, the gate blocks and says so.
+
+**Nothing you can put in the environment changes that verdict.** No
+environment variable, no `workflow_dispatch` input, no "deliberately waived
+release" branch — they were removed by decision D37 (`docs/decisions.md`),
+because waiving the gate had become routine: v0.4.31–v0.4.38 and v0.4.45 all
+shipped with the fault verdict un-enforced, and #1671 traced the #1610
+reconnect storm reaching the maintainer to exactly that. A gate the
+release-owner can opt out of is not a gate.
+
+Concretely, `scripts/check-nightly-fault-run.sh` reads *no* environment
+variable. Its offline test knobs (`--fixture`, `--workflow`, `--job-needle`)
+are command-line flags precisely so that an exported variable cannot reach
+them, and `gh` is pinned to this checkout's origin repository with `--repo`
+(with `GH_REPO`/`GH_HOST` scrubbed) so the query cannot be redirected at a
+greener repository. A `--fixture` run prints `[FIXTURE DRY RUN]` on every
+line and is never a release verdict; `scripts/release-emulator-validation.sh`
+passes only `--release-head`, and the per-push guard fails if it ever passes
+anything else.
+
+Be precise about what that does and does not claim: it means no *environment*
+can fabricate a verdict, and no flag exists to skip one. It does not mean the
+script is tamper-proof against someone editing the working tree or
+hand-writing a release summary — nothing enforceable would be. If you find
+yourself wanting to, that is the signal to read the two options below instead.
+
+When the guard blocks, there are exactly two ways forward:
+
+1. **Fix the failing test or journey**, re-run
+   the `app2` workflow (`workflow_dispatch`) on the release commit —
+   workflow_dispatch fail-opens every lane, so the dispatched run always
+   carries the journey job — and re-run the release gate once
+   `app2 journey suite` is green. Dispatch it on the *branch whose head is the
+   release commit* (normally `main`): a `workflow_dispatch` ref is a branch or
+   tag name, and a raw commit SHA comes back HTTP 422 "No ref found" (#2822 —
+   the same trap that made the gate's own self-heal a no-op). If no branch has
+   that commit as its head, push it to one first; a run dispatched on a moved
+   head produces a verdict for a different commit, which the gate will (rightly)
+   treat as stale.
+2. **Quarantine the offending test/journey class** through the existing
+   D36(4) flake mechanism — auto-filed issue, moved into the non-blocking
+   lane, 2-week expiry — so the verdict covers a genuinely smaller but still
+   real suite. Quarantine is a recorded, expiring narrowing of *what* the
+   gate checks; it is never a skip of the whole verdict.
+
+"The app2 journey lane is broken by infra" is not a third option: a missing
+verdict (including one erased by a run-level cancellation, #2706) means
+there is no safety signal to release on, so re-run the workflow until there
+is one. If a release is blocked for longer than that is
+tolerable, the fix belongs in #1671 (make the fault gate reliably green),
+not in a new escape hatch.
+
+`scripts/check-release-gate-bypass-absent.sh` (per push, in the
+`guards-static` job) fails if either deleted bypass name reappears under
+`scripts/`, `.github/workflows/` or `.github/actions/` (C1), if the fault
+guard starts honouring them again (C2/C3), or if a fabricated verdict can be
+injected through the environment or a test-only flag in the release path (C4).
+
+## Independent model review before tagging
+
+Once the automated gate is green — a fresh `validated-rc` (fast path) or a
+stabilized candidate that passed `release-emulator-validation.sh` (fallback)
+— but before running `scripts/push-release-tag.sh`, dispatch an independent
+model to read the diff between the last shipped tag and the release SHA and
+flag bugs, regressions, or missed edge cases the automated suite doesn't
+catch: logic that's syntactically fine but behaviorally wrong, a silent
+behavior change, a new code path with no test, a UX regression a green
+assertion wouldn't notice.
+
+"Independent" means a model that did not write most of the code under
+review, ideally from a different family than whatever did most of the
+implementation work this cycle — same-family review tends to share blind
+spots:
+
+- In-house diversity: `Agent({model: "fable"})` (or `"opus"`) with a
+  self-contained prompt scoped to `git diff <last-tag>..<release-sha>`, the
+  acceptance criteria of the issues in that range, and this doc's
+  release-gate context.
+- Cross-vendor diversity (stronger signal, costs more): the
+  `external-model-agents` skill to run Codex or Grok non-interactively
+  against the same diff — there's no Gemini launch command configured on
+  this box (see AGENTS.md's agent launch commands).
+
+This is a confidence check, not a gate: D37 already locks the nightly fault
+verdict as the only thing that can block a tag, and this step must not
+become a second bypassable or fabricatable gate. Findings are triaged like
+any other bug report — a real regression goes back through the normal
+implementer/reviewer loop (or, if trivial and release-blocking, the
+release-owner fixes it directly per the existing "small, obvious
+release-blocking fixes" allowance) before the SHA is tagged; anything else
+gets filed as a backlog issue and does not hold up the release.
+
+## Fast path: tag the nightly validated-RC (preferred, check this first)
+
+Issue #2356 (Phase 4 of epic #2350) added a nightly marker: a green
+*scheduled* (not per-push) full-suite `Tests` run on `main` triggers
+`release-emulator-validation.yml`, and on its own green run that workflow
+force-moves an annotated tag, `validated-rc`, to that SHA — a candidate
+that already has both the full suite and the release emulator gate green,
+with no local re-validation needed.
+
+Check it before cutting a new candidate branch:
+
+```bash
+git fetch origin --tags
+git show validated-rc --quiet   # SHA, both run URLs, and timestamp are in the tag message
+```
+
+The marker labels the two provenance links separately: `Release validation run`
+is the workflow containing the emulator summary/artifacts, while
+`Triggering Tests run` is the upstream scheduled full-suite signal. Do not use
+the Tests link to look for release-validation artifacts.
+
+If a `validated-rc` tag exists, is recent (rule of thumb: less than 24h old
+— check the timestamp in the tag message), and its SHA is at or ahead of
+what you need released: fast-forward the root checkout's `main` to that SHA
+if it isn't already there, download the matching
+`release-emulator-validation` run's summary artifact from Actions (or
+re-run `scripts/release-emulator-validation.sh --ref validated-rc` locally
+if you want your own copy), then run the
+[independent model review](#independent-model-review-before-tagging) above
+against `git diff <last-tag>..validated-rc`, then skip straight to
+[Tag the release](#tag-the-release) below. There is no candidate branch to
+create, stabilize, or merge back — the validated SHA already is `main`.
+
+If no `validated-rc` tag exists yet, it's stale (main has since moved and
+no fresh nightly run has landed), or `main`'s current journey lane is red
+(check recent `Tests` workflow runs before trusting an old marker), fall
+back to the full procedure below.
+
+## Fallback: cut and stabilize a candidate branch
+
+Use this when the fast path above isn't available. We copy a SHA of `main`
+onto a release-candidate branch, checked out in its own worktree, make that
+branch stable, merge it back to `main`, then tag the merged SHA from `main`.
+A dispatched release-owner agent (see `.claude/agents/release-owner.md`)
+does all of this without ever switching the root checkout off `main`; the final
+fast-forward and tag commands run there by design (see
+[Tag the release](#tag-the-release)).
+
+Copy, not move: anything already on `main` (CI cadence, flake quarantine,
+product fixes) stays on `main`. The candidate starts as a copy of that
+`main`; extra fixes for this version are committed on the candidate and
+merged back later.
+
+### 1. Take a `main` that is more or less stable
+
+```bash
+git fetch origin main
+git rev-parse origin/main
+```
+
+Record that SHA — it's the cut point. You can cut even if Tests on `main`
+is messy; the remaining red gets fixed on the candidate, not by racing more
+merges onto `main`.
+
+### 2. Create the candidate branch in its own worktree
+
+Name it `release/vX.Y.Z` (example: `release/v0.4.45`). Never `git checkout`
+this branch in the repo root — create a worktree instead, the same
+convention as an implementer's `.worktrees/issue-<N>/` (see `process.md` §
+Agent Worktrees):
+
+```bash
+mkdir -p .worktrees
+git worktree add .worktrees/release-v0.4.45 -b release/v0.4.45 origin/main
+git -C .worktrees/release-v0.4.45 push -u origin release/v0.4.45
+```
+
+All remaining stabilization commands run from inside
+`.worktrees/release-v0.4.45/`. The root checkout stays on `main`, untouched,
+until the merge-back step.
+
+If `release/v0.4.45` already exists (as a remote branch or a prior
+worktree) and `main` has since gained commits you want in this cut, copy
+them onto the candidate with a fast-forward from inside the worktree — don't
+revert those commits on `main` to "move" them:
+
+```bash
+cd .worktrees/release-v0.4.45
+git merge --ff-only origin/main    # copy; main is unchanged
+git push origin release/v0.4.45
+```
+
+### 3. Stabilize the candidate until it is actually stable
+
+All remaining product fixes for this version are committed inside the
+worktree, on `release/vX.Y.Z` only. Unrelated work stays on `main` and is
+not merged into the candidate until after the merge-back (step 4).
+
+Green means, for this candidate SHA:
+
+- Tests workflow required jobs completed `success` (not cancelled). Push to
+  `main` does not run this branch. Start the full suite with:
+
+  ```bash
+  gh workflow run tests.yml --ref release/v0.4.45
+  ```
+
+- `scripts/release-emulator-validation.sh` (run from the worktree) wrote a
+  summary whose `Commit SHA` is exactly this SHA and `Automated status: PASS`.
+  Its first required step is the nightly fault gate — see
+  [The nightly fault gate blocks the tag, full stop](#the-nightly-fault-gate-blocks-the-tag-full-stop-d37).
+  If you run `scripts/check-nightly-fault-run.sh` by hand, run it with no
+  arguments (or `--release-head <sha>`): a run carrying `[FIXTURE DRY RUN]`
+  came from `--fixture` and is a test dry run, not a release verdict.
+- Visual-audit screenshots were inspected. Since issue #2481 those are app2's
+  journey screenshots, pulled by the pre-release confidence gate into
+  `build/pre-release-confidence-gate/<run-id>-pre-release/journey-screenshots/`
+  and named in the release summary. To regenerate them on their own — with the
+  hard "every journey rendered a frame" assertion — run
+  `scripts/capture-walkthrough-screenshots.sh` (see `docs/testing.md`).
+
+The chain itself got shorter with the rewrite. `release-emulator-validation.sh`
+is now nightly-fault guard -> pre-release confidence gate -> publish; the four
+downstream walkthrough stages (terminal-lab, legacy session-attach, the
+setup-detection matrix, visual-audit) and the optional `TERMINAL_RELEASE_GATE=1`
+/ `LONG_RUNNING_TEST=1` lanes were deleted with the `app` module androidTest
+classes they drove. The journeys did not go away: the confidence gate installs
+the one validated APK pair and runs app2's WHOLE instrumented set against those
+exact bytes, unfiltered in a single instrumentation process (issue #2474).
+
+Don't fake a PASS. Don't treat a cancelled or in-progress Tests run as green.
+Don't look for a way around the nightly fault gate — there isn't one.
+
+Once green, run the
+[independent model review](#independent-model-review-before-tagging) above
+against `git diff <last-tag>..<candidate-sha>` before moving to step 4.
+
+### 4. Merge the candidate back to `main`
+
+`scripts/push-release-tag.sh` only tags from `main`, so the candidate SHA
+has to become `main` before tagging, not after. This step runs from the
+root checkout (never the worktree):
+
+```bash
+git fetch origin
+git merge --ff-only origin/release/v0.4.45   # main has not moved since step 1
+git push origin main
+```
+
+If this isn't a fast-forward (something else merged to `main` since step 1),
+stop: merging non-fast-forward here changes the SHA, which invalidates the
+stabilization evidence from step 3. Either re-run `release-emulator-validation.sh`
+against the new merge commit before tagging, or rebase the candidate and
+re-stabilize.
+
+### 5. Tag the release
+
+The legacy tag-triggered `Build` workflow (GitHub workflow ID `280774562`) is
+artifact-only in current commits and **must remain disabled**. Historical tag
+commits contain the old publisher definition, and GitHub runs the workflow
+version associated with the pushed tag ref; re-enabling that workflow could
+restore the bypass. See [GitHub's workflow versioning
+rules](https://docs.github.com/en/actions/concepts/workflows-and-actions/workflows).
+
+The separate `Publish release` workflow has only a `workflow_dispatch`
+trigger. It accepts work only when dispatched on `main`; it checks that the
+existing tag resolves to the exact current `origin/main` SHA and that the
+successful release-validation run and D37 verdict cover that SHA. It repeats
+those checks after building and immediately before creating the GitHub
+Release. A tag push by itself never publishes.
+
+From the root checkout, after the validated candidate is on `main` and
+`HEAD` equals `origin/main`:
+
+```bash
+git fetch origin
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
+scripts/push-release-tag.sh --visual-audit-inspected v0.4.45 \
+  build/release-emulator-validation/<run-id>/summary.md
+```
+
+Then dispatch `Publish release` from `main` with the tag already pushed by the
+helper:
+
+```bash
+gh workflow run publish-release.yml --ref main -f release_tag=v0.4.45
+```
+
+The summary must contain:
+
+```
+Commit SHA: <the now-merged candidate SHA, matching HEAD>
+Automated status: PASS
+```
+
+Watch `Publish release`. Confirm `gh release view v0.4.45` is not a draft and
+has both downloadable APKs. Do not re-enable the legacy Build workflow, retag
+an older version, or dispatch the publisher from another ref.
+
+### 6. Remove the worktree
+
+```bash
+git worktree remove .worktrees/release-v0.4.45
+git branch -D release/v0.4.45       # already merged; safe to drop locally
+```
+
+Later `main` work was never blocked.
+
+## What each place is for
+
+| Place | Role |
+|---|---|
+| Root checkout, `main` | Daily 0.6.0 development (since #2934; unreleased until the 0.6.0 gates pass). Other engineers keep merging. Not the freeze line. Only switches for the final merge-and-tag steps of a release, never mid-stabilization. |
+| `.worktrees/release-vX.Y.Z/` on `release/vX.Y.Z` | The freeze line — a copy of a `main` SHA plus only this version's remaining fixes. Where the release-owner agent does its stabilization work. |
+| `release/0.5.x` | The 0.5.x maintenance line (since #2934). Hotfixes only; see the gaps above before tagging. |
+| Tag `vX.Y.Z` | The published APK. Must point at an `origin/main` SHA that passed Tests + emulator validation (via either the fast path or the merged-back candidate). |
+| Tag `validated-rc` | A moving marker, not a release — the newest `main` SHA with a green nightly full-suite + emulator gate. Force-updated nightly; check its timestamp before trusting it. |
+
+## Tag helper
+
+`scripts/push-release-tag.sh` only runs from the root checkout on `main`,
+with `HEAD` equal to `origin/main` — it refuses any other branch, including
+a release-candidate worktree. The summary's `Commit SHA` must equal `HEAD`.
+This means tagging always happens after step 4 (merge to `main`) in the
+fallback procedure, or after fast-forwarding to a `validated-rc` SHA in the
+fast path — never before.

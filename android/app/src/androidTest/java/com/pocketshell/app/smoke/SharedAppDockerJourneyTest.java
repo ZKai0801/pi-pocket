@@ -1,0 +1,1733 @@
+package com.pocketshell.app.smoke;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.os.Bundle;
+import android.os.SystemClock;
+import android.util.Log;
+import android.view.KeyEvent;
+import android.view.inputmethod.InputMethodManager;
+import android.webkit.WebView;
+import androidx.test.core.app.ActivityScenario;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
+import com.pocketshell.app.MainActivity;
+import com.pocketshell.app.SharedShellLaunch;
+import com.pocketshell.app.ime.ScriptedIme;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.json.JSONTokener;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+/**
+ * #2936 stage 1 acceptance, typed through a real input method since #2952: a
+ * launch that opts into the shared PocketShell app (core packages/ui) boots
+ * it exactly once, and its host picker, session tree and terminal drive real
+ * aplexer sessions on a Docker agents lane through Android's PocketShellApi,
+ * core's ConnectionController and the native plugin.
+ *
+ * The runner (scripts/connected-js-shared-app.sh) creates three sessions of
+ * this run's own, each in its own folder ({@code sessionRun}-a / -b / -c), so
+ * the journey never depends on what earlier lanes left on the fixture.
+ *
+ * Every keystroke goes through {@link ScriptedIme}: an installed Android input
+ * method that edits the focused xterm textarea through the framework
+ * InputConnection the way a phone keyboard does (composing spans, word
+ * commits, digits as key events, autocorrect rewrites). Neither a paste nor a
+ * synthesized per-character key event stands in for typing.
+ *
+ * Load-bearing assertions are host-evaluated: the typed command holds an
+ * arithmetic expansion, so the expected line ("PS2936_42_<marker>") exists only
+ * if the keystrokes reached the remote shell and its output came back through
+ * the PTY; and {@link #sharedTerminalDeliversImeEditsAsExactBytes} compares the
+ * exact bytes a raw-mode reader on the host received.
+ *
+ * #2954 (U1) adds the D28 reconnect/EOF oracle on the shared shell, each in
+ * a session of its own that the journey creates:
+ *  - an abrupt server-side drop (our sshd-session SIGKILLed, the approach of
+ *    SshPtyDockerJourneyTest) is recovered by exactly ONE ConnectionController
+ *    ladder — the shared store runs none of its own — re-attaching the same
+ *    aplexer session under the same logical id; then a refused-login give-up
+ *    where nothing re-dials until the banner's Reconnect;
+ *  - a real session end on a healthy transport reads as ended, with no
+ *    reconnect, no new connection, no new dial — and (#3039) no attach at all:
+ *    the dead session is never "silently re-joined";
+ *  - (#3039) when only the attach CLIENT dies under a running session, the
+ *    pane re-joins it silently on the same transport. Both journeys keep
+ *    their phase trace for the runner, passing or failing.
+ * Native dials are counted at the Capacitor bridge, so a failed dial counts.
+ *
+ * #2955 (U2) adds the D28 multi-session switch oracle: two sessions in ONE
+ * folder are two tabs, each on its own controller PTY. Switching A -> B -> A
+ * must not cost A its PTY: A's screen is still in its pane, the output A
+ * printed while B was in front reached A's pane live, no tab is re-attached
+ * (exactly one native openPty per session, no closePty), and the Docker
+ * host's own capture of each session holds exactly that session's bytes,
+ * its full history included. Then the transport is dropped with both tabs
+ * open: one ladder, one dial, each tab re-attached exactly once, and both
+ * tabs type again into their own host sessions.
+ *
+ * #2953 (A6): a first-contact host key is shown to the user — host, key type
+ * and SHA-256 fingerprint — before anything is trusted, and each answer does
+ * what it says: reject opens nothing, "this time only" connects without a pin,
+ * "remember" connects and pins. A key that CHANGED after it was pinned is
+ * refused with a visible message. The fingerprints the app shows are checked
+ * against the fixtures' real keys, computed on the Docker host by the runner
+ * (ssh-keyscan), and the changed key is a real rotation of the rekeyed
+ * fixture (a container restart mints new host keys), not a doctored pin.
+ * Every other journey here meets the same prompt on its host's first contact
+ * and answers "remember" ({@link #trustFirstContactIfAsked}).
+ */
+@RunWith(AndroidJUnit4.class)
+public class SharedAppDockerJourneyTest {
+    private static final String TAG = "PocketshellImeJourney";
+    private static final long WAIT_TIMEOUT_MILLIS = 45_000;
+    private static final String PIN_PREFIX = "pocketshell.ssh.host-key.";
+    private static final String HOSTS_STORAGE_KEY = "pocketshell.android.hosts.v1";
+    private static final String GATE = "[data-testid=host-key-trust-gate] [data-testid=host-key-decision]";
+    /** The visible terminal's text: hidden panes keep their own rows. */
+    private static final String VISIBLE_TERMINAL =
+            "([...document.querySelectorAll('.xterm-rows')].find((n)=>n.offsetParent!==null)?.innerText ?? '')";
+    private static final String VISIBLE_TEXTAREA =
+            "[...document.querySelectorAll('.xterm')].find((n)=>n.offsetParent!==null)?.querySelector('.xterm-helper-textarea')";
+    /**
+     * The bytes {@link #sharedTerminalDeliversImeEditsAsExactBytes} must put on
+     * the host, in order (hex). Mirrored by EXPECTED_IME_BYTES_HEX in
+     * scripts/check-js-shared-app-results.py, which checks the host's own copy.
+     */
+    static final String EXPECTED_IME_BYTES =
+            "echo "                    // composed letter by letter, committed by space
+            + "word\u007fk "           // backspace inside the composing word, then a new letter
+            + "teh\u007f\u007fhe "     // autocorrect replaces the composing word at commit
+            + "\u007fn "               // backspace into the committed word, re-composed, extended
+            + "ls -la"                 // a multi-character commit (keyboard clipboard chip)
+            + "\r"                     // Enter committed as a newline by the IME
+            + "a1b"                    // a digit key event between composing letters
+            + "ok"                     // composition finished without a commit
+            + "\t\r"                   // hardware Tab and Enter
+            + "PASTE1";                // a real clipboard paste on the textarea
+
+    /** #3039 phase traces the runner keeps for passing runs too (see keepForRunner). */
+    static final String SESSION_END_JOURNAL = "ps3039-journal-session-end.json";
+    static final String CLIENT_DROP_JOURNAL = "ps3039-journal-client-drop.json";
+
+    /** Both tests run in one instrumentation process; the first adds the run's host. */
+    private static boolean fixtureHostAdded;
+    /** The key-vault handle of the runner's key, imported once per run. */
+    private static String fixtureKeyHandle;
+    private ActivityScenario<MainActivity> scenario;
+    private ScriptedIme ime;
+
+    @Before
+    public void launchSharedApp() {
+        ime = ScriptedIme.select();
+        scenario = ActivityScenario.launch(SharedShellLaunch.intent());
+    }
+
+    @After
+    public void closeApp() {
+        if (scenario != null) scenario.close();
+        if (ime != null) ime.close();
+    }
+
+    @Test
+    public void sharedAppListsAttachesAndTypesIntoFixtureSession() throws Exception {
+        String run = sessionRun();
+        String folderA = run + "-a";
+        String folderB = run + "-b";
+        openFixtureHost(run);
+
+        // Listing: this run's folders, from `pocketshell sessions list`.
+        awaitFolder(folderA);
+        awaitFolder(folderB);
+
+        // First attach of A: aplexer's attach snapshot paints the prompt.
+        openFolder(folderA);
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('$')");
+        typeLine("echo PS2936_$((6*7))_" + run + "_a1");
+        awaitTerminalLine("PS2936_42_" + run + "_a1");
+        // Output A will produce while it is NOT attached: only aplexer's
+        // re-attach snapshot can bring it to the pane.
+        String late = "(sleep 3; echo PS2936_LATE_$((6*7))_" + run + ") &";
+        typeLine(late);
+        // Leave only once the shell has the whole line (its echo is back):
+        // switching closes A's PTY, and keystrokes still in flight would die.
+        // (Rows are joined: a phone-width terminal wraps the long command.)
+        awaitJsTrue(VISIBLE_TERMINAL + ".replace(/\\n/g, '').includes(" + JSONObject.quote(late) + ")");
+
+        // Switch to B (a fresh attach on the controller's one PTY) and stay
+        // there until A's late line has been written on the host.
+        long leftA = SystemClock.uptimeMillis();
+        openFolder(folderB);
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('$') && !" + VISIBLE_TERMINAL + ".includes('PS2936_42_" + run + "_a1')");
+        long stayOnB = 5_000 - (SystemClock.uptimeMillis() - leftA);
+        if (stayOnB > 0) Thread.sleep(stayOnB);
+
+        // Re-open A: an already-used session must repaint with what happened
+        // while it was away (the late line), not come up blank or stale. The
+        // late line is also the sync point that the re-join has completed.
+        openFolder(folderA);
+        // The background job prints after the prompt, so it shares the "$ " row.
+        awaitJsTrue(terminalHasLine("PS2936_LATE_42_" + run, "endsWith"));
+        awaitTerminalLine("PS2936_42_" + run + "_a1");
+        // Typing right after the re-attach's terminal reset: #2936 captured
+        // "echo PS2 PS936_..." here.
+        typeLine("echo PS2936_$((6*7))_" + run + "_a2");
+        awaitTerminalLine("PS2936_42_" + run + "_a2");
+        screenshot("typed-after-reattach");
+    }
+
+    /**
+     * #2952: every edit a phone keyboard makes reaches the host exactly once,
+     * as the bytes a terminal user means. Session C runs a raw-mode reader on
+     * the host (staged by the runner) that records every byte until Ctrl+D,
+     * then prints them as hex and writes them to a host file the runner checks
+     * independently.
+     */
+    @Test
+    public void sharedTerminalDeliversImeEditsAsExactBytes() throws Exception {
+        String run = sessionRun();
+        String folderC = run + "-c";
+        openFixtureHost(run);
+        awaitFolder(folderC);
+        openFolder(folderC);
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('$')");
+
+        // Setup only, not the path under test: start the host's raw reader.
+        pasteIntoTerminal("python3 ~/" + folderC + "/ps2952-capture.py ~/" + folderC + "/ps2952-bytes.hex");
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER);
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('PS2952_READY')");
+
+        focusTerminalForIme();
+        Bundle typed = runIme(ScriptedIme.script()
+                // Gboard: a word grows as a composing span; space commits it.
+                .composeWord("echo").commit("echo").commit(" ")
+                // Backspace inside the composing word shortens the span.
+                .composeWord("word").compose("wor").compose("work").commit("work").commit(" ")
+                // Autocorrect: the composing "teh" is committed as "the".
+                .composeWord("teh").commit("the").commit(" ")
+                // Backspace into the committed word: the keyboard deletes the
+                // space, re-opens "the" as composing text (no new text), and
+                // the next letter extends it. Re-sending the re-opened word
+                // is exactly #2936's duplicated letters.
+                .deleteBefore(1).recompose(3).compose("then").commit("then").commit(" ")
+                // A clipboard-chip insert: several characters in one commit.
+                .commit("ls -la")
+                // Enter in a multi-line field: a committed newline.
+                .commit("\n")
+                // LatinIME sends digits as key events, between composing words.
+                .composeWord("a").commit("a").key(KeyEvent.KEYCODE_1).composeWord("b").commit("b")
+                // A composition the keyboard finishes in place (focus change, suggestion bar dismissal).
+                .composeWord("ok").finish());
+        Log.i(TAG, "ime script finished " + ScriptedIme.describe(typed));
+
+        // Hardware keys: a Bluetooth keyboard's Tab and Enter.
+        recordPageKeyUps();
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_TAB);
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER);
+        // sendKeyDownUpSync returns once the view hierarchy has the keys, but the
+        // WebView hands them to its renderer asynchronously, and an
+        // evaluateJavascript paste can overtake them (the host then got
+        // "PASTE1\r" instead of "\rPASTE1"). A person cannot paste inside that
+        // window; wait until the page has seen Enter's keyup — after its
+        // keydown, where xterm sends "\r" — before pasting.
+        awaitJsTrue("(window.__psKeyUps ?? []).join(',').endsWith('Tab,Enter')");
+        // A real clipboard paste on the focused textarea.
+        pasteIntoTerminal("PASTE1");
+        assertTerminalKeepsFocus("after typing");
+        // Ctrl+D (hardware chord) ends the host reader.
+        long now = SystemClock.uptimeMillis();
+        InstrumentationRegistry.getInstrumentation().sendKeySync(new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_D, 0, KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON));
+        InstrumentationRegistry.getInstrumentation().sendKeySync(new KeyEvent(now, SystemClock.uptimeMillis(),
+                KeyEvent.ACTION_UP, KeyEvent.KEYCODE_D, 0, KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON));
+
+        String hex = awaitCapturedHex();
+        screenshot("ime-bytes");
+        assertEquals("the host must receive each keyboard edit exactly once, as typed (decoded: "
+                        + JSONObject.quote(decodeHex(hex)) + ")",
+                hex(EXPECTED_IME_BYTES), hex);
+    }
+
+    @Test
+    public void sharedAppRecoversAbruptServerDropWithOneControllerReconnect() throws Exception {
+        String run = Long.toString(System.currentTimeMillis(), 36);
+        File artifacts = artifactDirectory(run);
+        awaitJsTrue("!!document.querySelector('.host-list, .empty')");
+        installRecoveryRecorder();
+        connectFixtureAndAttach(run);
+        typeLine("echo PS2954_BEFORE_$((6*7))_" + run);
+        awaitTerminalLine("PS2954_BEFORE_42_" + run);
+
+        JSONObject before = latestLiveJournalEntry();
+        String logicalId = before.getString("connectionId");
+        String oldTransport = before.getString("transportId");
+        String oldGeneration = before.getString("generationId");
+        String sessionId = before.getString("selectedId");
+        String sessionTag = before.optString("selectedTag");
+        int journalAtDrop = journalLength();
+        int transportsBefore = nativeConnectionCount();
+        assertTrue("our native transport is open before the drop", transportsBefore >= 1);
+        int dialsAtDrop = nativeDialCount();
+
+        // The abrupt drop: kill OUR sshd-session process on the Docker host.
+        String proofPath = "/tmp/pocketshell-2954-drop-" + run + ".txt";
+        String trigger = "set -eu\n"
+                + "parent_pid=\"$PPID\"\n"
+                + "parent_args=$(ps -p \"$parent_pid\" -o args=)\n"
+                + "case \"$parent_args\" in *\"sshd-session: testuser\"*) ;; *) "
+                + "printf 'unexpected SSH server parent: %s\\n' \"$parent_args\" >&2; exit 97 ;; esac\n"
+                + "printf 'run_id=%s\\nserver_pid=%s\\nserver_args=%s\\nsignal=SIGKILL\\n' "
+                + JSONObject.quote(run) + " \"$parent_pid\" \"$parent_args\" > " + shellQuote(proofPath) + "\n"
+                + "kill -KILL \"$parent_pid\"\n";
+        long dropAt = System.currentTimeMillis();
+        String dropRequest = "u1-drop-" + run;
+        assertEquals("started", evalString(nativeExec(dropRequest, oldTransport, oldGeneration, trigger, 12_000)));
+        awaitJsTrue("window.__ps2954.lost.filter((e)=>e.connectionId===" + JSONObject.quote(oldTransport)
+                + ").length === 1", WAIT_TIMEOUT_MILLIS);
+        JSONObject dropExec = new JSONObject(evalString("JSON.stringify(window.__ps2954.execs["
+                + JSONObject.quote(dropRequest) + "] ?? null)"));
+        Log.i(TAG, "RUN " + run + " DROP_TRIGGER " + dropExec);
+        Log.i(TAG, "RUN " + run + " NATIVE_EVENTS " + evalString("JSON.stringify(window.__ps2954.events)"));
+
+        // Recovery: the controller re-attaches the same session under the same logical id.
+        awaitJsTrue("(window.__pocketshellConnectionJournal ?? []).slice(" + journalAtDrop + ").some((e)=>"
+                + "e.phase==='live' && e.connectionId===" + JSONObject.quote(logicalId)
+                + " && e.transportId && e.transportId!==" + JSONObject.quote(oldTransport)
+                + " && e.selectedId===" + JSONObject.quote(sessionId) + ")", 90_000);
+        long liveAt = System.currentTimeMillis();
+        // Outlast the old store ladder's first 5 s step, so a second ladder
+        // (the stage-1 overlap) would have dialled by now.
+        Thread.sleep(8_000);
+
+        JSONArray afterDrop = new JSONArray(evalString("JSON.stringify((window.__pocketshellConnectionJournal ?? [])"
+                + ".slice(" + journalAtDrop + "))"));
+        int ladders = 0;
+        int maxAttempt = 0;
+        java.util.Set<String> transports = new java.util.LinkedHashSet<>();
+        java.util.Set<String> logicalIds = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < afterDrop.length(); i += 1) {
+            JSONObject entry = afterDrop.getJSONObject(i);
+            logicalIds.add(entry.getString("connectionId"));
+            if ("reconnecting".equals(entry.getString("phase")) && entry.getInt("retryAttempt") == 0) ladders += 1;
+            maxAttempt = Math.max(maxAttempt, entry.getInt("retryAttempt"));
+            String transport = entry.optString("transportId", "");
+            if (!transport.isEmpty() && !"null".equals(transport) && !transport.equals(oldTransport)) {
+                transports.add(transport);
+            }
+        }
+        writeText(new File(artifacts, "journal-after-drop.json"), afterDrop.toString(2));
+        Log.i(TAG, "RUN " + run + " JOURNAL_AFTER_DROP " + afterDrop);
+        assertEquals("the drop must be recovered by exactly one controller ladder: " + afterDrop, 1, ladders);
+        assertEquals("the ladder's first dial must land (sshd itself is up): " + afterDrop, 1, maxAttempt);
+        assertEquals("exactly one new native transport after the drop: " + transports, 1, transports.size());
+        assertEquals("exactly one native dial after the drop (failed dials count too)", 1,
+                nativeDialCount() - dialsAtDrop);
+        assertEquals("the shared store keeps ONE logical connection (no store re-dial): " + logicalIds,
+                java.util.Collections.singleton(logicalId), logicalIds);
+        assertEquals("no leaked or doubled native transport after recovery", transportsBefore, nativeConnectionCount());
+        assertEquals("one native lost event for one abrupt drop", 1, Integer.parseInt(evalString(
+                "String(window.__ps2954.lost.filter((e)=>e.connectionId===" + JSONObject.quote(oldTransport) + ").length)")));
+        assertEquals("the recovered transport must not be reported lost", 0, Integer.parseInt(evalString(
+                "String(window.__ps2954.lost.filter((e)=>e.connectionId!==" + JSONObject.quote(oldTransport) + ").length)")));
+        JSONObject after = latestLiveJournalEntry();
+        String newTransport = after.getString("transportId");
+        assertEquals("recovery re-attached the same aplexer session", sessionId, after.getString("selectedId"));
+        assertEquals("recovery kept the same session tag", sessionTag, after.optString("selectedTag"));
+        assertEquals("the live transport is the recovered one", transports.iterator().next(), newTransport);
+
+        // The shared banner read the controller's state, and cleared.
+        JSONArray banners = new JSONArray(evalString("JSON.stringify(window.__ps2954.banners)"));
+        writeText(new File(artifacts, "banner-texts.json"), banners.toString(2));
+        Log.i(TAG, "RUN " + run + " BANNER_TEXTS " + banners);
+        boolean sawReconnecting = false;
+        for (int i = 0; i < banners.length(); i += 1) {
+            if (banners.getString(i).contains("Reconnecting")) sawReconnecting = true;
+        }
+        awaitJsTrue("!document.querySelector('.link-lost')", WAIT_TIMEOUT_MILLIS);
+
+        // The same terminal still types into the re-attached session.
+        String marker = "PS2954_AFTER_42_" + run;
+        typeLine("echo PS2954_AFTER_$((6*7))_" + run);
+        awaitTerminalLine(marker);
+        captureScreen(new File(artifacts, "recovered.png"));
+
+        // Independent host oracle: the drop really happened on the Docker
+        // host, and the post-recovery bytes are in the SAME host session.
+        JSONObject proof = awaitNativeExec("u1-proof-" + run, newTransport, after.getString("generationId"),
+                "cat " + shellQuote(proofPath));
+        assertEquals(0, proof.getInt("exitCode"));
+        assertTrue("the Docker host recorded the SIGKILL of our sshd-session: " + proof,
+                proof.getString("stdout").contains("run_id=" + run) && proof.getString("stdout").contains("signal=SIGKILL"));
+        JSONObject capture = awaitNativeExec("u1-capture-" + run, newTransport, after.getString("generationId"),
+                "/usr/bin/a capture --bytes 65536 " + shellQuote(sessionId));
+        assertEquals("host capture of the re-attached session must succeed: " + capture, 0, capture.getInt("exitCode"));
+        assertEquals("the host session holds the post-recovery marker exactly once", 1,
+                countExactLines(capture.getString("stdout"), marker));
+        writeText(new File(artifacts, "host-proof.txt"), proof.getString("stdout"));
+
+        JSONObject giveUp = refusedLoginsGiveUpThenRetry(run, artifacts, logicalId, sessionId, newTransport,
+                after.getString("generationId"), transportsBefore);
+        // Checked last so a regression in the recovery ownership above
+        // reports first: the banner of the first drop read the controller.
+        assertTrue("the shared banner must show the controller's reconnecting state: " + banners, sawReconnecting);
+
+        JSONObject summary = new JSONObject()
+                .put("run", run)
+                .put("logicalConnectionId", logicalId)
+                .put("oldTransportId", oldTransport)
+                .put("newTransportId", newTransport)
+                .put("sessionId", sessionId)
+                .put("controllerLadders", ladders)
+                .put("maxRetryAttempt", maxAttempt)
+                .put("newTransports", transports.size())
+                .put("nativeDials", 1)
+                .put("nativeLostEvents", 1)
+                .put("dropRequestedAtEpochMs", dropAt)
+                .put("recoveredLiveAtEpochMs", liveAt)
+                .put("hostMarkerLines", 1)
+                .put("giveUpThenRetry", giveUp);
+        writeText(new File(artifacts, "summary.json"), summary.toString(2));
+        Log.i(TAG, "RUN " + run + " SHARED_APP_DROP_RECOVERED " + summary);
+    }
+
+    /**
+     * A real session end is not a lost link (#2954). The controller now asks
+     * the transport before reading a PTY EOF as "ended" (a dying transport
+     * closes its channels before its lost event); on a healthy transport the
+     * answer must stay "ended": no reconnect, no new connection, no dial.
+     */
+    @Test
+    public void sharedAppReportsARealSessionEndWithoutReconnecting() throws Exception {
+        String run = Long.toString(System.currentTimeMillis(), 36);
+        File artifacts = artifactDirectory(run);
+        awaitJsTrue("!!document.querySelector('.host-list, .empty')");
+        installRecoveryRecorder();
+        connectFixtureAndAttach(run);
+        typeLine("echo PS2954_END_$((6*7))_" + run);
+        awaitTerminalLine("PS2954_END_42_" + run);
+
+        JSONObject before = latestLiveJournalEntry();
+        String logicalId = before.getString("connectionId");
+        String transport = before.getString("transportId");
+        String generation = before.getString("generationId");
+        String sessionId = before.getString("selectedId");
+        int journalAtEnd = journalLength();
+        int transportsBefore = nativeConnectionCount();
+        int dialsBefore = nativeDialCount();
+        int opensBefore = Integer.parseInt(evalString("String(window.__ps2954.opens.length)"));
+
+        // End the session on the host; our SSH connection stays up.
+        JSONObject killed = awaitNativeExec("u1-end-" + run, transport, generation,
+                "/usr/bin/a kill " + shellQuote(sessionId));
+        Log.i(TAG, "RUN " + run + " SESSION_KILL " + killed);
+        assertEquals("the host must end the session: " + killed, 0, killed.getInt("exitCode"));
+
+        // Two legitimate orders: the PTY's EOF reaches the controller first
+        // ("Session … ended", the pane prints [process exited]), or the shared
+        // tree's poll drops the killed session's folder first and its pane
+        // detaches (connected, nothing selected). Either way the connection
+        // stays up and nothing reconnects — asserted below.
+        String folder = "ps-shared-" + run;
+        awaitJsTrue("(window.__pocketshellConnectionJournal ?? []).slice(" + journalAtEnd + ").some((e)=>"
+                + "e.connectionId===" + JSONObject.quote(logicalId) + " && e.phase==='connected'"
+                + " && ((e.error ?? '').includes('ended') || e.selectedId === null))", WAIT_TIMEOUT_MILLIS);
+        awaitJsTrue("window.__ps2954.sawExited === true || ![...document.querySelectorAll('.dir-header')]"
+                + ".some((n)=>n.textContent.includes(" + JSONObject.quote(folder) + "))", WAIT_TIMEOUT_MILLIS);
+        Log.i(TAG, "RUN " + run + " SESSION_END_SIGNAL " + evalString("JSON.stringify({sawExited:window.__ps2954.sawExited,"
+                + "ended:(window.__pocketshellConnectionJournal ?? []).slice(" + journalAtEnd
+                + ").some((e)=>(e.error ?? '').includes('ended'))})"));
+        // Long enough for any reconnect (controller ladder or store) to show.
+        Thread.sleep(8_000);
+
+        JSONArray after = new JSONArray(evalString("JSON.stringify((window.__pocketshellConnectionJournal ?? [])"
+                + ".slice(" + journalAtEnd + "))"));
+        writeText(new File(artifacts, "journal-session-end.json"), after.toString(2));
+        keepForRunner(new File(artifacts, "journal-session-end.json"), SESSION_END_JOURNAL);
+        Log.i(TAG, "RUN " + run + " JOURNAL_SESSION_END " + after);
+        // #3039: the ended session is never re-attached. 781c52d's silent
+        // re-join took this exit for a dropped client and opened an attach
+        // against the dead session — whose racing resize then dropped the
+        // whole connection about half the time.
+        assertEquals("nothing may attach to a session that ended: " + evalString("JSON.stringify(window.__ps2954.opens)"),
+                opensBefore, Integer.parseInt(evalString("String(window.__ps2954.opens.length)")));
+        assertFalse("a real session end must not read as a dropped client",
+                "true".equals(evalRaw("window.__ps2954.sawReattached")));
+        for (int i = 0; i < after.length(); i += 1) {
+            JSONObject entry = after.getJSONObject(i);
+            assertEquals("one logical connection: " + after, logicalId, entry.getString("connectionId"));
+            assertFalse("a real session end must not reconnect: " + after,
+                    "reconnecting".equals(entry.getString("phase")) || "lost".equals(entry.getString("phase")));
+            String entryTransport = entry.optString("transportId", "");
+            assertTrue("a real session end must not open a new connection: " + after,
+                    entryTransport.isEmpty() || "null".equals(entryTransport) || entryTransport.equals(transport));
+        }
+        assertEquals("no native dial after a real session end", 0, nativeDialCount() - dialsBefore);
+        assertEquals("the native connection count is unchanged", transportsBefore, nativeConnectionCount());
+        assertEquals("no native lost event", 0, Integer.parseInt(evalString("String(window.__ps2954.lost.length)")));
+        assertFalse("no lost-link banner for a session that ended",
+                "true".equals(evalRaw("!!document.querySelector('.link-lost')")));
+        captureScreen(new File(artifacts, "session-ended.png"));
+
+        // The link is still good: the same transport answers a host command.
+        JSONObject probe = awaitNativeExec("u1-end-probe-" + run, transport, generation, "echo alive");
+        assertEquals("the connection must still serve commands after the session ended", "alive",
+                probe.getString("stdout").trim());
+        Log.i(TAG, "RUN " + run + " SESSION_END_OK " + new JSONObject()
+                .put("logicalConnectionId", logicalId)
+                .put("transportId", transport)
+                .put("sessionId", sessionId)
+                .put("entriesAfterEnd", after.length())
+                .put("nativeDials", 0)
+                .put("nativeConnections", transportsBefore));
+    }
+
+    /**
+     * #3039: the other half of the client-exit verdict. An aplexer pane's PTY
+     * runs an attach CLIENT; when only that client dies (the session's
+     * workload carries on), the pane re-joins silently (781c52d) — on the same
+     * transport, with no reconnect, no dial and no "[process exited]" — and the
+     * same host session keeps answering. Paired with
+     * {@link #sharedAppReportsARealSessionEndWithoutReconnecting}, where the
+     * session itself ends and NOTHING may re-attach: the two exits look the
+     * same on the transport, and only the host's fresh listing tells them apart.
+     */
+    @Test
+    public void sharedAppSilentlyRejoinsWhenOnlyTheAttachClientDies() throws Exception {
+        String run = Long.toString(System.currentTimeMillis(), 36);
+        File artifacts = artifactDirectory(run);
+        awaitJsTrue("!!document.querySelector('.host-list, .empty')");
+        installRecoveryRecorder();
+        connectFixtureAndAttach(run);
+        typeLine("echo PS3039_BEFORE_$((6*7))_" + run);
+        awaitTerminalLine("PS3039_BEFORE_42_" + run);
+
+        JSONObject before = latestLiveJournalEntry();
+        String logicalId = before.getString("connectionId");
+        String transport = before.getString("transportId");
+        String generation = before.getString("generationId");
+        String sessionId = before.getString("selectedId");
+        int journalAtDrop = journalLength();
+        int transportsBefore = nativeConnectionCount();
+        int dialsBefore = nativeDialCount();
+        int opensBefore = Integer.parseInt(evalString("String(window.__ps2954.opens.length)"));
+
+        // Kill ONLY the viewer: the `a attach` relay this pane's PTY runs
+        // (the CLI exec'd into it). The bracket keeps pkill off its own shell.
+        JSONObject dropped = awaitNativeExec("u1-drop-" + run, transport, generation,
+                "pkill -KILL -f -- " + shellQuote("[a]ttach --no-status " + sessionId));
+        Log.i(TAG, "RUN " + run + " CLIENT_KILL " + dropped);
+        assertEquals("the host must kill the session's attach client: " + dropped, 0, dropped.getInt("exitCode"));
+
+        awaitJsTrue("window.__ps2954.sawReattached === true", WAIT_TIMEOUT_MILLIS);
+        // The same workload answers through the re-joined pane.
+        typeLine("echo PS3039_AFTER_$((6*7))_" + run);
+        awaitTerminalLine("PS3039_AFTER_42_" + run);
+        // Long enough for any late reconnect to show.
+        Thread.sleep(5_000);
+
+        JSONArray after = new JSONArray(evalString("JSON.stringify((window.__pocketshellConnectionJournal ?? [])"
+                + ".slice(" + journalAtDrop + "))"));
+        writeText(new File(artifacts, "journal-client-drop.json"), after.toString(2));
+        keepForRunner(new File(artifacts, "journal-client-drop.json"), CLIENT_DROP_JOURNAL);
+        Log.i(TAG, "RUN " + run + " JOURNAL_CLIENT_DROP " + after);
+        for (int i = 0; i < after.length(); i += 1) {
+            JSONObject entry = after.getJSONObject(i);
+            assertEquals("one logical connection: " + after, logicalId, entry.getString("connectionId"));
+            assertFalse("a dropped client must not reconnect: " + after,
+                    "reconnecting".equals(entry.getString("phase")) || "lost".equals(entry.getString("phase")));
+            String entryTransport = entry.optString("transportId", "");
+            assertTrue("a dropped client must not open a new connection: " + after,
+                    entryTransport.isEmpty() || "null".equals(entryTransport) || entryTransport.equals(transport));
+        }
+        assertEquals("no native dial after a dropped client", 0, nativeDialCount() - dialsBefore);
+        assertEquals("the native connection count is unchanged", transportsBefore, nativeConnectionCount());
+        assertEquals("no native lost event", 0, Integer.parseInt(evalString("String(window.__ps2954.lost.length)")));
+        assertEquals("exactly one fresh attach re-joined the session", opensBefore + 1,
+                Integer.parseInt(evalString("String(window.__ps2954.opens.length)")));
+        assertFalse("a dropped client is not a session end", "true".equals(evalRaw("window.__ps2954.sawExited")));
+        assertFalse("no lost-link banner for a dropped client",
+                "true".equals(evalRaw("!!document.querySelector('.link-lost')")));
+        captureScreen(new File(artifacts, "client-dropped-rejoined.png"));
+
+        // The host's own view: the very same session is still running.
+        JSONObject listed = awaitNativeExec("u1-drop-list-" + run, transport, generation,
+                "PATH=\"$HOME/.local/bin:$PATH\" pocketshell sessions list --json");
+        JSONArray rows = new JSONObject(listed.getString("stdout")).getJSONArray("sessions");
+        String phase = null;
+        for (int i = 0; i < rows.length(); i += 1) {
+            if (sessionId.equals(rows.getJSONObject(i).optString("id"))) phase = rows.getJSONObject(i).optString("phase");
+        }
+        assertEquals("the host still runs the session whose client died: " + rows, "running", phase);
+        Log.i(TAG, "RUN " + run + " CLIENT_DROP_OK " + new JSONObject()
+                .put("logicalConnectionId", logicalId)
+                .put("transportId", transport)
+                .put("sessionId", sessionId)
+                .put("entriesAfterDrop", after.length()));
+    }
+
+    @Test
+    public void firstContactHostKeyAsksAndHonoursRejectOnceAndAlways() throws Exception {
+        String run = sessionRun();
+        String port = requiredArgument("sshPort");
+        Set<String> realKeys = hostKeys("agentsHostKeys");
+        String name = "fixture-" + run;
+        String pinKey = PIN_PREFIX + "testuser@" + fixtureHost() + ":" + port;
+        ensureFixtureHost(run);
+        // Another journey of this run may have pinned the lane already: start
+        // from a first contact for this endpoint.
+        evalString("(() => {localStorage.removeItem(" + JSONObject.quote(pinKey) + "); return 'ok';})()");
+
+        // 1. First contact shows the key, with nothing trusted or connected yet.
+        tapHost(name);
+        awaitJsTrue("!!document.querySelector(" + JSONObject.quote(GATE) + ")");
+        String fingerprint = assertPresentedKeyIn(realKeys);
+        holdForEvidence();
+        assertTrue("the prompt names the host", text("[data-testid=host-key-host]").equals(name));
+        assertTrue("three answers are offered", exists("[data-testid=trust-host-key-once]")
+                && exists("[data-testid=trust-host-key]") && exists("[data-testid=reject-host-key]"));
+        assertEquals("nothing is pinned while the user decides", "null", evalString("String(localStorage.getItem('" + pinKey + "'))"));
+        assertFalse("no workspace behind the prompt", exists(".dir-header"));
+
+        // 2. Reject: no connection, no pin, the refusal is visible on the picker.
+        click("[data-testid=reject-host-key]");
+        awaitJsTrue("!document.querySelector('[data-testid=host-key-decision]')");
+        awaitJsTrue("(document.querySelector('main p.error')?.textContent ?? '').includes('was not trusted')");
+        assertEquals("null", evalString("String(localStorage.getItem('" + pinKey + "'))"));
+        assertFalse(exists(".dir-header"));
+        assertEquals("the native plugin holds no SSH connection after a reject", 0, nativeConnections());
+
+        // 3. Trust this time only: connects (the host lists its sessions) and pins nothing.
+        tapHost(name);
+        awaitJsTrue("!!document.querySelector(" + JSONObject.quote(GATE) + ")");
+        assertEquals(fingerprint, text("[data-testid=host-key-fingerprint]"));
+        click("[data-testid=trust-host-key-once]");
+        awaitJsTrue("document.querySelectorAll('.dir-header').length > 0");
+        assertEquals("accept-once must not pin", "null", evalString("String(localStorage.getItem('" + pinKey + "'))"));
+        backToPickerAndDisconnect();
+
+        // 4. The next connection asks again; "remember" connects and pins exactly the shown key.
+        tapHost(name);
+        awaitJsTrue("!!document.querySelector(" + JSONObject.quote(GATE) + ")");
+        assertEquals(fingerprint, text("[data-testid=host-key-fingerprint]"));
+        click("[data-testid=trust-host-key]");
+        awaitJsTrue("document.querySelectorAll('.dir-header').length > 0");
+        String pin = evalString("localStorage.getItem('" + pinKey + "') ?? ''");
+        assertFalse("accept-always pins the host key", pin.isEmpty());
+        assertEquals(fingerprint, new JSONObject(pin).getString("fingerprintSha256"));
+        backToPickerAndDisconnect();
+
+        // 5. Pinned: the next connection goes straight through, never asking.
+        tapHost(name);
+        awaitJsTrueNeverSeeing("document.querySelectorAll('.dir-header').length > 0",
+                "!!document.querySelector('[data-testid=host-key-decision]')");
+    }
+
+    @Test
+    public void changedHostKeyIsRefusedWithVisibleMessage() throws Exception {
+        String run = sessionRun();
+        String port = requiredArgument("rekeyedPort");
+        Set<String> firstKeys = hostKeys("rekeyedHostKeys");
+        String name = "rekeyed-" + run;
+        String pinKey = PIN_PREFIX + "testuser@" + fixtureHost() + ":" + port;
+        ensureFixtureHost(run);
+        evalString("(() => {localStorage.removeItem(" + JSONObject.quote(pinKey) + "); return 'ok';})()");
+        addSavedHostWithFixtureKey(name, fixtureHost(), port);
+
+        // Pin the fixture's current key through the prompt.
+        tapHost(name);
+        awaitJsTrue("!!document.querySelector(" + JSONObject.quote(GATE) + ")");
+        String trusted = assertPresentedKeyIn(firstKeys);
+        click("[data-testid=trust-host-key]");
+        awaitJsTrue("!!document.querySelector('button[title=\"Back to hosts\"]')");
+        assertEquals(trusted, new JSONObject(evalString("localStorage.getItem('" + pinKey + "') ?? '{}'"))
+                .getString("fingerprintSha256"));
+        backToPickerAndDisconnect();
+
+        // The server's host key really changes: the runner restarts the
+        // rekeyed fixture, which mints new host keys, and reports them.
+        Set<String> rotatedKeys = rotateRekeyedFixture();
+        for (String entry : rotatedKeys) {
+            assertFalse("the rotated fixture must present new keys: " + entry, firstKeys.contains(entry));
+        }
+
+        // Refused with a visible message naming the new and the trusted key; never asked.
+        tapHost(name);
+        awaitJsTrueNeverSeeing(
+                "(document.querySelector('main p.error')?.textContent ?? '').includes('has changed — connection refused')",
+                "!!document.querySelector('[data-testid=host-key-decision]')");
+        holdForEvidence();
+        String message = text("main p.error");
+        assertTrue("the refusal names the trusted fingerprint: " + message, message.contains(trusted));
+        boolean namesPresented = false;
+        for (String entry : rotatedKeys) {
+            if (message.contains(entry.substring(entry.indexOf(' ') + 1))) namesPresented = true;
+        }
+        assertTrue("the refusal names the key the server presents now: " + message, namesPresented);
+        assertEquals("a changed key never replaces the pin", trusted,
+                new JSONObject(evalString("localStorage.getItem('" + pinKey + "') ?? '{}'")).getString("fingerprintSha256"));
+        assertFalse("no workspace for a refused host", exists("button[title=\"Back to hosts\"]"));
+        assertEquals("the native plugin holds no SSH connection after the refusal", 0, nativeConnections());
+    }
+
+    // --- #2953 host-key steps ------------------------------------------------
+
+    /**
+     * Keep a key state on screen for an external screen recorder when the
+     * runner passes {@code evidenceHoldMillis} (manual evidence runs only;
+     * the lane leaves it unset, so CI waits nothing).
+     */
+    private void holdForEvidence() throws InterruptedException {
+        String hold = InstrumentationRegistry.getArguments().getString("evidenceHoldMillis");
+        if (hold != null) Thread.sleep(Long.parseLong(hold));
+    }
+
+    private String fixtureHost() {
+        return InstrumentationRegistry.getArguments().getString("sshHost", "10.0.2.2");
+    }
+
+    private String requiredArgument(String name) {
+        String value = InstrumentationRegistry.getArguments().getString(name);
+        assertNotNull("pass instrumentation argument " + name + " (scripts/connected-js-shared-app.sh does)", value);
+        return value;
+    }
+
+    /** "keyType SHA256:..." entries the runner computed on the Docker host (base64: the list has spaces). */
+    private Set<String> hostKeys(String argument) {
+        Set<String> keys = new LinkedHashSet<>();
+        String decoded = new String(Base64.getDecoder().decode(requiredArgument(argument + "Base64")), StandardCharsets.UTF_8);
+        for (String entry : decoded.split(";")) {
+            if (!entry.trim().isEmpty()) keys.add(entry.trim());
+        }
+        assertFalse(argument + " lists no host keys", keys.isEmpty());
+        return keys;
+    }
+
+    /** The prompt's key type + fingerprint must be one of the server's real keys. */
+    private String assertPresentedKeyIn(Set<String> realKeys) throws Exception {
+        String keyType = text("[data-testid=host-key-type]");
+        String fingerprint = text("[data-testid=host-key-fingerprint]");
+        assertTrue("the prompt shows a SHA-256 fingerprint: " + fingerprint, fingerprint.startsWith("SHA256:"));
+        assertTrue("the prompt's key (" + keyType + " " + fingerprint + ") must be the fixture's real key " + realKeys,
+                realKeys.contains(keyType + " " + fingerprint));
+        return fingerprint;
+    }
+
+    private void tapHost(String name) throws Exception {
+        evalString("(() => {[...document.querySelectorAll('.host-row')].find((n)=>n.textContent.includes("
+                + JSONObject.quote(name) + ")).click(); return 'ok';})()");
+    }
+
+    private void backToPickerAndDisconnect() throws Exception {
+        click("button[title=\"Back to hosts\"]");
+        awaitJsTrue("!!document.querySelector('.disconnect')");
+        click(".disconnect");
+        awaitJsTrue("!document.querySelector('.disconnect')");
+        assertEquals("disconnect leaves no native SSH connection", 0, nativeConnections());
+    }
+
+    /** Open SSH connections held by the native plugin — the layer below the shared app. */
+    private int nativeConnections() throws Exception {
+        evalString("(() => {window.__ps2953Snapshot = null;"
+                + "window.Capacitor.Plugins.SshCapability.resourceSnapshot({requestId: 'journey-' + Date.now()})"
+                + ".then((r) => {window.__ps2953Snapshot = String(r.connections);})"
+                + ".catch((e) => {window.__ps2953Snapshot = 'error:' + e;}); return 'ok';})()");
+        awaitJsTrue("window.__ps2953Snapshot !== null");
+        String value = evalString("window.__ps2953Snapshot");
+        assertFalse("native resource snapshot failed: " + value, value.startsWith("error:"));
+        return Integer.parseInt(value);
+    }
+
+    /**
+     * Ask the runner's rotation controller (a socket on the Docker host) to
+     * restart the rekeyed fixture; it answers with the new "type fp;..." keys.
+     */
+    private Set<String> rotateRekeyedFixture() throws Exception {
+        int port = Integer.parseInt(requiredArgument("rotationPort"));
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(fixtureHost(), port), 10_000);
+            socket.setSoTimeout(120_000);
+            OutputStream out = socket.getOutputStream();
+            out.write("rotate\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            String line = in.readLine();
+            assertNotNull("the rotation controller closed without an answer", line);
+            assertTrue("rotation failed: " + line, line.startsWith("ok "));
+            Set<String> keys = new LinkedHashSet<>();
+            for (String entry : line.substring(3).split(";")) {
+                if (!entry.trim().isEmpty()) keys.add(entry.trim());
+            }
+            assertFalse("the rotated fixture reported no keys", keys.isEmpty());
+            return keys;
+        }
+    }
+
+    private boolean exists(String selector) throws Exception {
+        return "true".equals(evalRaw("!!document.querySelector(" + JSONObject.quote(selector) + ")"));
+    }
+
+    private String text(String selector) throws Exception {
+        return evalString("(document.querySelector(" + JSONObject.quote(selector) + ")?.textContent ?? '').trim()");
+    }
+
+    /** Wait for {@code expression}; fail at once if {@code forbidden} ever holds meanwhile. */
+    private void awaitJsTrueNeverSeeing(String expression, String forbidden) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + WAIT_TIMEOUT_MILLIS;
+        String last = "<not evaluated>";
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (forbidden != null && "true".equals(evalRaw(forbidden))) {
+                throw new AssertionError("WebView reached a forbidden state: " + forbidden
+                        + " (page=" + evalString("document.body.innerText") + ")");
+            }
+            last = evalRaw(expression);
+            if ("true".equals(last)) return;
+            Thread.sleep(150);
+        }
+        throw new AssertionError("WebView condition did not become true: " + expression + " (last result: " + last
+                + "; page=" + evalString("document.body.innerText") + ")");
+    }
+
+    /**
+     * A second saved host on the run's imported key (the rekeyed fixture). The
+     * picker offers "Add a host" only while the list is empty, and adding a
+     * host through the form is the fixture host's own journey, so this one is
+     * written to the phone's host list directly and the app relaunched to load it.
+     */
+    private void addSavedHostWithFixtureKey(String name, String host, String port) throws Exception {
+        assertNotNull("the run's key must have been imported first", fixtureKeyHandle);
+        JSONObject entry = new JSONObject()
+                .put("name", name).put("hostname", host).put("port", Integer.parseInt(port))
+                .put("user", "testuser").put("keyHandleId", fixtureKeyHandle);
+        evalString("(() => {const key=" + JSONObject.quote(HOSTS_STORAGE_KEY) + ";"
+                + "const hosts=JSON.parse(localStorage.getItem(key) ?? '[]').filter((h)=>h.name!==" + JSONObject.quote(name) + ");"
+                + "hosts.push(" + entry + "); localStorage.setItem(key, JSON.stringify(hosts)); return 'ok';})()");
+        scenario.close();
+        scenario = ActivityScenario.launch(SharedShellLaunch.intent());
+        awaitJsTrue("[...document.querySelectorAll('.host-row')].some((n)=>n.textContent.includes(" + JSONObject.quote(name) + "))");
+    }
+
+    /**
+     * #2955 (U2), the D28 multi-session switch oracle: A -> B -> A between two
+     * session tabs of one folder keeps each tab's own PTY. The load-bearing
+     * evidence is host-side and bridge-side, not just the pane: the native
+     * bridge sees exactly one openPty per session and no closePty across the
+     * switches, and the Docker host's `a capture` of each session holds
+     * exactly that session's markers and none of the other's.
+     */
+    @Test
+    public void sharedAppSwitchesSessionTabsKeepingEachTerminal() throws Exception {
+        String run = Long.toString(System.currentTimeMillis(), 36);
+        File artifacts = artifactDirectory(run);
+        awaitJsTrue("!!document.querySelector('.host-list, .empty')");
+        installRecoveryRecorder();
+        openFixtureHost(sessionRun());
+        awaitJsTrue("document.querySelectorAll('.dir-header').length > 0");
+        JSONObject transport = new JSONObject(evalString("JSON.stringify([...(window.__pocketshellConnectionJournal ?? [])]"
+                + ".reverse().find((e)=>e.transportId && e.generationId) ?? null)"));
+
+        // Two plain shells in ONE folder of this run's own: two tabs.
+        String folder = "ps-multi-" + run;
+        String tagA = "mpa-" + run;
+        String tagB = "mpb-" + run;
+        for (String tag : new String[] {tagA, tagB}) {
+            JSONObject created = awaitNativeExec("create-" + tag, transport.getString("transportId"),
+                    transport.getString("generationId"), "set -eu\nmkdir -p \"$HOME/" + folder + "\"\n"
+                    + "PATH=\"$HOME/.local/bin:$PATH\" pocketshell sessions create --json --cwd \"$HOME/" + folder
+                    + "\" -- " + shellQuote(tag) + " >/dev/null");
+            assertEquals("session " + tag + " must be created: " + created, 0, created.getInt("exitCode"));
+        }
+        awaitFolder(folder);
+        openFolder(folder);
+        awaitJsTrue(tabExpression(tagA) + " && " + tabExpression(tagB), 30_000);
+
+        // A: a long listing (its first lines scroll out of view) and a job
+        // that prints while A is NOT the tab in front.
+        selectTab(tagA);
+        String idA = awaitFocusedSessionId(tagA);
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('$')");
+        typeLine("for i in $(seq 1 60); do echo PS2955_A_${i}_" + run + "; done");
+        awaitTerminalLine("PS2955_A_60_" + run);
+        String late = "(sleep 4; echo PS2955_ALATE_$((6*7))_" + run + ") &";
+        typeLine(late);
+        awaitJsTrue(VISIBLE_TERMINAL + ".replace(/\\n/g, '').includes(" + JSONObject.quote(late) + ")");
+
+        // B, while A's job is still running on the host.
+        long leftA = SystemClock.uptimeMillis();
+        selectTab(tagB);
+        String idB = awaitFocusedSessionId(tagB);
+        assertFalse("the two tabs must be two host sessions", idA.equals(idB));
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('$') && !" + VISIBLE_TERMINAL + ".includes('PS2955_A_')");
+        typeLine("echo PS2955_B_$((6*7))_" + run);
+        awaitTerminalLine("PS2955_B_42_" + run);
+        long stayOnB = 6_000 - (SystemClock.uptimeMillis() - leftA);
+        if (stayOnB > 0) Thread.sleep(stayOnB);
+        assertFalse("B's pane never shows A's bytes", evalString(VISIBLE_TERMINAL).contains("PS2955_A"));
+        captureScreen(new File(artifacts, "tab-b.png"));
+
+        // Back to A. A kept pane is only shown again: nothing asks the
+        // controller for anything, so no attach and no repaint — the late line
+        // A printed while B was in front can only have reached A's pane over
+        // A's own still-open PTY (the bridge counts below prove no re-attach).
+        // `a attach` holds the pane on the alternate screen, so a session's
+        // history is aplexer's (checked on the host below), and what the pane
+        // keeps is its screen: A's listing, untouched, and nothing of B's.
+        selectTab(tagA);
+        awaitJsTrue(terminalHasLine("PS2955_ALATE_42_" + run, "endsWith"));
+        String paneAOnReturn = evalString(VISIBLE_TERMINAL);
+        int rowsBefore = Integer.parseInt(evalString("String(" + VISIBLE_TERMINAL
+                + ".split('\\n').filter((l)=>/^PS2955_A_[0-9]+_/.test(l.trim())).length)"));
+        assertTrue("A's listing is still on A's screen: " + paneAOnReturn,
+                paneAOnReturn.contains("PS2955_A_60_" + run) && rowsBefore >= 5);
+        assertFalse("A's pane never shows B's bytes", paneAOnReturn.contains("PS2955_B"));
+        captureScreen(new File(artifacts, "tab-a-returned.png"));
+        typeLine("echo PS2955_A2_$((6*7))_" + run);
+        awaitTerminalLine("PS2955_A2_42_" + run);
+
+        // And B again: its own output is still in its pane, and it types.
+        selectTab(tagB);
+        awaitTerminalLine("PS2955_B_42_" + run);
+        typeLine("echo PS2955_B2_$((6*7))_" + run);
+        awaitTerminalLine("PS2955_B2_42_" + run);
+        assertFalse("B's pane never shows A's bytes", evalString(VISIBLE_TERMINAL).contains("PS2955_A"));
+        captureScreen(new File(artifacts, "tab-b-again.png"));
+
+        // Bridge evidence: one attach per session over A -> B -> A -> B, none closed.
+        JSONArray opens = new JSONArray(evalString("JSON.stringify(window.__ps2954.opens)"));
+        JSONArray closes = new JSONArray(evalString("JSON.stringify(window.__ps2954.closes)"));
+        writeText(new File(artifacts, "native-pty-calls.json"),
+                new JSONObject().put("opens", opens).put("closes", closes).toString(2));
+        Log.i(TAG, "RUN " + run + " NATIVE_PTY_OPENS " + opens + " CLOSES " + closes);
+        int opensA = 0;
+        int opensB = 0;
+        for (int i = 0; i < opens.length(); i += 1) {
+            String command = opens.getJSONObject(i).getString("command");
+            if (command.contains(tagA)) opensA += 1;
+            if (command.contains(tagB)) opensB += 1;
+        }
+        assertEquals("A is attached exactly once across the switches (no re-attach): " + opens, 1, opensA);
+        assertEquals("B is attached exactly once across the switches (no re-attach): " + opens, 1, opensB);
+        assertEquals("no PTY is closed by a tab switch: " + closes, 0, closes.length());
+
+        // Independent host oracle: each aplexer session holds its own bytes only.
+        JSONObject live = latestLiveJournalEntry();
+        String liveTransport = live.getString("transportId");
+        String liveGeneration = live.getString("generationId");
+        JSONObject captureA = awaitNativeExec("u2-capture-a-" + run, liveTransport, liveGeneration,
+                "/usr/bin/a capture --bytes 65536 " + shellQuote(idA));
+        JSONObject captureB = awaitNativeExec("u2-capture-b-" + run, liveTransport, liveGeneration,
+                "/usr/bin/a capture --bytes 65536 " + shellQuote(idB));
+        assertEquals("host capture of A must succeed: " + captureA, 0, captureA.getInt("exitCode"));
+        assertEquals("host capture of B must succeed: " + captureB, 0, captureB.getInt("exitCode"));
+        String hostA = captureA.getString("stdout");
+        String hostB = captureB.getString("stdout");
+        writeText(new File(artifacts, "host-capture-a.txt"), hostA);
+        writeText(new File(artifacts, "host-capture-b.txt"), hostB);
+        // The job prints after the prompt, so its line shares the "$ " row.
+        assertEquals("A holds its late line exactly once", 1, countLinesEndingWith(hostA, "PS2955_ALATE_42_" + run));
+        assertEquals("A holds its post-switch line exactly once", 1, countExactLines(hostA, "PS2955_A2_42_" + run));
+        assertEquals("A's history holds its first listing line exactly once", 1, countExactLines(hostA, "PS2955_A_1_" + run));
+        assertEquals("A holds its last listing line exactly once", 1, countExactLines(hostA, "PS2955_A_60_" + run));
+        assertEquals("B holds its line exactly once", 1, countExactLines(hostB, "PS2955_B_42_" + run));
+        assertEquals("B holds its post-switch line exactly once", 1, countExactLines(hostB, "PS2955_B2_42_" + run));
+        assertFalse("no byte of B reached host session A", hostA.contains("PS2955_B"));
+        assertFalse("no byte of A reached host session B", hostB.contains("PS2955_A"));
+
+        JSONObject reconnect = dropWithBothTabsOpen(run, artifacts, tagA, tagB, idA, idB, liveTransport, liveGeneration);
+
+        JSONObject summary = new JSONObject()
+                .put("run", run)
+                .put("sessionA", idA)
+                .put("sessionB", idB)
+                .put("nativeOpensA", opensA)
+                .put("nativeOpensB", opensB)
+                .put("nativeCloses", closes.length())
+                .put("paneListingRowsOnReturn", rowsBefore)
+                .put("hostMarkersExact", true)
+                .put("reconnectWithTwoTabs", reconnect);
+        writeText(new File(artifacts, "summary.json"), summary.toString(2));
+        Log.i(TAG, "RUN " + run + " MULTI_SESSION_SWITCH_OK " + summary);
+    }
+
+    /**
+     * D28 with two PTYs open (#2955 review): an abrupt server-side drop (our
+     * sshd-session SIGKILLed, as in the single-tab drop test) must be
+     * recovered by ONE controller ladder — one native dial — that re-attaches
+     * each tab exactly once, after which both tabs type and the host holds
+     * each tab's new marker exactly once, in its own session only.
+     */
+    private JSONObject dropWithBothTabsOpen(String run, File artifacts, String tagA, String tagB, String idA,
+            String idB, String transport, String generation) throws Exception {
+        int opensAtDrop = Integer.parseInt(evalString("String(window.__ps2954.opens.length)"));
+        int dialsAtDrop = nativeDialCount();
+        int journalAtDrop = journalLength();
+        String logicalId = latestLiveJournalEntry().getString("connectionId");
+        String trigger = "set -eu\n"
+                + "parent_pid=\"$PPID\"\n"
+                + "case \"$(ps -p \"$parent_pid\" -o args=)\" in *\"sshd-session: testuser\"*) ;; *) exit 97 ;; esac\n"
+                + "kill -KILL \"$parent_pid\"\n";
+        assertEquals("started", evalString(nativeExec("u2-drop-" + run, transport, generation, trigger, 12_000)));
+        awaitJsTrue("window.__ps2954.lost.filter((e)=>e.connectionId===" + JSONObject.quote(transport)
+                + ").length === 1", WAIT_TIMEOUT_MILLIS);
+        awaitJsTrue("(window.__pocketshellConnectionJournal ?? []).slice(" + journalAtDrop + ").some((e)=>"
+                + "e.phase==='live' && e.connectionId===" + JSONObject.quote(logicalId)
+                + " && e.transportId && e.transportId!==" + JSONObject.quote(transport) + ")", 90_000);
+        // Long enough for a second ladder or a duplicate re-attach to show.
+        Thread.sleep(6_000);
+
+        JSONArray journal = new JSONArray(evalString("JSON.stringify((window.__pocketshellConnectionJournal ?? [])"
+                + ".slice(" + journalAtDrop + "))"));
+        JSONArray opens = new JSONArray(evalString("JSON.stringify(window.__ps2954.opens.slice(" + opensAtDrop + "))"));
+        writeText(new File(artifacts, "two-tab-drop-journal.json"), journal.toString(2));
+        writeText(new File(artifacts, "two-tab-drop-opens.json"), opens.toString(2));
+        Log.i(TAG, "RUN " + run + " TWO_TAB_DROP_OPENS " + opens + " JOURNAL " + journal);
+        int ladders = 0;
+        java.util.Set<String> transports = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < journal.length(); i += 1) {
+            JSONObject entry = journal.getJSONObject(i);
+            assertEquals("one logical connection: " + journal, logicalId, entry.getString("connectionId"));
+            if ("reconnecting".equals(entry.getString("phase")) && entry.getInt("retryAttempt") == 0) ladders += 1;
+            String entryTransport = entry.optString("transportId", "");
+            if (!entryTransport.isEmpty() && !"null".equals(entryTransport) && !entryTransport.equals(transport)) {
+                transports.add(entryTransport);
+            }
+        }
+        int reopenedA = 0;
+        int reopenedB = 0;
+        for (int i = 0; i < opens.length(); i += 1) {
+            String command = opens.getJSONObject(i).getString("command");
+            if (command.contains(tagA)) reopenedA += 1;
+            if (command.contains(tagB)) reopenedB += 1;
+        }
+        assertEquals("one controller ladder for the drop: " + journal, 1, ladders);
+        assertEquals("one native dial for the drop", 1, nativeDialCount() - dialsAtDrop);
+        assertEquals("one new transport: " + transports, 1, transports.size());
+        assertEquals("tab A re-attached exactly once: " + opens, 1, reopenedA);
+        assertEquals("tab B re-attached exactly once: " + opens, 1, reopenedB);
+        assertEquals("no other attach after the drop: " + opens, 2, opens.length());
+        awaitJsTrue("!document.querySelector('.link-lost')", WAIT_TIMEOUT_MILLIS);
+
+        // Both tabs keep working: B is in front, then A.
+        typeLine("echo PS2955_B3_$((6*7))_" + run);
+        awaitTerminalLine("PS2955_B3_42_" + run);
+        selectTab(tagA);
+        typeLine("echo PS2955_A3_$((6*7))_" + run);
+        awaitTerminalLine("PS2955_A3_42_" + run);
+        assertFalse("A's pane never shows B's bytes", evalString(VISIBLE_TERMINAL).contains("PS2955_B"));
+        captureScreen(new File(artifacts, "two-tab-drop-a.png"));
+
+        JSONObject live = latestLiveJournalEntry();
+        String newTransport = live.getString("transportId");
+        String newGeneration = live.getString("generationId");
+        assertEquals("the live transport is the recovered one", transports.iterator().next(), newTransport);
+        String hostA = awaitNativeExec("u2-drop-capture-a-" + run, newTransport, newGeneration,
+                "/usr/bin/a capture --bytes 65536 " + shellQuote(idA)).getString("stdout");
+        String hostB = awaitNativeExec("u2-drop-capture-b-" + run, newTransport, newGeneration,
+                "/usr/bin/a capture --bytes 65536 " + shellQuote(idB)).getString("stdout");
+        writeText(new File(artifacts, "two-tab-drop-capture-a.txt"), hostA);
+        writeText(new File(artifacts, "two-tab-drop-capture-b.txt"), hostB);
+        assertEquals("A holds its post-drop line exactly once", 1, countExactLines(hostA, "PS2955_A3_42_" + run));
+        assertEquals("B holds its post-drop line exactly once", 1, countExactLines(hostB, "PS2955_B3_42_" + run));
+        assertFalse("no byte of B reached host session A", hostA.contains("PS2955_B"));
+        assertFalse("no byte of A reached host session B", hostB.contains("PS2955_A"));
+        return new JSONObject()
+                .put("ladders", ladders)
+                .put("nativeDials", 1)
+                .put("newTransports", transports.size())
+                .put("reattachedA", reopenedA)
+                .put("reattachedB", reopenedB)
+                .put("hostMarkersExact", true);
+    }
+
+    private static String tabExpression(String tag) {
+        return "[...document.querySelectorAll('.folder-bar button.tab')].some((n)=>n.textContent.includes("
+                + JSONObject.quote(tag) + "))";
+    }
+
+    private void selectTab(String tag) throws Exception {
+        evalString("(() => {const tab=[...document.querySelectorAll('.folder-bar button.tab')].find((n)=>n.textContent"
+                + ".includes(" + JSONObject.quote(tag) + ")); if(!tab) throw new Error('no tab'); tab.click(); return 'ok';})()");
+    }
+
+    /** The aplexer id of the session the controller last attached, once it is `tag`'s. */
+    private String awaitFocusedSessionId(String tag) throws Exception {
+        String find = "[...(window.__pocketshellConnectionJournal ?? [])].reverse().find((e)=>e.phase==='live')";
+        awaitJsTrue("(" + find + ")?.selectedTag===" + JSONObject.quote(tag), WAIT_TIMEOUT_MILLIS);
+        return evalString("(" + find + ").selectedId");
+    }
+
+    /**
+     * The non-happy host: the transport drops while the host refuses logins
+     * (its authorized_keys is moved aside for 8 s), so the controller's
+     * re-dial is refused and it gives up. The shared store must then stay
+     * given up — on the stage-1 base its own ReconnectLoop re-dialled 5 s
+     * later under a NEW logical connection — and the banner's Reconnect must
+     * recover the same logical id and session through ONE controller ladder.
+     */
+    private JSONObject refusedLoginsGiveUpThenRetry(String run, File artifacts, String logicalId, String sessionId,
+            String transport, String generation, int transportsBefore) throws Exception {
+        int journalAtDrop = journalLength();
+        int dialsAtDrop = nativeDialCount();
+        String request = "u1-refuse-" + run;
+        String trigger = "set -eu\n"
+                + "parent_pid=\"$PPID\"\n"
+                + "case \"$(ps -p \"$parent_pid\" -o args=)\" in *\"sshd-session: testuser\"*) ;; *) exit 97 ;; esac\n"
+                + "mv \"$HOME/.ssh/authorized_keys\" \"$HOME/.ssh/authorized_keys.ps2954\"\n"
+                + "setsid sh -c 'sleep 8; mv \"$HOME/.ssh/authorized_keys.ps2954\" \"$HOME/.ssh/authorized_keys\"' "
+                + "</dev/null >/dev/null 2>&1 &\n"
+                + "kill -KILL \"$parent_pid\"\n";
+        long dropAt = System.currentTimeMillis();
+        assertEquals("started", evalString(nativeExec(request, transport, generation, trigger, 12_000)));
+        awaitJsTrue("window.__ps2954.lost.filter((e)=>e.connectionId===" + JSONObject.quote(transport)
+                + ").length === 1", WAIT_TIMEOUT_MILLIS);
+        awaitJsTrue("(window.__pocketshellConnectionJournal ?? []).slice(" + journalAtDrop + ").some((e)=>"
+                + "e.phase==='lost' && e.connectionId===" + JSONObject.quote(logicalId) + ")", WAIT_TIMEOUT_MILLIS);
+        // Logins are back after 8 s; the base store dialled at 5 s (a new logical id).
+        // Hold well past both, then require that nothing re-dialled.
+        long quietUntil = dropAt + 12_000;
+        while (System.currentTimeMillis() < quietUntil) Thread.sleep(250);
+        JSONArray given = new JSONArray(evalString("JSON.stringify((window.__pocketshellConnectionJournal ?? [])"
+                + ".slice(" + journalAtDrop + "))"));
+        writeText(new File(artifacts, "journal-give-up.json"), given.toString(2));
+        Log.i(TAG, "RUN " + run + " JOURNAL_GIVE_UP " + given);
+        int laddersBeforeRetry = 0;
+        for (int i = 0; i < given.length(); i += 1) {
+            JSONObject entry = given.getJSONObject(i);
+            assertEquals("no second logical connection while given up: " + given, logicalId, entry.getString("connectionId"));
+            if ("reconnecting".equals(entry.getString("phase")) && entry.getInt("retryAttempt") == 0) laddersBeforeRetry += 1;
+            String entryTransport = entry.optString("transportId", "");
+            assertTrue("nothing may re-dial after the controller gave up: " + given,
+                    entryTransport.isEmpty() || "null".equals(entryTransport) || entryTransport.equals(transport));
+        }
+        assertEquals("the refused re-dial is one controller ladder: " + given, 1, laddersBeforeRetry);
+        // A refused login is not retryable, so the ladder dials once; a
+        // store ladder would dial again here, successfully or not.
+        int dialsWhileGivenUp = nativeDialCount() - dialsAtDrop;
+        assertEquals("exactly one native dial while given up (no store re-dial)", 1, dialsWhileGivenUp);
+        assertEquals("still given up: " + given, "lost", given.getJSONObject(given.length() - 1).getString("phase"));
+        String bannerText = evalString("document.querySelector('.link-lost-text')?.textContent?.trim() ?? ''");
+        assertTrue("the banner shows the controller's give-up: " + bannerText, bannerText.contains("Could not reconnect"));
+        assertEquals("the banner offers Reconnect", "Reconnect",
+                evalString("document.querySelector('.reconnect-btn')?.textContent?.trim() ?? ''"));
+        captureScreen(new File(artifacts, "given-up.png"));
+
+        // Retry: the banner's Reconnect → api.ssh.reconnect(id) → one controller ladder.
+        int journalAtRetry = journalLength();
+        int dialsAtRetry = nativeDialCount();
+        click(".reconnect-btn");
+        awaitJsTrue("(window.__pocketshellConnectionJournal ?? []).slice(" + journalAtRetry + ").some((e)=>"
+                + "e.phase==='live' && e.connectionId===" + JSONObject.quote(logicalId)
+                + " && e.transportId && e.selectedId===" + JSONObject.quote(sessionId) + ")", 90_000);
+        Thread.sleep(8_000);
+        JSONArray retried = new JSONArray(evalString("JSON.stringify((window.__pocketshellConnectionJournal ?? [])"
+                + ".slice(" + journalAtRetry + "))"));
+        writeText(new File(artifacts, "journal-retry.json"), retried.toString(2));
+        Log.i(TAG, "RUN " + run + " JOURNAL_RETRY " + retried);
+        int retryLadders = 0;
+        java.util.Set<String> retryTransports = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < retried.length(); i += 1) {
+            JSONObject entry = retried.getJSONObject(i);
+            assertEquals("Retry keeps the logical connection: " + retried, logicalId, entry.getString("connectionId"));
+            if ("reconnecting".equals(entry.getString("phase")) && entry.getInt("retryAttempt") == 0) retryLadders += 1;
+            String entryTransport = entry.optString("transportId", "");
+            if (!entryTransport.isEmpty() && !"null".equals(entryTransport)) retryTransports.add(entryTransport);
+        }
+        assertEquals("Retry runs exactly one controller ladder: " + retried, 1, retryLadders);
+        assertEquals("Retry opens exactly one native transport: " + retryTransports, 1, retryTransports.size());
+        assertEquals("Retry makes exactly one native dial", 1, nativeDialCount() - dialsAtRetry);
+        assertEquals("no leaked or doubled native transport after Retry", transportsBefore, nativeConnectionCount());
+        awaitJsTrue("!document.querySelector('.link-lost')", WAIT_TIMEOUT_MILLIS);
+
+        JSONObject live = latestLiveJournalEntry();
+        assertEquals("Retry re-attached the same aplexer session", sessionId, live.getString("selectedId"));
+        String marker = "PS2954_RETRY_42_" + run;
+        typeLine("echo PS2954_RETRY_$((6*7))_" + run);
+        awaitTerminalLine(marker);
+        captureScreen(new File(artifacts, "retried.png"));
+        JSONObject capture = awaitNativeExec("u1-retry-capture-" + run, live.getString("transportId"),
+                live.getString("generationId"), "/usr/bin/a capture --bytes 65536 " + shellQuote(sessionId));
+        assertEquals("host capture after Retry must succeed: " + capture, 0, capture.getInt("exitCode"));
+        assertEquals("the host session holds the post-Retry marker exactly once", 1,
+                countExactLines(capture.getString("stdout"), marker));
+        return new JSONObject()
+                .put("laddersBeforeRetry", laddersBeforeRetry)
+                .put("retryLadders", retryLadders)
+                .put("retryTransports", retryTransports.size())
+                .put("dialsWhileGivenUp", dialsWhileGivenUp)
+                .put("retryDials", 1)
+                .put("giveUpBanner", bannerText)
+                .put("hostMarkerLines", 1);
+    }
+
+    /**
+     * Open this run's fixture host (shared with the other tests of the run),
+     * then create a shell session of this test's own — its own folder, so
+     * neither the other tests nor earlier lanes share it — and open it.
+     */
+    private void connectFixtureAndAttach(String run) throws Exception {
+        openFixtureHost(sessionRun());
+        awaitJsTrue("document.querySelectorAll('.dir-header').length > 0");
+        String folder = "ps-shared-" + run;
+        JSONObject transport = new JSONObject(evalString("JSON.stringify([...(window.__pocketshellConnectionJournal ?? [])]"
+                + ".reverse().find((e)=>e.transportId && e.generationId) ?? null)"));
+        JSONObject created = awaitNativeExec("create-" + run, transport.getString("transportId"),
+                transport.getString("generationId"), "set -eu\nmkdir -p \"$HOME/" + folder + "\"\n"
+                + "PATH=\"$HOME/.local/bin:$PATH\" pocketshell sessions create --json --cwd \"$HOME/" + folder + "\" -- "
+                + shellQuote("shell-" + run) + " >/dev/null");
+        assertEquals("the journey's own shell session must be created: " + created, 0, created.getInt("exitCode"));
+        awaitFolder(folder);
+        openFolder(folder);
+        // Attach: the controller's PTY paints a prompt into the shared pane.
+        awaitJsTrue(VISIBLE_TERMINAL + ".includes('$')");
+    }
+
+    /**
+     * Record, from before the connect: every native `connectionState` event
+     * (the plugin's own listener, not the app's), the shared lost-link
+     * banner's text each time it changes, and native exec results.
+     */
+    private void installRecoveryRecorder() throws Exception {
+        String script = "(() => {window.__ps2954={lost:[],events:[],banners:[],dials:[],opens:[],closes:[],"
+                + "sawExited:false,sawReattached:false,execs:{},ready:false};"
+                + "const plugin=window.Capacitor?.Plugins?.SshCapability;"
+                // Every native dial, failed ones included: the plugin proxy
+                // resolves Capacitor.nativePromise on each call.
+                + "const nativePromise=window.Capacitor.nativePromise.bind(window.Capacitor);"
+                + "window.Capacitor.nativePromise=(plugin,method,options)=>{"
+                + "if(plugin==='SshCapability'&&method==='connect') window.__ps2954.dials.push({at:Date.now()});"
+                // Every PTY the app opens or closes (#2955): a tab switch that
+                // re-attaches would show up here as a second open.
+                + "if(plugin==='SshCapability'&&method==='openPty') window.__ps2954.opens.push({at:Date.now(),command:String(options?.command??'')});"
+                + "if(plugin==='SshCapability'&&method==='closePty') window.__ps2954.closes.push({at:Date.now(),channelId:String(options?.channelId??'')});"
+                + "return nativePromise(plugin,method,options);};"
+                + "if(!plugin?.addListener) throw new Error('SSH native event bridge missing');"
+                + "const sample=()=>{const t=document.querySelector('.link-lost-text')?.textContent?.trim();"
+                + "if(t && window.__ps2954.banners.at(-1)!==t) window.__ps2954.banners.push(t);"
+                + "if([...document.querySelectorAll('.xterm-rows')].some((n)=>n.textContent.includes('[process exited]')))"
+                + " window.__ps2954.sawExited=true;"
+                // #3039: the pane's own word for a silent re-join, latched
+                // because the attach repaint may draw over it.
+                + "if([...document.querySelectorAll('.xterm-rows')].some((n)=>n.textContent.includes('client dropped')))"
+                + " window.__ps2954.sawReattached=true;};"
+                + "new MutationObserver(sample).observe(document.body,{subtree:true,childList:true,characterData:true});"
+                + "plugin.addListener('connectionState',(e)=>{window.__ps2954.events.push({...e,at:Date.now()});"
+                + "if(e.state==='lost') window.__ps2954.lost.push({...e,at:Date.now()});})"
+                + ".then(()=>{window.__ps2954.ready=true;}); return 'installed';})()";
+        assertEquals("installed", evalString(script));
+        awaitJsTrue("window.__ps2954?.ready === true", 10_000);
+    }
+
+    private JSONObject latestLiveJournalEntry() throws Exception {
+        String raw = evalString("JSON.stringify([...(window.__pocketshellConnectionJournal ?? [])].reverse()"
+                + ".find((e)=>e.phase==='live' && e.transportId && e.selectedId) ?? null)");
+        assertTrue("the Android connection journal must record a live attach", raw != null && !"null".equals(raw));
+        return new JSONObject(raw);
+    }
+
+    /** Native SSH dials (connect calls at the Capacitor bridge) since the recorder was installed. */
+    private int nativeDialCount() throws Exception {
+        return Integer.parseInt(evalString("String(window.__ps2954.dials.length)"));
+    }
+
+    private int journalLength() throws Exception {
+        return Integer.parseInt(evalString("String((window.__pocketshellConnectionJournal ?? []).length)"));
+    }
+
+    /** Open native SSH connections, from the plugin itself. */
+    private int nativeConnectionCount() throws Exception {
+        String request = "u1-resources-" + SystemClock.uptimeMillis();
+        evalString("(() => {window.__ps2954.execs[" + JSONObject.quote(request) + "]={settled:false};"
+                + "window.Capacitor.Plugins.SshCapability.resourceSnapshot({requestId:" + JSONObject.quote(request) + "})"
+                + ".then((r)=>{window.__ps2954.execs[" + JSONObject.quote(request) + "]={settled:true,result:r};},"
+                + "(e)=>{window.__ps2954.execs[" + JSONObject.quote(request) + "]={settled:true,error:String(e?.message??e)};});"
+                + "return 'started';})()");
+        awaitJsTrue("window.__ps2954.execs[" + JSONObject.quote(request) + "].settled === true", 10_000);
+        JSONObject state = new JSONObject(evalString("JSON.stringify(window.__ps2954.execs[" + JSONObject.quote(request) + "])"));
+        JSONObject result = state.optJSONObject("result");
+        assertNotNull("native resource snapshot failed: " + state, result);
+        return result.getInt("connections");
+    }
+
+    private String nativeExec(String requestId, String connectionId, String generationId, String command, int timeoutMs) {
+        String key = JSONObject.quote(requestId);
+        return "(() => {const entry={settled:false,result:null,error:''};"
+                + "(window.__ps2954 ??= {lost:[],banners:[],execs:{},ready:false}).execs[" + key + "]=entry;"
+                + "window.Capacitor.Plugins.SshCapability.exec({requestId:" + key
+                + ",connectionId:" + JSONObject.quote(connectionId)
+                + ",generationId:" + JSONObject.quote(generationId)
+                + ",command:" + JSONObject.quote(command)
+                + ",timeoutMs:" + timeoutMs + "}).then((r)=>{entry.result=r;entry.settled=true;},"
+                + "(e)=>{entry.error=String(e?.message??e);entry.settled=true;});return 'started';})()";
+    }
+
+    private JSONObject awaitNativeExec(String requestId, String connectionId, String generationId, String command)
+            throws Exception {
+        assertEquals("started", evalString(nativeExec(requestId, connectionId, generationId, command, 20_000)));
+        awaitJsTrue("window.__ps2954.execs[" + JSONObject.quote(requestId) + "]?.settled === true", 25_000);
+        JSONObject state = new JSONObject(evalString("JSON.stringify(window.__ps2954.execs["
+                + JSONObject.quote(requestId) + "])"));
+        assertEquals("native host exec must not reject: " + state, "", state.optString("error"));
+        JSONObject result = state.optJSONObject("result");
+        assertNotNull("native host exec result must be present", result);
+        assertFalse("native host exec must not time out", result.optBoolean("timedOut"));
+        return result;
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    private static int countExactLines(String raw, String expected) {
+        String plain = raw.replaceAll("\u001B\\[[0-?]*[ -/]*[@-~]", "");
+        int count = 0;
+        for (String line : plain.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
+            if (expected.equals(line.trim())) count += 1;
+        }
+        return count;
+    }
+
+    private static int countLinesEndingWith(String raw, String expected) {
+        String plain = raw.replaceAll("\u001B\\[[0-?]*[ -/]*[@-~]", "");
+        int count = 0;
+        for (String line : plain.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
+            if (line.trim().endsWith(expected)) count += 1;
+        }
+        return count;
+    }
+
+    private File artifactDirectory(String run) {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        File root = context.getExternalFilesDir(null);
+        assertNotNull("target app external files directory must be available for same-run artifacts", root);
+        File directory = new File(root, "pocketshell-shared-app/" + run);
+        assertTrue("run artifact directory must be new", directory.mkdirs());
+        Log.i(TAG, "ARTIFACTS " + directory.getAbsolutePath());
+        return directory;
+    }
+
+    /**
+     * #3039: the app's external files go with the app when Gradle uninstalls it
+     * after the run, so a passing run used to leave no phase trace to compare
+     * a red one against. Copy it where the runner pulls evidence from.
+     */
+    private static void keepForRunner(File file, String name) {
+        ScriptedIme.shell("cp " + file.getAbsolutePath() + " /data/local/tmp/" + name);
+    }
+
+    private static void writeText(File file, String text) throws Exception {
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private static void captureScreen(File file) throws Exception {
+        Bitmap screen = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
+        assertNotNull("a full-screen capture must be available", screen);
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            assertTrue(screen.compress(Bitmap.CompressFormat.PNG, 100, out));
+        }
+    }
+
+
+
+    private String sessionRun() {
+        String run = InstrumentationRegistry.getArguments().getString("sessionRun");
+        assertNotNull("pass the runner-created session run id with sessionRun", run);
+        assertTrue("sessionRun must be a safe folder token", run.matches("[a-z0-9-]{6,40}"));
+        return run;
+    }
+
+    /**
+     * Boots the shared app and opens this run's fixture host, adding it (and
+     * importing the runner's key) only if an earlier test of the run has not.
+     * Its first contact meets the #2953 host-key prompt, answered "remember".
+     */
+    private void openFixtureHost(String run) throws Exception {
+        ensureFixtureHost(run);
+        tapHost("fixture-" + run);
+        trustFirstContactIfAsked(hostKeys("agentsHostKeys"));
+    }
+
+    /**
+     * Boots the shared app and makes sure this run's fixture host exists,
+     * adding it (and importing the runner's key) only if an earlier test of
+     * the run has not.
+     */
+    private void ensureFixtureHost(String run) throws Exception {
+        var arguments = InstrumentationRegistry.getArguments();
+        String host = arguments.getString("sshHost", "10.0.2.2");
+        String port = arguments.getString("sshPort");
+        String keyPath = arguments.getString("sshPrivateKeyPath");
+        assertNotNull("pass the Docker fixture port with sshPort", port);
+        assertNotNull("pass the runner-staged test key with sshPrivateKeyPath", keyPath);
+
+        // Exactly one shell booted, chosen before the WebView loaded: no
+        // default shell first, no reload into the shared one.
+        awaitJsTrue("!!document.querySelector('.host-list, .empty')");
+        assertEquals("[\"shared\"]", evalString("sessionStorage.getItem('pocketshell.shell-boot-log')"));
+        assertEquals("the opt-in launch must load exactly one page (no load-then-reload)", 1, pageStartCount());
+
+        String hostRow = "[...document.querySelectorAll('.host-row')].some((n)=>n.textContent.includes('fixture-" + run + "'))";
+        if (fixtureHostAdded) {
+            // An earlier test of this run added it (and consumed the staged
+            // key); the saved host list loads asynchronously after the picker.
+            awaitJsTrue(hostRow);
+        } else {
+            fixtureHostAdded = true;
+            // The fixture key enters the Android key vault from a content URI; only
+            // its handle crosses into the WebView (#2926).
+            java.io.File keyDocument = SshKeyVaultTestSupport.copyDockerKeyDocument(
+                    InstrumentationRegistry.getInstrumentation().getTargetContext(), keyPath, run);
+            evalString(SshKeyVaultTestSupport.beginImport(SshKeyVaultTestSupport.asContentUri(
+                    InstrumentationRegistry.getInstrumentation().getTargetContext(), keyDocument), "Docker fixture key"));
+            awaitJsTrue("window." + SshKeyVaultTestSupport.IMPORT_RESULT + "?.state === 'ready'");
+            String handle = evalString("window." + SshKeyVaultTestSupport.IMPORT_RESULT + ".handleId");
+            keyDocument.delete();
+            fixtureKeyHandle = handle;
+
+            evalString("(() => {const b=[...document.querySelectorAll('button')].find((n)=>n.textContent.trim()==='Add a host');"
+                    + "if(!b) throw new Error('no Add a host action'); b.click(); return 'ok';})()");
+            awaitJsTrue("!!document.querySelector('[data-testid=android-add-host]')");
+            setValue("[data-testid=host-name]", "fixture-" + run);
+            setValue("[data-testid=host-hostname]", host);
+            setValue("[data-testid=host-port]", port);
+            setValue("[data-testid=host-user]", "testuser");
+            awaitJsTrue("[...document.querySelectorAll('[data-testid=host-key] option')].some((o)=>o.value===" + JSONObject.quote(handle) + ")");
+            setSelect("[data-testid=host-key]", handle);
+            click("[data-testid=host-save]");
+            awaitJsTrue(hostRow);
+        }
+    }
+
+    /**
+     * After tapping a host: on its first contact the shared prompt asks
+     * (#2953) and is answered "remember" once its key is checked against the
+     * runner's oracle; a pinned host connects without asking.
+     */
+    private void trustFirstContactIfAsked(Set<String> realKeys) throws Exception {
+        awaitJsTrue("!!document.querySelector(" + JSONObject.quote(GATE) + ") || !!document.querySelector('button[title=\"Back to hosts\"]')");
+        if (exists(GATE)) {
+            assertPresentedKeyIn(realKeys);
+            click("[data-testid=trust-host-key]");
+        }
+    }
+
+    private int pageStartCount() {
+        AtomicReference<Integer> count = new AtomicReference<>();
+        scenario.onActivity(activity -> count.set(activity.pageStartCount()));
+        return count.get();
+    }
+
+    private void awaitFolder(String folder) throws Exception {
+        awaitJsTrue("[...document.querySelectorAll('.dir-header')].some((n)=>n.textContent.includes(" + JSONObject.quote(folder) + "))");
+    }
+
+    private void openFolder(String folder) throws Exception {
+        evalString("(() => {const row=[...document.querySelectorAll('.dir-header')].find((n)=>n.textContent.includes("
+                + JSONObject.quote(folder) + ")); if(!row) throw new Error('no folder row'); row.click(); return 'ok';})()");
+    }
+
+    /**
+     * Types a line through the scripted input method, the way the emulator's
+     * LatinIME types it (composing words, digits as key events, symbols and
+     * Enter as commits), then requires the terminal to still own focus: a key
+     * event must not divert the rest of the line into the composer.
+     */
+    private void typeLine(String text) throws Exception {
+        focusTerminalForIme();
+        Bundle typed = runIme(ScriptedIme.script().typeLikeLatinIme(text).commit("\n"));
+        Log.i(TAG, "typed " + JSONObject.quote(text) + " " + ScriptedIme.describe(typed));
+        assertTerminalKeepsFocus("after typing " + text);
+    }
+
+    /**
+     * Gives the visible terminal's textarea DOM and Android focus and asks for
+     * the keyboard, then waits until the scripted IME is bound to it.
+     */
+    private void focusTerminalForIme() throws Exception {
+        armInputTrace();
+        CountDownLatch shown = new CountDownLatch(1);
+        scenario.onActivity(activity -> {
+            WebView webView = activity.getBridge().getWebView();
+            webView.requestFocus();
+            InputMethodManager imm = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+            imm.showSoftInput(webView, 0);
+            shown.countDown();
+        });
+        assertTrue(shown.await(10, TimeUnit.SECONDS));
+        // Selection and binding are deterministic and bounded: the system must
+        // report the scripted IME as the current method bound to this app's
+        // process before any op is sent (#2952, starved hosted emulators).
+        ime.awaitBoundTo(android.os.Process.myPid(), 20_000);
+        // The IME is bound to the textarea once it reports a text editor
+        // (a non-editable focus is TYPE_NULL) while the textarea holds DOM focus.
+        String app = InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName();
+        long deadline = SystemClock.uptimeMillis() + 15_000;
+        String last = "<not probed>";
+        while (SystemClock.uptimeMillis() < deadline) {
+            String focused = evalString("(() => {const t=" + VISIBLE_TEXTAREA + ";"
+                    + "if(!t) throw new Error('no visible terminal'); if (document.activeElement!==t) t.focus();"
+                    + "return String(document.activeElement===t);})()");
+            try {
+                Bundle probe = ime.run(ScriptedIme.script(), app);
+                last = "domFocus=" + focused + " " + ScriptedIme.describe(probe);
+                if ("true".equals(focused) && probe.getInt("editorInputType") != 0) {
+                    Log.i(TAG, "IME bound to the terminal: " + last);
+                    logInputTrace("focus");
+                    armInputTrace();
+                    return;
+                }
+            } catch (AssertionError error) {
+                last = "domFocus=" + focused + " " + error.getMessage();
+            }
+            Thread.sleep(250);
+        }
+        logInputTrace("focus failed");
+        throw new AssertionError("the scripted IME never bound to the focused terminal textarea: " + last
+                + "\n" + ScriptedIme.inputMethodState());
+    }
+
+    private Bundle runIme(ScriptedIme.Script script) throws Exception {
+        String app = InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName();
+        try {
+            return ime.run(script, app);
+        } catch (AssertionError error) {
+            logInputTrace("failed IME script");
+            throw error;
+        }
+    }
+
+    /**
+     * Diagnostics only: records, in the page, the keyboard/IME/focus events
+     * the terminal's textarea sees, so a failure shows what the keyboard did.
+     */
+    private void armInputTrace() throws Exception {
+        evalRaw("(() => {if (window.__ps2952Trace) return true; const trace = window.__ps2952Trace = [];"
+                + "const describe = (n) => n ? n.tagName + '.' + String(n.className ?? '').split(' ')[0] : 'null';"
+                + "for (const type of ['keydown','keyup','beforeinput','input','compositionstart','compositionupdate',"
+                + "'compositionend','focusin','focusout','paste']) {"
+                + "document.addEventListener(type, (e) => {if (trace.length > 400) trace.shift();"
+                + "trace.push([type, describe(e.target), e.key ?? '', e.keyCode ?? '', e.inputType ?? '', e.data ?? '',"
+                + "e.target?.value ?? '', describe(document.activeElement)].join('|'));}, true);}"
+                + "return true;})()");
+    }
+
+    private void logInputTrace(String context) {
+        try {
+            String trace = evalString("JSON.stringify(window.__ps2952Trace ?? [])");
+            Log.i(TAG, "input trace " + context + ": " + trace);
+            evalRaw("(window.__ps2952Trace ?? []).length = 0, true");
+        } catch (Exception error) {
+            Log.w(TAG, "input trace unavailable: " + error);
+        }
+    }
+
+    private void assertTerminalKeepsFocus(String context) throws Exception {
+        logInputTrace(context);
+        String state = evalString("JSON.stringify({terminal: document.activeElement === " + VISIBLE_TEXTAREA + ","
+                + " active: document.activeElement?.tagName + '.' + String(document.activeElement?.className ?? '')})");
+        assertTrue("the terminal must keep focus " + context + " (no hand-off to the composer): " + state,
+                new JSONObject(state).getBoolean("terminal"));
+    }
+
+    /**
+     * A real ClipboardEvent paste on xterm's focused textarea, the event an
+     * Android long-press Paste delivers.
+     */
+    /** Record the key of every keyup the page sees, in order, from now on. */
+    private void recordPageKeyUps() throws Exception {
+        evalString("(() => {window.__psKeyUps=[];"
+                + "if(!window.__psKeyUpHook){window.__psKeyUpHook=true;"
+                + "document.addEventListener('keyup',(e)=>window.__psKeyUps.push(e.key),true);}"
+                + "return 'ok';})()");
+    }
+
+    private void pasteIntoTerminal(String text) throws Exception {
+        String result = evalString("JSON.stringify((() => {"
+                + "const textarea=" + VISIBLE_TEXTAREA + ";"
+                + "if(!textarea) throw new Error('no visible terminal'); textarea.focus();"
+                + "const transfer=new DataTransfer();transfer.setData('text/plain'," + JSONObject.quote(text) + ");"
+                + "const event=new ClipboardEvent('paste',{clipboardData:transfer,bubbles:true,cancelable:true});"
+                + "const accepted=textarea.dispatchEvent(event);"
+                + "return {focused:document.activeElement===textarea,accepted};})())");
+        JSONObject paste = new JSONObject(result);
+        assertTrue("the visible terminal must hold focus for the paste: " + result, paste.getBoolean("focused"));
+    }
+
+    private String awaitCapturedHex() throws Exception {
+        Pattern captured = Pattern.compile("PS2952_HEX:([0-9a-f]*):END");
+        long deadline = SystemClock.uptimeMillis() + WAIT_TIMEOUT_MILLIS;
+        String text = "";
+        while (SystemClock.uptimeMillis() < deadline) {
+            text = evalString(VISIBLE_TERMINAL + ".replace(/\\n/g, '')");
+            Matcher match = captured.matcher(text);
+            if (match.find()) return match.group(1);
+            Thread.sleep(150);
+        }
+        throw new AssertionError("the host reader never reported its bytes; terminal=" + text);
+    }
+
+    /** Evidence only: the runner pulls /data/local/tmp/ps2952-*.png next to the results. */
+    private void screenshot(String name) {
+        ScriptedIme.shell("screencap -p /data/local/tmp/ps2952-" + name + ".png");
+    }
+
+    static String hex(String text) {
+        StringBuilder out = new StringBuilder();
+        for (byte b : text.getBytes(java.nio.charset.StandardCharsets.UTF_8)) out.append(String.format("%02x", b & 0xff));
+        return out.toString();
+    }
+
+    static String decodeHex(String hex) {
+        byte[] bytes = new byte[hex.length() / 2];
+        for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
+        return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Wait for an exact output line. A line longer than the phone-width
+     * terminal soft-wraps onto the next rows (the runner's session ids vary
+     * in length run to run), so a line also matches as a run of consecutive
+     * rows that join to exactly it.
+     */
+    private void awaitTerminalLine(String line) throws Exception {
+        awaitJsTrue(terminalHasLine(line, "equals"));
+    }
+
+    /**
+     * Whether the visible terminal shows {@code expected} as one logical line,
+     * across xterm soft wraps. The matcher is the test APK's
+     * {@code terminal-logical-lines.js} asset, which
+     * tests/unit/terminalLogicalLines.test.ts replays against captured texts
+     * (an exactly full-width line, a wrapped one, 4- and 5-digit run ids).
+     */
+    private static String terminalHasLine(String expected, String mode) throws java.io.IOException {
+        return "(" + logicalLineMatcher() + ")(" + VISIBLE_TERMINAL + ", " + JSONObject.quote(expected) + ", "
+                + JSONObject.quote(mode) + ")";
+    }
+
+    private static String logicalLineMatcher;
+
+    private static synchronized String logicalLineMatcher() throws java.io.IOException {
+        if (logicalLineMatcher == null) {
+            try (java.io.InputStream input = InstrumentationRegistry.getInstrumentation().getContext().getAssets()
+                    .open("terminal-logical-lines.js")) {
+                logicalLineMatcher = new String(readAll(input), java.nio.charset.StandardCharsets.UTF_8)
+                        .replaceFirst("(?s)^/\\*.*?\\*/\\s*", "").trim();
+            }
+        }
+        return logicalLineMatcher;
+    }
+
+    private static byte[] readAll(java.io.InputStream input) throws java.io.IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        for (int n; (n = input.read(buffer)) > 0; ) out.write(buffer, 0, n);
+        return out.toByteArray();
+    }
+
+    private void setValue(String selector, String value) throws Exception {
+        evalString("(() => {const node = document.querySelector(" + JSONObject.quote(selector) + ");"
+                + "if (!node) throw new Error('missing ' + " + JSONObject.quote(selector) + ");"
+                + "node.value = " + JSONObject.quote(value) + ";"
+                + "node.dispatchEvent(new Event('input', {bubbles: true})); return 'set';})()");
+    }
+
+    private void setSelect(String selector, String value) throws Exception {
+        evalString("(() => {const node = document.querySelector(" + JSONObject.quote(selector) + ");"
+                + "if (!node) throw new Error('missing ' + " + JSONObject.quote(selector) + ");"
+                + "node.value = " + JSONObject.quote(value) + ";"
+                + "node.dispatchEvent(new Event('change', {bubbles: true})); return 'set';})()");
+    }
+
+    private void click(String selector) throws Exception {
+        evalString("(() => {const node = document.querySelector(" + JSONObject.quote(selector) + ");"
+                + "if (!node) throw new Error('missing ' + " + JSONObject.quote(selector) + ");"
+                + "node.click(); return 'clicked';})()");
+    }
+
+    /**
+     * What the connection layer was doing when a wait failed: the controller
+     * journal's tail, the recorder's native events, dials and execs, and the
+     * lost-link banner. Logged and put in the failure message, so a CI red is
+     * diagnosable from its artifacts alone (#2954).
+     */
+    private String connectionDiagnostics() {
+        try {
+            return evalString("JSON.stringify({"
+                    + "journal:(window.__pocketshellConnectionJournal ?? []).slice(-40),"
+                    + "recorder:window.__ps2954 ? {dials:window.__ps2954.dials.length,lost:window.__ps2954.lost,"
+                    + "events:window.__ps2954.events,banners:window.__ps2954.banners,sawExited:window.__ps2954.sawExited,"
+                    + "execs:window.__ps2954.execs} : null,"
+                    + "banner:document.querySelector('.link-lost-text')?.textContent?.trim() ?? null})");
+        } catch (Exception error) {
+            return "<diagnostics unavailable: " + error + ">";
+        }
+    }
+
+    private void awaitJsTrue(String expression) throws Exception {
+        awaitJsTrue(expression, WAIT_TIMEOUT_MILLIS);
+    }
+
+    private void awaitJsTrue(String expression, long timeoutMillis) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + timeoutMillis;
+        String last = "<not evaluated>";
+        while (SystemClock.uptimeMillis() < deadline) {
+            last = evalRaw(expression);
+            if ("true".equals(last)) return;
+            Thread.sleep(150);
+        }
+        String diagnostics = connectionDiagnostics();
+        Log.e(TAG, "WAIT_FAILED " + expression + " DIAGNOSTICS " + diagnostics);
+        throw new AssertionError("WebView condition did not become true: " + expression + " (last result: " + last
+                + "; terminal=" + evalString(VISIBLE_TERMINAL) + "; page=" + evalString("document.body.innerText")
+                + "; diagnostics=" + diagnostics + ")");
+    }
+
+    private String evalString(String expression) throws Exception {
+        Object decoded = new JSONTokener(evalRaw(expression)).nextValue();
+        return decoded == null ? null : decoded.toString();
+    }
+
+    private String evalRaw(String expression) throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> result = new AtomicReference<>();
+        scenario.onActivity(activity -> {
+            WebView webView = activity.getBridge().getWebView();
+            assertNotNull("the packaged activity must contain its Capacitor WebView", webView);
+            webView.evaluateJavascript(expression, value -> {
+                result.set(value);
+                latch.countDown();
+            });
+        });
+        assertTrue("WebView JavaScript evaluation timed out", latch.await(10, TimeUnit.SECONDS));
+        String value = result.get();
+        if (value == null || "null".equals(value)) throw new JSONException("JavaScript returned null: " + expression);
+        return value;
+    }
+}

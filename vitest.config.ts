@@ -1,0 +1,36 @@
+import { defineConfig } from 'vitest/config';
+import vue from '@vitejs/plugin-vue';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = path.dirname(fileURLToPath(import.meta.url));
+
+export default defineConfig({
+  plugins: [vue()],
+  esbuild: {
+    tsconfigRaw: { compilerOptions: { target: 'ES2022', module: 'ESNext' } },
+  },
+  resolve: {
+    alias: {
+      '@ui': path.join(repoRoot, 'vendor/pocketshell-core/packages/ui/src'),
+      '@pocketshell/core/shared': path.join(repoRoot, 'vendor/pocketshell-core/src/shared'),
+      '@pocketshell/core/attachments': path.join(repoRoot, 'vendor/pocketshell-core/src/attachments'),
+      '@pocketshell/core/preview': path.join(repoRoot, 'vendor/pocketshell-core/src/preview'),
+      '@pocketshell/core': path.join(repoRoot, 'vendor/pocketshell-core/src/index.ts'),
+      '@': path.join(repoRoot, 'src'),
+    },
+  },
+  test: {
+    environment: 'node',
+    // Keep server-only unit helpers in Node while compiling this SFC as a
+    // client render function so its actual template event bindings are tested.
+    testTransformMode: { web: [
+      '**/tests/unit/mobileHotkeys.test.ts',
+      '**/tests/unit/composerDictationCancellation.test.ts',
+      '**/tests/unit/composerDictationKeepsText.test.ts',
+      '**/tests/unit/composerNoSpeechWarning.test.ts',
+      '**/tests/unit/inlineDictationNoSpeech.test.ts',
+    ] },
+    include: ['tests/unit/**/*.test.ts'],
+  },
+});

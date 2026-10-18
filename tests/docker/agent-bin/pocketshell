@@ -1,0 +1,1555 @@
+#!/bin/sh
+set -eu
+
+# Deterministic fixture for the unified `pocketshell` CLI.
+#
+# Issue #231 moved the Android app to the unified `pocketshell` CLI (D22
+# hard-cut). The fixture keeps deterministic payloads for the non-session
+# probes and delegates session lifecycle commands to the repository's real
+# aplexer-only implementation:
+#   - `pocketshell usage --json`            -> PocketshellUsageJsonParser
+#   - `pocketshell sessions list [--json]`  -> schema-3 session parser
+#   - `pocketshell agent-log --json ...`    -> AgentConversationRepository
+
+fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+version_file="${POCKETSHELL_AGENT_FIXTURE_VERSION_FILE:-/opt/pocketshell-agent-fixture-version}"
+
+fixture_version() {
+  if [ -n "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}" ]; then
+    printf '%s\n' "$POCKETSHELL_AGENT_FIXTURE_VERSION"
+    return 0
+  fi
+  if [ -r "$version_file" ]; then
+    cat "$version_file"
+    return 0
+  fi
+  # Issue #2356 (Phase 4 of epic #2350): app/build.gradle.kts's versionName
+  # is no longer a literal to sed out of the DSL text -- it is derived from
+  # the git tag via scripts/derive-version.sh (the same script
+  # app/build.gradle.kts itself shells out to). Delegate to it instead of a
+  # second, independently-written derivation.
+  derive_script="${POCKETSHELL_PROJECT_ROOT:-.}/scripts/derive-version.sh"
+  if [ -r "$derive_script" ]; then
+    parsed_version="$(bash "$derive_script" version-name 2>/dev/null || true)"
+    if [ -n "$parsed_version" ]; then
+      printf '%s\n' "$parsed_version"
+      return 0
+    fi
+  fi
+  printf '0.0.0\n'
+}
+
+json_escape_awk='
+function esc(s) {
+  gsub(/\\/, "\\\\", s)
+  gsub(/"/, "\\\"", s)
+  return s
+}
+{
+  lines[++count] = $0
+}
+END {
+  printf "{\"count\":%d,\"engine\":\"%s\",\"lines\":[", count, engine
+  for (i = 1; i <= count; i++) {
+    if (i > 1) printf ","
+    printf "\"%s\"", esc(lines[i])
+  }
+  printf "],\"path\":\"%s\",\"session\":\"%s\"}\n", esc(path), esc(session)
+}
+'
+
+case "${1:-}" in
+  --version)
+    printf 'pocketshell fixture %s\n' "$(fixture_version)"
+    exit 0
+    ;;
+  agent)
+    # Issue #703: the app now launches agents via the short server-side
+    # wrapper `pocketshell agent <kind> --dir <dir> [--no-skip-permissions]
+    # [--config-dir <dir>]` instead of a giant inline env-strip line. This
+    # fixture mirrors the real wrapper's observable behaviour: parse the
+    # short argv, cd into --dir, then exec the (fake) agent so the
+    # AgentLaunchCommandDockerTest sees the agent's ready output land in the
+    # pane — proving the wrapper exec'd the agent, not just that text was
+    # typed. The real wrapper additionally merges .env/.envrc, strips the
+    # provider env for opencode, and suppresses first-run prompts; the fake
+    # agents have no such prompts so nothing extra is needed here.
+    shift
+    agent_kind="${1:-}"
+    shift || true
+    agent_dir=""
+    agent_profile=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --dir)
+          agent_dir="${2:-}"
+          shift 2
+          ;;
+        --skip-permissions|--no-skip-permissions)
+          shift
+          ;;
+        --config-dir)
+          shift 2
+          ;;
+        --profile)
+          agent_profile="${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ -n "$agent_dir" ]; then
+      cd "$agent_dir" 2>/dev/null || true
+    fi
+    # Issue #821 / #858 / #889: mirror the REAL wrapper's record_agent_kind
+    # (tools/pocketshell/src/pocketshell/agents.py) so an end-to-end Docker
+    case "$agent_kind" in
+      codex|claude|opencode)
+        exec "$agent_kind"
+        ;;
+      *)
+        printf 'pocketshell agent fixture supports: codex|claude|opencode\n' >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  agents)
+    # Epic #821 A2-infra (issue #827): the unified CLI grew `pocketshell
+    # agents kind`, the seam over the `agents.kind_for_panes` daemon RPC. The
+    # client pipes a pane list as `{"panes":[{"pane_id","pane_pid"}, ...]}` JSON
+    # on stdin (and/or `--pane PANE_ID=PANE_PID`) and parses back
+    # `{"results":[{"pane_id","agent_kind","scope","evidence_pid"?}]}`.
+    #
+    # This Docker container has no real cgroup-v2 scope tree, so the fixture
+    # can't run the live classifier. Instead it answers DETERMINISTICALLY for
+    # SYNTHETIC (non-existent) pane pids, so a connected test can assert a
+    # foreign session's guessed kind without seeding a cgroup tree:
+    #   pid 1000-1999 -> claude (scope fixture-claude-main.scope)
+    #   pid 2000-2999 -> codex  (scope fixture-codex.scope)
+    #   pid 3000-3999 -> opencode (scope fixture-opencode-lab.scope)
+    #   pid 4000-4999 -> none   (scope fixture-shell.scope; readable, no agent)
+    #   missing / non-integer / any other pid -> unknown (scope null)
+    # These ranges line up with the seeded fixture sessions claude-main / codex
+    # / opencode-lab so the guess matches the synthetic session the test joins.
+    #
+    # Issue #1973: a REAL live session pid must never enter this synthetic
+    # table. The nightly suite advances the container PID allocator through
+    # these ranges; the old fixture then called an ordinary `sh` pane Claude /
+    # Codex / OpenCode solely from its numeric pid. That contaminated later
+    # state-readback and folder-list tests even though raw @ps_agent_kind was
+    # absent, the previous agent sessions were gone, and /proc showed the pane
+    # was a live shell in the container's root cgroup. A real pid is therefore
+    # owned by the live fixture, not by the synthetic canned table: resolve it
+    # to `none`. PocketShell-launched fixture agents remain covered by their
+    # authoritative recorded @ps_agent_kind and never take this foreign path.
+    #
+    # Issue #975: one connected regression deliberately models the narrower
+    # real-host failure where a LIVE pane is unreadable to the classifier while
+    # its transcript is still trustworthy evidence. The seeder opts that exact
+    # pid into `unknown` by creating
+    # `/tmp/pocketshell-agents-kind-unknown-pids/<pid>`.  This is explicit
+    # per-pane state, never pid-range inference, so the #1973 live-shell rule
+    # remains authoritative for every unmarked live process.
+    shift
+    if [ "${1:-}" != "kind" ]; then
+      printf 'pocketshell agents fixture supports: kind\n' >&2
+      exit 64
+    fi
+    shift
+
+    # Issue #1641: connected latency-fixture hook for the storm-entry-edge
+    # journey. A foreign-pane kind-classify runs over the SHARED per-host `-CC`
+    # lease transport under a fixed 3.5s bound (AgentKindRemoteSource /
+    # BoundedSessionExec). Before the fix, a classify SLOWER than that bound
+    # `close()`d the shared transport — killing the live `-CC` reader and
+    # entering the #1610 reconnect storm. A localhost-fast classify can never
+    # exceed 3.5s, so it proves NOTHING about that edge (the v0.4.10/#847
+    # happy-fixture-masks-reality lesson, G10). This hook makes ONLY `agents
+    # kind` genuinely slow — an alive-but-slow host CLI, exactly the reported
+    # non-happy state — for the duration a connected test needs it.
+    #
+    # A test writes an integer number of seconds into the delay file over the
+    # SAME warm SSH session; the classify then sleeps that long BEFORE it
+    # answers (still returning a valid envelope, so the host is proven ALIVE,
+    # not failing). No file / empty / non-integer => zero delay, so every other
+    # `agents kind` consumer (the deterministic guess fixtures) is unaffected.
+    delay_file="${POCKETSHELL_AGENTS_KIND_DELAY_FILE:-/tmp/pocketshell-agents-kind-delay-secs}"
+    if [ -r "$delay_file" ]; then
+      delay_secs="$(cat "$delay_file" 2>/dev/null || printf '')"
+      case "$delay_secs" in
+        '' | *[!0-9]*) : ;;
+        *) sleep "$delay_secs" ;;
+      esac
+    fi
+
+    # Collect panes from --pane PANE_ID=PANE_PID options.
+    pane_specs=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --pane)
+          pane_specs="${pane_specs}${2:-}
+"
+          shift 2
+          ;;
+        --proc-root|--cgroup-mount)
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+
+    # Read stdin JSON panes when stdin is not a terminal. Extract pane_id /
+    # pane_pid pairs without a JSON parser (busybox has no jq): pull every
+    # "pane_id":... and "pane_pid":... token in document order. pane_pid is
+    # numeric in the RPC shape; a missing pid yields an empty field -> unknown.
+    if [ ! -t 0 ]; then
+      stdin_json="$(cat)"
+    else
+      stdin_json=""
+    fi
+
+    printf '%s' "$stdin_json" | tr ',' '\n' | awk -v specs="$pane_specs" '
+      function classify(pid,   n) {
+        if (pid !~ /^[0-9]+$/) return "unknown\tnull"
+        n = pid + 0
+        if (system("test -f /tmp/pocketshell-agents-kind-unknown-pids/" n) == 0) return "unknown\tnull"
+        if (system("test -d /proc/" n) == 0) return "none\tpocketshell-fixture-live.scope"
+        if (n >= 1000 && n < 2000) return "claude\tfixture-claude-main.scope"
+        if (n >= 2000 && n < 3000) return "codex\tfixture-codex.scope"
+        if (n >= 3000 && n < 4000) return "opencode\tfixture-opencode-lab.scope"
+        if (n >= 4000 && n < 5000) return "none\tfixture-shell.scope"
+        return "unknown\tnull"
+      }
+      function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+      function emit(pid, pane_id,   c, kind, scope, parts) {
+        c = classify(pid)
+        split(c, parts, "\t")
+        kind = parts[1]; scope = parts[2]
+        if (n++ > 0) printf ","
+        if (scope == "null") sval = "null"; else sval = "\"" esc(scope) "\""
+        printf "{\"pane_id\":\"%s\",\"agent_kind\":\"%s\",\"scope\":%s}", esc(pane_id), kind, sval
+      }
+      BEGIN {
+        printf "{\"results\":["
+        # --pane PANE_ID=PANE_PID specs first.
+        m = split(specs, lines, "\n")
+        for (i = 1; i <= m; i++) {
+          if (lines[i] == "") continue
+          eq = index(lines[i], "=")
+          if (eq == 0) continue
+          pid_id = substr(lines[i], 1, eq - 1)
+          pid_pid = substr(lines[i], eq + 1)
+          emit(pid_pid, pid_id)
+        }
+      }
+      # stdin JSON tokens, one comma-split fragment per line.
+      /"pane_id"/ {
+        if (match($0, /"pane_id"[ \t]*:[ \t]*"[^"]*"/)) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^"pane_id"[ \t]*:[ \t]*"/, "", s); sub(/"$/, "", s)
+          pending_id = s; have_id = 1
+        }
+      }
+      /"pane_pid"/ {
+        if (match($0, /"pane_pid"[ \t]*:[ \t]*[0-9]+/)) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^"pane_pid"[ \t]*:[ \t]*/, "", s)
+          pending_pid = s; have_pid = 1
+        } else {
+          pending_pid = ""; have_pid = 1
+        }
+      }
+      # A pane object closes either at its `}` or when the next pane_id starts;
+      # flush when we have both fields collected for the current object.
+      (have_id && have_pid) {
+        emit(pending_pid, pending_id)
+        have_id = 0; have_pid = 0; pending_id = ""; pending_pid = ""
+      }
+      END { printf "]}\n" }
+    '
+    exit 0
+    ;;
+  profiles)
+    # Issue #718 / #732: the Android picker fetches host-defined agent
+    # profiles with `pocketshell profiles list [--engine <e>] --json`, so a
+    # real discovery journey can list + select a host profile instead of
+    # false-greening on ToolUnavailable. This branch mirrors the real CLI's
+    # conservative auto-discovery (profiles.py): the seeded ~/.claude default
+    # dir → the "Claude" default profile (config_dir=null), and the sibling
+    # ~/.zlaude dir → the non-default "Claude (Z.AI)" profile pointing at its
+    # absolute config_dir. Both dirs are seeded with a real marker file in
+    # the entrypoint, so they reflect genuine on-host discovery, not a canned
+    # blob. Output shape matches SshProfilesGateway.parseProfiles:
+    #   {"profiles":[{"name","engine","config_dir","default"}, …]}.
+    shift
+    if [ "${1:-}" != "list" ]; then
+      printf 'pocketshell profiles fixture supports: list [--engine claude|codex] [--json]\n' >&2
+      exit 64
+    fi
+    shift
+    profiles_engine=""
+    profiles_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --engine)
+          profiles_engine="${2:-}"
+          shift 2
+          ;;
+        --json)
+          profiles_json=1
+          shift
+          ;;
+        *)
+          printf 'pocketshell profiles fixture: unknown argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+    done
+
+    home_dir="${HOME:-/home/testuser}"
+
+    # Build the discovered claude profile rows from the seeded dirs. A dir
+    # only counts when it carries a real claude marker file, exactly like
+    # profiles.py's _has_marker (conservative — no phantom profiles).
+    has_claude_marker() {
+      [ -d "$1" ] && { [ -f "$1/.claude.json" ] || [ -f "$1/settings.json" ]; }
+    }
+
+    # name<TAB>engine<TAB>config_dir(empty=default)<TAB>default(true/false)
+    rows=""
+    if has_claude_marker "${home_dir}/.claude"; then
+      rows="${rows}Claude	claude		true
+"
+    fi
+    if has_claude_marker "${home_dir}/.zlaude"; then
+      rows="${rows}Claude (Z.AI)	claude	${home_dir}/.zlaude	false
+"
+    fi
+    # codex has no seeded profile dir in this fixture, so nothing to add.
+
+    if [ -n "$profiles_engine" ]; then
+      rows="$(printf '%s' "$rows" | awk -F '\t' -v e="$profiles_engine" 'NF && $2==e')"
+    else
+      rows="$(printf '%s' "$rows" | awk -F '\t' 'NF')"
+    fi
+
+    if [ "$profiles_json" -eq 1 ]; then
+      printf '%s\n' "$rows" | awk -F '\t' '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        BEGIN { printf "{\n  \"profiles\": [" }
+        NF {
+          if (n++ > 0) printf ","
+          cd = ($3 == "" ? "null" : "\"" esc($3) "\"")
+          printf "\n    {\"name\": \"%s\", \"engine\": \"%s\", \"config_dir\": %s, \"default\": %s}", esc($1), esc($2), cd, $4
+        }
+        END { if (n > 0) printf "\n  "; printf "]\n}\n" }
+      '
+      exit 0
+    fi
+
+    # YAML fallback (the real CLI default; the client always passes --json).
+    printf 'profiles:\n'
+    printf '%s\n' "$rows" | awk -F '\t' '
+      NF {
+        printf "  - name: %s\n", $1
+        printf "    engine: %s\n", $2
+        if ($3 == "") printf "    config_dir: null\n"; else printf "    config_dir: %s\n", $3
+        printf "    default: %s\n", $4
+      }
+    '
+    exit 0
+    ;;
+  engines)
+    # Issue #2276: the availability journey must exercise the REAL host
+    # registry, not a shell re-implementation of it. The bug being regressed
+    # lives inside `pocketshell.engines.resolve_harnesses` (a harness that is
+    # installed and launchable from the pane's LOGIN shell but invisible to
+    # this NON-interactive SSH `exec` channel), so a `command -v` mimicry here
+    # would prove nothing about the fix. Delegate to the repository's real
+    # implementation (same idiom as the `send` arm, issue #2240) and let it
+    # observe this container's genuinely off-PATH harnesses.
+    #
+    # Dockerfile.agents seeds ~/.config/pocketshell/engines.yaml with five
+    # fixture rows (missing / disabled / nvm-only / login-only / forced) on top
+    # of the built-in claude/codex/opencode/grok.
+    if ! python3 -c 'import pocketshell' 2>/dev/null; then
+      printf 'pocketshell engines fixture needs the pinned pocketshell wheel (issue #2643)\n' >&2
+      exit 64
+    fi
+    exec /usr/local/bin/pocketshell-real "$@"
+    ;;
+  usage)
+    shift
+    if [ "${1:-}" = "--json" ]; then
+      cat "${fixture_dir}/pocketshell-usage.ndjson"
+      exit 0
+    fi
+    printf 'pocketshell usage fixture supports: --json\n' >&2
+    exit 64
+    ;;
+  workspaces)
+    shift
+    workspace_operation="${1:-}"
+    [ "$#" -gt 0 ] && shift
+    workspace_host=""
+    workspace_path=""
+    workspace_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host)
+          [ "$#" -ge 2 ] || {
+            printf 'pocketshell workspaces: --host needs a value\n' >&2
+            exit 64
+          }
+          workspace_host="$2"
+          shift 2
+          ;;
+        --host=*)
+          workspace_host="${1#--host=}"
+          shift
+          ;;
+        --json)
+          workspace_json=1
+          shift
+          ;;
+        --)
+          shift
+          [ "$#" -gt 0 ] || {
+            printf 'pocketshell workspaces: path is required\n' >&2
+            exit 64
+          }
+          [ -z "$workspace_path" ] || {
+            printf 'pocketshell workspaces: unexpected extra path\n' >&2
+            exit 64
+          }
+          workspace_path="$1"
+          shift
+          ;;
+        -*)
+          printf 'pocketshell workspaces: unknown argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+        *)
+          [ -z "$workspace_path" ] || {
+            printf 'pocketshell workspaces: unexpected extra path\n' >&2
+            exit 64
+          }
+          workspace_path="$1"
+          shift
+          ;;
+      esac
+    done
+    [ -n "$workspace_host" ] || {
+      printf 'pocketshell workspaces: --host is required\n' >&2
+      exit 64
+    }
+    case "$workspace_operation" in
+      list)
+        [ -z "$workspace_path" ] || {
+          printf 'pocketshell workspaces list: unexpected path\n' >&2
+          exit 64
+        }
+        ;;
+      add|remove)
+        [ -n "$workspace_path" ] || {
+          printf 'pocketshell workspaces %s: path is required\n' "$workspace_operation" >&2
+          exit 64
+        }
+        ;;
+      *)
+        printf 'pocketshell workspaces fixture supports: list/add/remove\n' >&2
+        exit 64
+        ;;
+    esac
+    workspace_state_file="${POCKETSHELL_WORKSPACES_STATE_FILE:-${HOME}/.pocketshell-workspaces.json}"
+    # Keep this fixture's state contract equivalent to the real host CLI. The
+    # app only needs an empty listing for J01, but add/remove are implemented
+    # here as well so the connected workspace flow can exercise durable
+    # membership instead of a canned response.
+    python3 - "$workspace_operation" "$workspace_host" "$workspace_path" "$workspace_state_file" <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+
+operation, host, raw_path, state_name = sys.argv[1:]
+state_path = Path(state_name).expanduser()
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(64)
+
+
+def canonical_path(raw: str) -> str:
+    if not raw or not raw.strip():
+        fail("pocketshell workspaces: `path` must be a non-empty path")
+    expanded = os.path.expanduser(raw.strip())
+    if not os.path.isabs(expanded):
+        fail("pocketshell workspaces: `path` must be absolute or use the `~/` form")
+    return str(Path(expanded).resolve(strict=False))
+
+
+def read_state() -> dict:
+    try:
+        with state_path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"workspaces": {}}
+    return value if isinstance(value, dict) else {"workspaces": {}}
+
+
+def entries(state: dict) -> list[dict[str, str]]:
+    all_workspaces = state.get("workspaces")
+    raw_entries = all_workspaces.get(host) if isinstance(all_workspaces, dict) else []
+    if not isinstance(raw_entries, list):
+        return []
+    by_path: dict[str, dict[str, str]] = {}
+    for value in raw_entries:
+        if not isinstance(value, dict):
+            continue
+        try:
+            path = canonical_path(str(value.get("path", "")))
+        except SystemExit:
+            continue
+        display = value.get("display_path")
+        by_path.setdefault(
+            path,
+            {
+                "path": path,
+                "display_path": display.strip() if isinstance(display, str) and display.strip() else path,
+            },
+        )
+    return [by_path[path] for path in sorted(by_path)]
+
+
+def write_state(state: dict) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = state_path.with_name(state_path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, sort_keys=True)
+        handle.write("\n")
+    temporary.replace(state_path)
+
+
+state = read_state()
+items = entries(state)
+created = None
+removed = None
+canonical = None
+if operation == "add":
+    canonical = canonical_path(raw_path)
+    existing = next((item for item in items if item["path"] == canonical), None)
+    if existing is None:
+        existing = {"path": canonical, "display_path": raw_path.strip()}
+        items.append(existing)
+        items.sort(key=lambda item: item["path"])
+        created = True
+        state.setdefault("workspaces", {})[host] = items
+        write_state(state)
+    else:
+        created = False
+elif operation == "remove":
+    canonical = canonical_path(raw_path)
+    kept = [item for item in items if item["path"] != canonical]
+    removed = len(kept) != len(items)
+    if removed:
+        items = kept
+        state.setdefault("workspaces", {})[host] = items
+        write_state(state)
+
+result = {"schema": 1, "host": host, "workspaces": items}
+if created is not None:
+    result["created"] = created
+    result["workspace"] = next(item for item in items if item["path"] == canonical)
+if removed is not None:
+    result["path"] = canonical
+    result["removed"] = removed
+print(json.dumps(result, sort_keys=True))
+PYEOF
+    exit 0
+    ;;
+  sessions)
+    shift
+    # The Docker fixture has no delegated systemd --user scope, so the real
+    # CLI's host default memory cap cannot be enforced here. Android creates a
+    # plain session without a memory option; supply the fixture-only explicit
+    # uncapped choice before delegating to the REAL CLI. Calls that choose a
+    # cap explicitly keep their original arguments and therefore still test
+    # the production memory-policy path.
+    if [ "${1:-}" = "create" ]; then
+      shift
+      has_mem=0
+      for session_arg in "$@"; do
+        case "$session_arg" in
+          --mem|--mem=*) has_mem=1; break ;;
+        esac
+      done
+      if [ "$has_mem" -eq 0 ]; then
+        set -- create --mem none "$@"
+      else
+        set -- create "$@"
+      fi
+    fi
+
+    # Packaged #2856 uncertainty journey: arm a run-specific create whose real
+    # host-side effect completes, then sever the authenticated SSH connection
+    # before the command's JSON response can reach the Android client. The
+    # unique suffix keeps this hook inert for every other fixture session.
+    if [ "${1:-}" = "create" ]; then
+      after_separator=0
+      uncertain_target=""
+      for session_arg in "$@"; do
+        if [ "$after_separator" -eq 1 ]; then
+          uncertain_target="$session_arg"
+          break
+        fi
+        [ "$session_arg" = "--" ] && after_separator=1
+      done
+      case "$uncertain_target" in
+        *-uncertain-create)
+          uncertain_prefix="/tmp/pocketshell-uncertain-mutation-${uncertain_target}"
+          uncertain_events="${uncertain_prefix}.events"
+          if [ -e "${uncertain_prefix}.armed" ] || [ -e "$uncertain_events" ]; then
+            uncertain_attempt="$(awk -F'|' '$1 == "CREATE_ATTEMPT" { count += 1 } END { print count + 1 }' "$uncertain_events" 2>/dev/null || printf '1')"
+            uncertain_attempt="$(printf '%s' "$uncertain_attempt" | tr -cd '0-9')"
+            [ -n "$uncertain_attempt" ] || uncertain_attempt=1
+            uncertain_now="$(date +%s%3N)"
+            printf 'CREATE_ATTEMPT|%s|%s|%s\n' "$uncertain_now" "$uncertain_attempt" "$uncertain_target" >> "$uncertain_events"
+          fi
+
+          if [ -e "${uncertain_prefix}.armed" ]; then
+            mv "${uncertain_prefix}.armed" "${uncertain_prefix}.consumed"
+            server_pid=""
+            server_args=""
+            ancestor_pid="$PPID"
+            while [ -n "$ancestor_pid" ] && [ "$ancestor_pid" -gt 1 ] 2>/dev/null; do
+              ancestor_args="$(ps -p "$ancestor_pid" -o args= 2>/dev/null || true)"
+              case "$ancestor_args" in
+                *sshd-session:*testuser@*)
+                  server_pid="$ancestor_pid"
+                  server_args="$ancestor_args"
+                  break
+                  ;;
+              esac
+              next_pid="$(ps -p "$ancestor_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+              [ -n "$next_pid" ] || break
+              [ "$next_pid" != "$ancestor_pid" ] || break
+              ancestor_pid="$next_pid"
+            done
+            if [ -z "$server_pid" ]; then
+              printf 'uncertain mutation hook could not find its testuser sshd-session ancestor\n' >&2
+              exit 97
+            fi
+            server_uid="$(ps -p "$server_pid" -o uid= | tr -d '[:space:]')"
+            response_file="${uncertain_prefix}.response"
+            error_file="${uncertain_prefix}.stderr"
+            if /usr/local/bin/pocketshell-real sessions "$@" >"$response_file" 2>"$error_file"; then
+              host_cli_exit=0
+            else
+              host_cli_exit=$?
+            fi
+            if [ "$host_cli_exit" -ne 0 ]; then
+              cat "$response_file"
+              cat "$error_file" >&2
+              exit "$host_cli_exit"
+            fi
+            host_cli_created="$(python3 - "$response_file" <<'PYEOF'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(str(value.get("created", False)).lower())
+PYEOF
+)"
+            host_cli_name="$(python3 - "$response_file" <<'PYEOF'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(value.get("name", ""))
+PYEOF
+)"
+            host_cli_session_id="$(python3 - "$response_file" <<'PYEOF'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(value.get("id", "") or "")
+PYEOF
+)"
+            case "$host_cli_name" in
+              *:"$uncertain_target") host_cli_name_matches=true ;;
+              *) host_cli_name_matches=false ;;
+            esac
+            [ "$host_cli_created" = true ] && [ "$host_cli_name_matches" = true ] || {
+              printf 'uncertain mutation hook did not observe the real CLI create result\n' >&2
+              cat "$response_file" >&2
+              exit 97
+            }
+            mutation_epoch="$(date +%s%3N)"
+            run_id="${uncertain_target%-uncertain-create}"
+            {
+              printf 'schema=1\n'
+              printf 'run_id=%s\n' "$run_id"
+              printf 'kind=create-session\n'
+              printf 'target=%s\n' "$uncertain_target"
+              printf 'host_cli_exit_code=%s\n' "$host_cli_exit"
+              printf 'host_cli_created=%s\n' "$host_cli_created"
+              printf 'host_cli_name=%s\n' "$host_cli_name"
+              printf 'host_cli_session_id=%s\n' "$host_cli_session_id"
+              printf 'host_side_effect_epoch_ms=%s\n' "$mutation_epoch"
+              printf 'response_forwarded=false\n'
+              printf 'response_sha256=%s\n' "$(sha256sum "$response_file" | awk '{print $1}')"
+              printf 'server_pid=%s\n' "$server_pid"
+              printf 'server_uid=%s\n' "$server_uid"
+              printf 'server_args=%s\n' "$server_args"
+              printf 'signal=SIGKILL\n'
+              printf 'list_delay_seconds=10\n'
+            } > "${uncertain_prefix}.proof"
+            printf 'HOST_CREATE_COMPLETED|%s|%s|%s|%s|%s\n' \
+              "$mutation_epoch" "$uncertain_target" "$host_cli_created" "$host_cli_session_id" "$server_pid" >> "$uncertain_events"
+            printf 'CREATE_RESPONSE_DROPPED|%s|%s|SIGKILL\n' \
+              "$(date +%s%3N)" "$uncertain_target" >> "$uncertain_events"
+            printf '10\n' > "${uncertain_prefix}.delay-list"
+            kill -KILL "$server_pid"
+            exit 0
+          fi
+          ;;
+      esac
+    fi
+
+    # Session lifecycle is the product contract. Run the real package against
+    # the real bundled aplexer; this fixture must not maintain a second session
+    # protocol or silently turn an unavailable aplexer into canned rows.
+    if ! python3 -c 'import pocketshell' 2>/dev/null; then
+      printf 'pocketshell sessions fixture needs the pinned pocketshell wheel (issue #2643)\n' >&2
+      exit 64
+    fi
+    if [ "${1:-}" = "list" ] && [ -r "${POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE:-$HOME/.pocketshell-fixture-session-errors.json}" ]; then
+      errors_file="${POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE:-$HOME/.pocketshell-fixture-session-errors.json}"
+      list_output="$(mktemp)"
+      list_error="$(mktemp)"
+      if /usr/local/bin/pocketshell-real sessions "$@" >"$list_output" 2>"$list_error"; then
+        case " $* " in
+          *" --json "*)
+            ERRORS_FILE="$errors_file" python3 - "$list_output" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+payload["errors"] = json.loads(Path(os.environ["ERRORS_FILE"]).read_text())
+print(json.dumps(payload, indent=2))
+PYEOF
+            rm -f "$list_output" "$list_error"
+            exit 0
+            ;;
+        esac
+        cat "$list_output"
+        rm -f "$list_output" "$list_error"
+        exit 0
+      else
+        status=$?
+      fi
+      cat "$list_output"
+      cat "$list_error" >&2
+      rm -f "$list_output" "$list_error"
+      exit "$status"
+    fi
+
+    # Hold the first reconnect list after the uncertain create. This gives the
+    # packaged journey a bounded window to capture the JS controller's
+    # uncertainty while the fresh host listing is still in flight. Reuse of
+    # this Docker fixture can leave an earlier failed run's delay marker behind,
+    # so bind this list to the newest pending mutation instead of the first
+    # lexical match.
+    if [ "${1:-}" = "list" ]; then
+      delay_file="$(ls -1t /tmp/pocketshell-uncertain-mutation-*.delay-list 2>/dev/null | head -n1 || true)"
+      if [ -n "$delay_file" ] && [ -f "$delay_file" ]; then
+        uncertain_prefix="${delay_file%.delay-list}"
+        uncertain_target="${uncertain_prefix##*/pocketshell-uncertain-mutation-}"
+        uncertain_events="${uncertain_prefix}.events"
+        delay_seconds="$(cat "$delay_file" 2>/dev/null || printf '0')"
+        case "$delay_seconds" in
+          ''|*[!0-9]*) printf 'invalid uncertain-mutation list delay\n' >&2; exit 97 ;;
+        esac
+        printf 'FRESH_LIST_STARTED|%s|%s\n' "$(date +%s%3N)" "$uncertain_target" >> "$uncertain_events"
+        mv "$delay_file" "${uncertain_prefix}.delay-consumed"
+        sleep "$delay_seconds"
+        list_response="${uncertain_prefix}.list-response"
+        list_error="${uncertain_prefix}.list-stderr"
+        if /usr/local/bin/pocketshell-real sessions "$@" >"$list_response" 2>"$list_error"; then
+          printf 'FRESH_LIST_COMPLETED|%s|%s\n' "$(date +%s%3N)" "$uncertain_target" >> "$uncertain_events"
+          cat "$list_response"
+          cat "$list_error" >&2
+          exit 0
+        else
+          list_status=$?
+          cat "$list_response"
+          cat "$list_error" >&2
+          exit "$list_status"
+        fi
+      fi
+    fi
+    exec /usr/local/bin/pocketshell-real sessions "$@"
+
+    ;;
+  agent-log)
+    shift
+    engine=""
+    session=""
+    tail_count=""
+    json_output=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --engine|-e)
+          engine="${2:-}"
+          shift 2
+          ;;
+        --session|-s)
+          session="${2:-}"
+          shift 2
+          ;;
+        --tail|-n)
+          tail_count="${2:-}"
+          shift 2
+          ;;
+        --json)
+          json_output=1
+          shift
+          ;;
+        --cwd)
+          shift 2
+          ;;
+        *)
+          printf 'unknown agent-log argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+    done
+    [ -n "$engine" ] && [ -n "$session" ] || {
+      printf 'pocketshell agent-log fixture requires --engine and --session\n' >&2
+      exit 64
+    }
+    filename="${session%.jsonl}.jsonl"
+    case "$engine" in
+      codex)
+        path="$(find "$HOME/.codex/sessions" -type f -name "$filename" -print 2>/dev/null | head -n 1)"
+        ;;
+      claude)
+        path="$(find "$HOME/.claude/projects" -type f -name "$filename" -print 2>/dev/null | head -n 1)"
+        ;;
+      opencode)
+        path="$HOME/.local/share/opencode/$filename"
+        [ -f "$path" ] || path=""
+        ;;
+      *)
+        printf 'unsupported fixture agent-log engine: %s\n' "$engine" >&2
+        exit 64
+        ;;
+    esac
+    [ -n "$path" ] && [ -f "$path" ] || {
+      printf 'no %s session log found for %s\n' "$engine" "$session" >&2
+      exit 66
+    }
+    if [ -n "$tail_count" ]; then
+      reader="tail -n $tail_count"
+    else
+      reader="cat"
+    fi
+    if [ "$json_output" -eq 1 ]; then
+      # shellcheck disable=SC2086
+      $reader "$path" | awk -v engine="$engine" -v session="${session%.jsonl}" -v path="$path" "$json_escape_awk"
+    else
+      # shellcheck disable=SC2086
+      $reader "$path"
+    fi
+    exit 0
+    ;;
+  push)
+    # Issue #859 Slice A — the agent->app typed-card feed transport, made REAL
+    # in the deterministic fixture so the connected emulator+Docker journey
+    # exercises the SAME warm-session exec path the device hits (D21), not a
+    # happy unit proxy. This mirrors the observable contract of the real Python
+    # CLI (tools/pocketshell/src/pocketshell/cards.py):
+    #
+    #   * `pocketshell push checklist --session S [--title T] [--id ID]
+    #       --item "a" --item "b" ...`  -> writes/replaces the per-session card
+    #     store. Item ids are `<slug>-<index>` (slug = lowercase ascii, `-`-
+    #     joined, <=48 chars; index = the 0-based position in the --item list),
+    #     EXACTLY matching cards.py `_slug` + `parse_checklist_markdown`. A re-
+    #     push of the same `--id` is a FULL replace (hard-cut, like cards.py
+    #     `upsert_card`).
+    #   * `pocketshell push get --json --session S` -> emits the app's contract
+    #     `{"session":S,"cards":[{id,type,title?,created_at,updated_at,
+    #       body:{items:[{id,text}]},state:{checked:[...]}}]}` — the exact JSON
+    #     SessionCardsRemoteSource.parseFeed reads. (No --json => human/YAML-ish.)
+    #   * `pocketshell push check --id ID --item ITEM --done|--undone
+    #       --session S` -> ticks/unticks one item in `state.checked` (the app's
+    #     toggle path), like cards.py `apply_interaction`. Unknown id/item -> 65.
+    #   * `pocketshell push status [--json] --session S` -> the agent's read-back
+    #     of the human's ticks / note read-state (cards.py `push status`).
+    #   * `pocketshell push note --session S [--title T] [--id ID] --text T`
+    #     -> writes/replaces a note card (`body.text`, `state.read=false`).
+    #   * `pocketshell push read --id ID --read|--unread --session S` -> flips
+    #     `state.read` on that note (the app's mark-as-read write-back).
+    #
+    # The store is per-session JSON under
+    # `${POCKETSHELL_CARDS_DIR:-$HOME/.pocketshell/cards}/<session>.json`,
+    # mode 0600 / dir 0700 (the cards.py private-write convention). The real CLI
+    # persists YAML and emits JSON for the app; the app ONLY ever reads JSON, so
+    # a JSON-backed fixture store is faithful to the app's exact contract while
+    # staying parseable in POSIX `/bin/sh` (no python/yaml in this Alpine image).
+    shift
+    push_sub="${1:-}"
+    shift 2>/dev/null || true
+
+    push_cards_dir="${POCKETSHELL_CARDS_DIR:-$HOME/.pocketshell/cards}"
+    push_now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00 2>/dev/null || printf '1970-01-01T00:00:00+00:00')"
+
+    # Session cards are always addressed explicitly. The product no longer
+    # infers a current session from a terminal multiplexer environment.
+    push_detect_session() {
+      if [ -n "${1:-}" ]; then
+        printf '%s' "$1"
+        return 0
+      fi
+      return 1
+    }
+
+    # JSON-escape a string for embedding in a double-quoted JSON value.
+    push_json_escape() {
+      printf '%s' "$1" | awk '
+        BEGIN { ORS="" }
+        {
+          s=$0
+          gsub(/\\/, "\\\\", s)
+          gsub(/"/, "\\\"", s)
+          gsub(/\t/, "\\t", s)
+          if (NR>1) printf "\\n"
+          printf "%s", s
+        }'
+    }
+
+    # Stable item id = `<slug>-<index>` (cards.py _slug + the parse index).
+    push_slug() {
+      printf '%s' "$1" | awk '
+        {
+          s=tolower($0)
+          gsub(/[^a-z0-9]+/, "-", s)
+          sub(/^-+/, "", s); sub(/-+$/, "", s)
+          if (length(s) > 48) s=substr(s, 1, 48)
+          if (s == "") s="item"
+          printf "%s", s
+        }'
+    }
+
+    push_session_file() {
+      printf '%s/%s.json' "$push_cards_dir" "$1"
+    }
+
+    case "$push_sub" in
+      checklist)
+        push_title=""
+        push_card_id="checklist"
+        push_session_arg=""
+        push_items=""   # newline-separated raw item texts
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --title) push_title="${2:-}"; shift 2 ;;
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --item) push_items="${push_items}${2:-}
+"; shift 2 ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the session: pass --session.\n' >&2
+          exit 64
+        }
+        # Build the items JSON array. The store JSON IS the app contract object.
+        push_items_json=""
+        push_count=0
+        push_index=0
+        # NOTE: iterate preserving order; a trailing empty line from the
+        # accumulation is skipped.
+        OLDIFS="$IFS"
+        IFS='
+'
+        for push_raw in $push_items; do
+          [ -n "$push_raw" ] || { push_index=$((push_index + 1)); continue; }
+          push_text="$(printf '%s' "$push_raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          [ -n "$push_text" ] || { push_index=$((push_index + 1)); continue; }
+          push_slug_val="$(push_slug "$push_text")"
+          push_item_id="${push_slug_val}-${push_index}"
+          push_text_esc="$(push_json_escape "$push_text")"
+          [ "$push_count" -gt 0 ] && push_items_json="${push_items_json},"
+          push_items_json="${push_items_json}{\"id\":\"${push_item_id}\",\"text\":\"${push_text_esc}\"}"
+          push_count=$((push_count + 1))
+          push_index=$((push_index + 1))
+        done
+        IFS="$OLDIFS"
+        if [ "$push_count" -eq 0 ]; then
+          printf 'no checklist items: pass --item (or pipe markdown on stdin).\n' >&2
+          exit 64
+        fi
+
+        # Read any existing cards for this session and drop the one we replace,
+        # preserving the others (hard-cut replace of THIS card id only).
+        push_file="$(push_session_file "$push_session")"
+        # Compose the title key if provided.
+        push_title_json=""
+        if [ -n "$push_title" ]; then
+          push_title_json="\"title\":\"$(push_json_escape "$push_title")\","
+        fi
+        push_card="{\"id\":\"$(push_json_escape "$push_card_id")\",\"type\":\"checklist\",\"created_at\":\"${push_now}\",\"updated_at\":\"${push_now}\",${push_title_json}\"body\":{\"items\":[${push_items_json}]},\"state\":{\"checked\":[]}}"
+
+        # Preserve any OTHER existing cards (different id) verbatim. Extract them
+        # from the existing store with a small python-free splitter.
+        push_other_cards="$(
+          if [ -f "$push_file" ]; then
+            awk -v want="$push_card_id" '
+              BEGIN { depth=0; incards=0; buf=""; first=1; out="" }
+              {
+                line=line $0 "\n"
+              }
+              END {
+                # Parse the cards array char-by-char, emitting top-level card
+                # objects whose `"id":"..."` != want.
+                s=line
+                n=length(s)
+                # locate `"cards":[`
+                idx=index(s, "\"cards\":[")
+                if (idx == 0) { printf ""; exit }
+                i=idx + length("\"cards\":[")
+                arrdepth=1
+                obj=""; objdepth=0; collecting=0
+                res=""
+                while (i <= n) {
+                  c=substr(s, i, 1)
+                  if (collecting == 0) {
+                    if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                    else if (c == "]") { break }
+                  } else {
+                    obj=obj c
+                    if (c == "{") objdepth++
+                    else if (c == "}") {
+                      objdepth--
+                      if (objdepth == 0) {
+                        # got one card object in obj
+                        idpos=match(obj, /"id"[ ]*:[ ]*"[^"]*"/)
+                        cid=""
+                        if (idpos > 0) {
+                          frag=substr(obj, idpos, RLENGTH)
+                          sub(/"id"[ ]*:[ ]*"/, "", frag)
+                          sub(/".*/, "", frag)
+                          cid=frag
+                        }
+                        if (cid != want) {
+                          if (res != "") res=res ","
+                          res=res obj
+                        }
+                        collecting=0; obj=""
+                      }
+                    }
+                  }
+                  i++
+                }
+                printf "%s", res
+              }
+            ' "$push_file"
+          fi
+        )"
+
+        push_all_cards="$push_card"
+        if [ -n "$push_other_cards" ]; then
+          push_all_cards="${push_other_cards},${push_card}"
+        fi
+
+        mkdir -p "$push_cards_dir" 2>/dev/null || true
+        chmod 700 "$push_cards_dir" 2>/dev/null || true
+        push_tmp="${push_file}.tmp.$$"
+        printf '{"session":"%s","cards":[%s]}\n' "$(push_json_escape "$push_session")" "$push_all_cards" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        printf "checklist '%s' (%d items) -> session '%s' (%s)\n" "$push_card_id" "$push_count" "$push_session" "$push_file"
+        exit 0
+        ;;
+      get)
+        push_as_json=0
+        push_session_arg=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) push_as_json=1; shift ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the session: pass --session.\n' >&2
+          exit 64
+        }
+        push_file="$(push_session_file "$push_session")"
+        if [ "$push_as_json" -eq 1 ]; then
+          if [ -f "$push_file" ]; then
+            cat "$push_file"
+          else
+            printf '{"session":"%s","cards":[]}\n' "$(push_json_escape "$push_session")"
+          fi
+          exit 0
+        fi
+        if [ -f "$push_file" ]; then
+          cat "$push_file"
+        else
+          printf '(no cards for session %s)\n' "$push_session"
+        fi
+        exit 0
+        ;;
+      status)
+        push_as_json=0
+        push_session_arg=""
+        push_only_id=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) push_as_json=1; shift ;;
+            --id) push_only_id="${2:-}"; shift 2 ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the session: pass --session.\n' >&2
+          exit 64
+        }
+        push_file="$(push_session_file "$push_session")"
+        if [ ! -f "$push_file" ]; then
+          if [ "$push_as_json" -eq 1 ]; then
+            printf '{"session":"%s","status":[]}\n' "$(push_json_escape "$push_session")"
+          else
+            printf '(no cards for session %s)\n' "$push_session"
+          fi
+          exit 0
+        fi
+        # Re-emit each card's {id,type,state} from the store JSON. Use the same
+        # awk card-splitter and pull the id/type/state fragments.
+        push_status_body="$(
+          awk -v want="$push_only_id" -v session="$push_session" '
+            BEGIN { res="" }
+            { line=line $0 "\n" }
+            END {
+              s=line; n=length(s)
+              idx=index(s, "\"cards\":[")
+              if (idx == 0) { printf ""; exit }
+              i=idx + length("\"cards\":["); collecting=0; obj=""; objdepth=0
+              while (i <= n) {
+                c=substr(s, i, 1)
+                if (collecting == 0) {
+                  if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                  else if (c == "]") break
+                } else {
+                  obj=obj c
+                  if (c == "{") objdepth++
+                  else if (c == "}") {
+                    objdepth--
+                    if (objdepth == 0) {
+                      cid=""; ctype=""; cstate="{}"
+                      if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"id"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); cid=f
+                      }
+                      if (match(obj, /"type"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"type"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); ctype=f
+                      }
+                      sp=index(obj, "\"state\":")
+                      if (sp > 0) {
+                        rest=substr(obj, sp + length("\"state\":"))
+                        # capture the balanced {...} of state
+                        d=0; st=""; started=0
+                        for (k=1; k<=length(rest); k++) {
+                          ch=substr(rest, k, 1)
+                          if (ch == "{") { d++; started=1 }
+                          st=st ch
+                          if (ch == "}") { d--; if (started && d==0) break }
+                        }
+                        cstate=st
+                      }
+                      if (want == "" || cid == want) {
+                        if (res != "") res=res ","
+                        res=res "{\"id\":\"" cid "\",\"type\":\"" ctype "\",\"state\":" cstate "}"
+                      }
+                      collecting=0; obj=""
+                    }
+                  }
+                }
+                i++
+              }
+              printf "%s", res
+            }
+          ' "$push_file"
+        )"
+        if [ "$push_as_json" -eq 1 ]; then
+          printf '{"session":"%s","status":[%s]}\n' "$(push_json_escape "$push_session")" "$push_status_body"
+        else
+          printf 'session %s:\n%s\n' "$push_session" "$push_status_body"
+        fi
+        exit 0
+        ;;
+      check)
+        push_card_id=""
+        push_item_id=""
+        push_done=1
+        push_session_arg=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --item) push_item_id="${2:-}"; shift 2 ;;
+            --done) push_done=1; shift ;;
+            --undone) push_done=0; shift ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the session: pass --session.\n' >&2
+          exit 64
+        }
+        if [ -z "$push_card_id" ] || [ -z "$push_item_id" ]; then
+          printf 'push check requires --id and --item.\n' >&2
+          exit 64
+        fi
+        push_file="$(push_session_file "$push_session")"
+        if [ ! -f "$push_file" ]; then
+          printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+          exit 65
+        fi
+        # Mutate state.checked for the named card+item. Faithful to cards.py
+        # apply_interaction: unknown card id or unknown item id -> error (65).
+        push_new="$(
+          awk -v want="$push_card_id" -v item="$push_item_id" -v done="$push_done" '
+            BEGIN { found_card=0; found_item=0 }
+            { line=line $0 "\n" }
+            END {
+              s=line; n=length(s)
+              # Split the whole document into a prefix `{"session":...,"cards":[`,
+              # the card objects, and the suffix `]}`.
+              idx=index(s, "\"cards\":[")
+              if (idx == 0) { printf "%s", s; exit }
+              prefix=substr(s, 1, idx + length("\"cards\":[") - 1)
+              i=idx + length("\"cards\":[")
+              collecting=0; obj=""; objdepth=0; cards=""; suffix=""
+              while (i <= n) {
+                c=substr(s, i, 1)
+                if (collecting == 0) {
+                  if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                  else if (c == "]") { suffix=substr(s, i); break }
+                } else {
+                  obj=obj c
+                  if (c == "{") objdepth++
+                  else if (c == "}") {
+                    objdepth--
+                    if (objdepth == 0) {
+                      cid=""
+                      if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"id"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); cid=f
+                      }
+                      if (cid == want) {
+                        found_card=1
+                        # confirm the item id exists in body.items
+                        if (obj ~ ("\"id\":\"" item "\"")) {
+                          # locate item by checking body items only is overkill;
+                          # the items + checked both use "id":"..." — but the
+                          # checked entries are bare strings. A body item match
+                          # is enough to confirm existence.
+                          found_item=1
+                        }
+                        # rebuild state.checked
+                        sp=index(obj, "\"state\":")
+                        head=substr(obj, 1, sp - 1)
+                        rest=substr(obj, sp)
+                        # extract existing checked list contents
+                        cp=index(rest, "\"checked\":[")
+                        chk=""
+                        if (cp > 0) {
+                          after=substr(rest, cp + length("\"checked\":["))
+                          # read up to the closing ]
+                          end=index(after, "]")
+                          chk=substr(after, 1, end - 1)
+                        }
+                        # split chk into existing ids (quoted, comma-sep)
+                        nids=0; split("", ids)
+                        tmp=chk
+                        while (match(tmp, /"[^"]*"/)) {
+                          v=substr(tmp, RSTART + 1, RLENGTH - 2)
+                          ids[++nids]=v
+                          tmp=substr(tmp, RSTART + RLENGTH)
+                        }
+                        present=0
+                        for (j=1;j<=nids;j++) if (ids[j]==item) present=1
+                        newchk=""
+                        if (done == "1") {
+                          for (j=1;j<=nids;j++) { if (newchk!="") newchk=newchk ","; newchk=newchk "\"" ids[j] "\"" }
+                          if (!present) { if (newchk!="") newchk=newchk ","; newchk=newchk "\"" item "\"" }
+                        } else {
+                          for (j=1;j<=nids;j++) if (ids[j]!=item) { if (newchk!="") newchk=newchk ","; newchk=newchk "\"" ids[j] "\"" }
+                        }
+                        obj=head "\"state\":{\"checked\":[" newchk "]}}"
+                      }
+                      if (cards != "") cards=cards ","
+                      cards=cards obj
+                      collecting=0; obj=""
+                    }
+                  }
+                }
+                i++
+              }
+              if (found_card == 0) { printf "__NO_CARD__"; exit }
+              if (found_item == 0) { printf "__NO_ITEM__"; exit }
+              printf "%s%s%s", prefix, cards, suffix
+            }
+          ' "$push_file"
+        )"
+        case "$push_new" in
+          __NO_CARD__)
+            printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+            exit 65 ;;
+          __NO_ITEM__)
+            printf "checklist: unknown item id '%s'\n" "$push_item_id" >&2
+            exit 65 ;;
+        esac
+        push_tmp="${push_file}.tmp.$$"
+        printf '%s' "$push_new" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        if [ "$push_done" -eq 1 ]; then
+          printf "%s: item '%s' checked\n" "$push_card_id" "$push_item_id"
+        else
+          printf "%s: item '%s' unchecked\n" "$push_card_id" "$push_item_id"
+        fi
+        exit 0
+        ;;
+      note)
+        push_title=""
+        push_card_id="note"
+        push_session_arg=""
+        push_text=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --title) push_title="${2:-}"; shift 2 ;;
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --text) push_text="${2:-}"; shift 2 ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ -z "$push_text" ] && [ ! -t 0 ]; then
+          push_text="$(cat)"
+        fi
+        push_text="$(printf '%s' "$push_text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the session: pass --session.\n' >&2
+          exit 64
+        }
+        if [ -z "$push_text" ]; then
+          printf 'empty note: pass --text or pipe the message on stdin.\n' >&2
+          exit 64
+        fi
+        push_file="$(push_session_file "$push_session")"
+        push_title_json=""
+        if [ -n "$push_title" ]; then
+          push_title_json="\"title\":\"$(push_json_escape "$push_title")\","
+        fi
+        push_card="{\"id\":\"$(push_json_escape "$push_card_id")\",\"type\":\"note\",\"created_at\":\"${push_now}\",\"updated_at\":\"${push_now}\",${push_title_json}\"body\":{\"text\":\"$(push_json_escape "$push_text")\"},\"state\":{\"read\":false,\"read_at\":null}}"
+        push_other_cards="$(
+          if [ -f "$push_file" ]; then
+            awk -v want="$push_card_id" '
+              BEGIN { }
+              { line=line $0 "\n" }
+              END {
+                s=line; n=length(s)
+                idx=index(s, "\"cards\":[")
+                if (idx == 0) { printf ""; exit }
+                i=idx + length("\"cards\":[")
+                collecting=0; obj=""; objdepth=0; res=""
+                while (i <= n) {
+                  c=substr(s, i, 1)
+                  if (collecting == 0) {
+                    if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                    else if (c == "]") { break }
+                  } else {
+                    obj=obj c
+                    if (c == "{") objdepth++
+                    else if (c == "}") {
+                      objdepth--
+                      if (objdepth == 0) {
+                        cid=""
+                        if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                          frag=substr(obj, RSTART, RLENGTH)
+                          sub(/"id"[ ]*:[ ]*"/, "", frag)
+                          sub(/".*/, "", frag)
+                          cid=frag
+                        }
+                        if (cid != want) {
+                          if (res != "") res=res ","
+                          res=res obj
+                        }
+                        collecting=0; obj=""
+                      }
+                    }
+                  }
+                  i++
+                }
+                printf "%s", res
+              }
+            ' "$push_file"
+          fi
+        )"
+        push_all_cards="$push_card"
+        if [ -n "$push_other_cards" ]; then
+          push_all_cards="${push_other_cards},${push_card}"
+        fi
+        mkdir -p "$push_cards_dir" 2>/dev/null || true
+        chmod 700 "$push_cards_dir" 2>/dev/null || true
+        push_tmp="${push_file}.tmp.$$"
+        printf '{"session":"%s","cards":[%s]}\n' "$(push_json_escape "$push_session")" "$push_all_cards" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        printf "note '%s' -> session '%s' (%s)\n" "$push_card_id" "$push_session" "$push_file"
+        exit 0
+        ;;
+      read)
+        push_card_id=""
+        push_read=1
+        push_session_arg=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --read) push_read=1; shift ;;
+            --unread) push_read=0; shift ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the session: pass --session.\n' >&2
+          exit 64
+        }
+        if [ -z "$push_card_id" ]; then
+          printf 'push read requires --id.\n' >&2
+          exit 64
+        fi
+        push_file="$(push_session_file "$push_session")"
+        if [ ! -f "$push_file" ]; then
+          printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+          exit 65
+        fi
+        push_new="$(
+          awk -v want="$push_card_id" -v readflag="$push_read" -v now="$push_now" '
+            BEGIN { found_card=0; found_note=0 }
+            { line=line $0 "\n" }
+            END {
+              s=line; n=length(s)
+              idx=index(s, "\"cards\":[")
+              if (idx == 0) { printf "%s", s; exit }
+              prefix=substr(s, 1, idx + length("\"cards\":[") - 1)
+              i=idx + length("\"cards\":[")
+              collecting=0; obj=""; objdepth=0; cards=""; suffix=""
+              while (i <= n) {
+                c=substr(s, i, 1)
+                if (collecting == 0) {
+                  if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                  else if (c == "]") { suffix=substr(s, i); break }
+                } else {
+                  obj=obj c
+                  if (c == "{") objdepth++
+                  else if (c == "}") {
+                    objdepth--
+                    if (objdepth == 0) {
+                      cid=""; ctype=""
+                      if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"id"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); cid=f
+                      }
+                      if (match(obj, /"type"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"type"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); ctype=f
+                      }
+                      if (cid == want) {
+                        found_card=1
+                        if (ctype == "note") {
+                          found_note=1
+                          sp=index(obj, "\"state\":")
+                          head=substr(obj, 1, sp - 1)
+                          if (readflag == "1") {
+                            obj=head "\"state\":{\"read\":true,\"read_at\":\"" now "\"}}"
+                          } else {
+                            obj=head "\"state\":{\"read\":false,\"read_at\":null}}"
+                          }
+                        }
+                      }
+                      if (cards != "") cards=cards ","
+                      cards=cards obj
+                      collecting=0; obj=""
+                    }
+                  }
+                }
+                i++
+              }
+              if (found_card == 0) { printf "__NO_CARD__"; exit }
+              if (found_note == 0) { printf "__NOT_NOTE__"; exit }
+              printf "%s%s%s", prefix, cards, suffix
+            }
+          ' "$push_file"
+        )"
+        case "$push_new" in
+          __NO_CARD__)
+            printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+            exit 65 ;;
+          __NOT_NOTE__)
+            printf "card '%s' is not a note\n" "$push_card_id" >&2
+            exit 65 ;;
+        esac
+        push_tmp="${push_file}.tmp.$$"
+        printf '%s' "$push_new" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        if [ "$push_read" -eq 1 ]; then
+          printf "%s: note: read\n" "$push_card_id"
+        else
+          printf "%s: note: unread\n" "$push_card_id"
+        fi
+        exit 0
+        ;;
+      *)
+        printf 'pocketshell push fixture supports: checklist|get|status|check|note|read\n' >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  tree)
+    # The standard `agents` fixture intentionally does not fake the durable
+    # file-workspace RPC. Issue #1715 journeys must target `agents-daemon`
+    # (port 2239), whose real Python tree registry owns the schema and the
+    # atomic persistence contract. Keeping a workspace.json side store here
+    # would let a proof pass without exercising the product host protocol.
+    shift
+    case "${1:-}" in
+      workspace-get|workspace-upsert)
+        printf 'pocketshell fixture: workspace RPC requires agents-daemon (port 2239)\n' >&2
+        exit 64
+        ;;
+      get|upsert|reconcile)
+        if [ "${POCKETSHELL_FIXTURE_REAL_TREE:-0}" = "1" ]; then
+          exec /usr/local/bin/pocketshell-real tree "$@"
+        fi
+        # Tree durability lives on the agents-daemon fixture. A no-op empty
+        # envelope keeps a stray `tree get` on this image from hanging.
+        printf '{"nodes":[],"version":0,"alive":[],"gone":[],"added":[]}\n'
+        exit 0
+        ;;
+      *)
+        printf 'pocketshell tree fixture supports: get|upsert|reconcile\n' >&2
+        exit 64
+        ;;
+    esac
+    ;;
+esac
+
+printf 'pocketshell fixture supports: usage --json, sessions list/create/attach/kill, agent-log, profiles list, engines list --json, agents kind, tree get|upsert|reconcile\n' >&2
+exit 64

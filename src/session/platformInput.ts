@@ -1,0 +1,372 @@
+import type { AttachmentSource } from '@pocketshell/core';
+import { MAX_SFTP_FILE_BYTES } from './files';
+import type {
+  DocumentContentPlugin,
+  NativeDocumentChunk,
+  NativePickedDocument,
+  NativeSharedContent,
+} from '../native/documentContent';
+import type {
+  DictationEventType,
+  NativeDictationEvent,
+  SpeechRecognitionPlugin,
+} from '../native/speechRecognition';
+import { documentContent } from '../native/documentContent';
+import { speechRecognition } from '../native/speechRecognition';
+
+const CHUNK_BYTES = 48 * 1024;
+const MAX_PICKED_BATCH_BYTES = 4 * 1024 * 1024;
+
+export interface PickedAttachmentFailure {
+  name: string;
+  message: string;
+}
+
+export interface PickedAttachmentBatch {
+  sources: AttachmentSource[];
+  failures: PickedAttachmentFailure[];
+}
+
+export interface SharedContent {
+  requestId: string;
+  mimeType: string | null;
+  subject?: string;
+  text?: string;
+  attachments: AttachmentSource[];
+  failures: PickedAttachmentFailure[];
+  fileError?: string;
+}
+
+export interface DictationEvent {
+  requestId: string;
+  type: DictationEventType;
+  text?: string;
+  code?: string;
+}
+
+/** Reusable Android recognizer options for composer and inline dictation. */
+export interface DictationStartOptions {
+  languageTag?: string;
+  silenceWindowMs?: number;
+}
+
+export interface PlatformInputServiceOptions {
+  chunkBytes?: number;
+  maxFileBytes?: number;
+  maxBatchBytes?: number;
+  dictationTestMode?: () => boolean;
+}
+
+interface DictationRequestState {
+  cancelled: boolean;
+  nativeStartRequested: boolean;
+  listener?: Awaited<ReturnType<SpeechRecognitionPlugin['addListener']>>;
+}
+
+export class PlatformInputError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'PlatformInputError';
+  }
+}
+
+/**
+ * TypeScript adapter for native microphone, document-picker, and share I/O.
+ * It validates request/event identity and turns opaque, bounded native reads
+ * into the shared byte-based attachment shape consumed by file staging.
+ */
+export function createPlatformInputService(
+  documents: DocumentContentPlugin,
+  speech: SpeechRecognitionPlugin,
+  serviceOptions: PlatformInputServiceOptions = {},
+) {
+  const dictationRequests = new Map<string, DictationRequestState>();
+  const chunkBytes = boundedInteger(serviceOptions.chunkBytes ?? CHUNK_BYTES, 1, 64 * 1024, 'chunkBytes');
+  const maxFileBytes = boundedInteger(serviceOptions.maxFileBytes ?? MAX_SFTP_FILE_BYTES, 1, Number.MAX_SAFE_INTEGER, 'maxFileBytes');
+  const maxBatchBytes = boundedInteger(serviceOptions.maxBatchBytes ?? MAX_PICKED_BATCH_BYTES, maxFileBytes, Number.MAX_SAFE_INTEGER, 'maxBatchBytes');
+
+  async function pickAttachments(): Promise<PickedAttachmentBatch> {
+    const picked = await documents.pickFiles({ mimeType: '*/*', multiple: true });
+    if (!isPickedDocuments(picked)) {
+      throw new PlatformInputError('invalid-picker-response', 'The Android file picker returned an invalid response.');
+    }
+    if (picked.cancelled) return { sources: [], failures: [] };
+    return readPickedDocuments(picked.files);
+  }
+
+  async function readPickedDocuments(files: readonly NativePickedDocument[]): Promise<PickedAttachmentBatch> {
+    const sources: AttachmentSource[] = [];
+    const failures: PickedAttachmentFailure[] = [];
+    let batchBytes = 0;
+    try {
+      for (const file of files) {
+        const name = validName(file?.name) ? file.name : 'Shared file';
+        try {
+          validatePickedDocument(file);
+          if (file.sizeBytes != null && file.sizeBytes > maxFileBytes) {
+            throw new PlatformInputError('file-too-large', `This transfer supports files up to ${maxFileBytes} bytes.`);
+          }
+          const remainingBatchBytes = maxBatchBytes - batchBytes;
+          if (remainingBatchBytes <= 0) {
+            throw new PlatformInputError('batch-too-large', `A single selection can contain at most ${maxBatchBytes} bytes.`);
+          }
+          const bytes = await readDocument(file, Math.min(maxFileBytes, remainingBatchBytes));
+          batchBytes += bytes.byteLength;
+          sources.push({
+            kind: 'bytes',
+            data: bytes,
+            name,
+            mimeType: typeof file.mimeType === 'string' && file.mimeType.length > 0 ? file.mimeType : null,
+          });
+        } catch (error) {
+          failures.push({ name, message: errorMessage(error) });
+        }
+      }
+    } finally {
+      await Promise.all(files.map(async (file) => {
+        if (typeof file?.fileId !== 'string' || file.fileId === '') return;
+        try {
+          await documents.releasePickedFile({ fileId: file.fileId });
+        } catch {
+          // Releasing is best-effort; the native registry is process-local and bounded.
+        }
+      }));
+    }
+    return { sources, failures };
+  }
+
+  async function listenForShares(onShare: (content: SharedContent) => void): Promise<() => Promise<void>> {
+    const handle = await documents.addListener('shareReceived', (event) => {
+      void materializeShare(event).then(onShare).catch((error: unknown) => {
+        onShare({
+          requestId: typeof event?.requestId === 'string' ? event.requestId : '',
+          mimeType: typeof event?.mimeType === 'string' ? event.mimeType : null,
+          attachments: [],
+          failures: [{ name: 'Shared content', message: errorMessage(error) }],
+          ...(typeof event?.text === 'string' ? { text: event.text } : {}),
+          ...(typeof event?.subject === 'string' ? { subject: event.subject } : {}),
+        });
+      });
+    });
+    return () => handle.remove();
+  }
+
+  async function materializeShare(event: NativeSharedContent): Promise<SharedContent> {
+    validateShare(event);
+    const materialized = await readPickedDocuments(event.files);
+    return {
+      requestId: event.requestId,
+      mimeType: event.mimeType,
+      attachments: materialized.sources,
+      failures: materialized.failures,
+      ...(typeof event.text === 'string' ? { text: event.text } : {}),
+      ...(typeof event.subject === 'string' ? { subject: event.subject } : {}),
+      ...(typeof event.fileError === 'string' ? { fileError: event.fileError } : {}),
+    };
+  }
+
+  async function startRecognition(
+    requestId: string,
+    onEvent: (event: DictationEvent) => void,
+    options: DictationStartOptions = {},
+  ): Promise<void> {
+    if (typeof requestId !== 'string' || requestId.trim() === '') {
+      throw new PlatformInputError('invalid-request-id', 'Speech recognition could not start. Try again.');
+    }
+    if (dictationRequests.has(requestId)) {
+      throw new PlatformInputError('duplicate-request-id', 'This recognition request is already active.');
+    }
+    const request: DictationRequestState = { cancelled: false, nativeStartRequested: false };
+    dictationRequests.set(requestId, request);
+    try {
+      request.listener = await speech.addListener('dictationEvent', (event: NativeDictationEvent) => {
+        if (!isDictationEvent(event) || event.requestId !== requestId) return;
+        if (request.cancelled) return;
+        onEvent({ ...event });
+        if (isTerminalDictationEvent(event.type)) void removeDictationRequest(requestId, request);
+      });
+      if (request.cancelled) {
+        throw new PlatformInputError('dictation-cancelled', 'Recognition was cancelled before it started.');
+      }
+      request.nativeStartRequested = true;
+      const started = await speech.startDictation({
+        requestId,
+        ...(options.languageTag ? { languageTag: options.languageTag } : {}),
+        ...(options.silenceWindowMs !== undefined ? { silenceWindowMs: options.silenceWindowMs } : {}),
+        ...(serviceOptions.dictationTestMode?.() === true ? { testMode: true } : {}),
+      });
+      if (request.cancelled) {
+        throw new PlatformInputError('dictation-cancelled', 'Recognition was cancelled before it started.');
+      }
+      if (started.requestId !== requestId || started.started !== true) {
+        throw new PlatformInputError('invalid-dictation-response', 'Android did not start the requested recognition turn.');
+      }
+    } catch (error) {
+      await removeDictationRequest(requestId, request);
+      if (request.cancelled) {
+        throw new PlatformInputError('dictation-cancelled', 'Recognition was cancelled before it started.');
+      }
+      throw error;
+    }
+  }
+
+  async function stopRecognition(requestId: string): Promise<void> {
+    const request = dictationRequests.get(requestId);
+    if (!request || request.cancelled) return;
+    const stopped = await speech.stopDictation({ requestId });
+    if (stopped.requestId !== requestId || stopped.stopped !== true) {
+      throw new PlatformInputError('invalid-dictation-response', 'Android stopped a different recognition turn.');
+    }
+  }
+
+  async function cancelRecognition(requestId: string): Promise<void> {
+    const request = dictationRequests.get(requestId);
+    if (!request || request.cancelled) return;
+    request.cancelled = true;
+    try {
+      if (request.nativeStartRequested) {
+        const cancelled = await speech.cancelDictation({ requestId });
+        if (cancelled.requestId !== requestId || typeof cancelled.cancelled !== 'boolean') {
+          throw new PlatformInputError('invalid-dictation-response', 'Android cancelled a different recognition turn.');
+        }
+      }
+    } finally {
+      // JavaScript cancellation is authoritative for this request. Even if the
+      // narrow native cancel bridge fails, no late result may reach the draft.
+      await removeDictationRequest(requestId, request);
+    }
+  }
+
+  async function removeDictationRequest(
+    requestId: string,
+    request: DictationRequestState,
+  ): Promise<void> {
+    if (dictationRequests.get(requestId) === request) dictationRequests.delete(requestId);
+    const listener = request.listener;
+    request.listener = undefined;
+    await listener?.remove();
+  }
+
+  async function readDocument(file: NativePickedDocument, maxBytes: number): Promise<Uint8Array> {
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    let eof = false;
+    while (!eof) {
+      if (totalBytes > maxBytes) {
+        throw new PlatformInputError('file-too-large', `This transfer supports files up to ${maxBytes} bytes.`);
+      }
+      const requestedBytes = Math.min(chunkBytes, maxBytes - totalBytes || chunkBytes);
+      const response = await documents.readPickedFileChunk({
+        fileId: file.fileId,
+        offset: totalBytes,
+        maxBytes: requestedBytes,
+      });
+      const bytes = decodeChunk(response, file.fileId, totalBytes, requestedBytes);
+      if (totalBytes + bytes.byteLength > maxBytes) {
+        throw new PlatformInputError('file-too-large', `This transfer supports files up to ${maxBytes} bytes.`);
+      }
+      if (bytes.byteLength === 0 && response.eof !== true) {
+        throw new PlatformInputError('empty-chunk', 'The Android document provider stopped before the file was complete.');
+      }
+      chunks.push(bytes);
+      totalBytes += bytes.byteLength;
+      eof = response.eof;
+    }
+    if (file.sizeBytes != null && totalBytes !== file.sizeBytes) {
+      throw new PlatformInputError('file-changed', 'The selected file changed while it was being read. Pick it again.');
+    }
+    const output = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return output;
+  }
+
+  return {
+    pickAttachments,
+    listenForShares,
+    startRecognition,
+    stopRecognition,
+    cancelRecognition,
+  };
+}
+
+export const platformInput = createPlatformInputService(documentContent, speechRecognition, {
+  dictationTestMode: () => typeof window !== 'undefined'
+    && (window as Window & { __ps2857DictationTestMode?: boolean }).__ps2857DictationTestMode === true,
+});
+
+function decodeChunk(chunk: NativeDocumentChunk, fileId: string, offset: number, maxBytes: number): Uint8Array {
+  if (chunk.fileId !== fileId || chunk.offset !== offset
+      || !Number.isSafeInteger(chunk.bytesRead) || chunk.bytesRead < 0 || chunk.bytesRead > maxBytes
+      || typeof chunk.eof !== 'boolean' || typeof chunk.base64 !== 'string') {
+    throw new PlatformInputError('invalid-document-chunk', 'Android returned an unreadable part of the file. Pick it again.');
+  }
+  try {
+    const decoded = globalThis.atob(chunk.base64);
+    if (decoded.length !== chunk.bytesRead) {
+      throw new PlatformInputError('invalid-document-chunk', 'Android returned an incomplete part of the file. Pick it again.');
+    }
+    return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  } catch (error) {
+    if (error instanceof PlatformInputError) throw error;
+    throw new PlatformInputError('invalid-document-chunk', 'Android returned file contents that could not be read. Pick it again.');
+  }
+}
+
+function validatePickedDocument(file: NativePickedDocument): void {
+  if (typeof file?.fileId !== 'string' || file.fileId.trim() === '' || !validName(file.name)) {
+    throw new PlatformInputError('invalid-picked-document', 'The Android file picker returned an invalid document reference.');
+  }
+  if (file.sizeBytes != null && (!Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0)) {
+    throw new PlatformInputError('invalid-picked-document', 'The Android file picker returned an invalid file size.');
+  }
+}
+
+function validateShare(event: NativeSharedContent): void {
+  if (typeof event?.requestId !== 'string' || event.requestId.trim() === ''
+      || (event.action !== 'android.intent.action.SEND' && event.action !== 'android.intent.action.SEND_MULTIPLE')
+      || !Array.isArray(event.files)) {
+    throw new PlatformInputError('invalid-share-event', 'Android returned an invalid share intent.');
+  }
+}
+
+function isPickedDocuments(value: unknown): value is { cancelled: boolean; files: NativePickedDocument[] } {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Record<string, unknown>).cancelled === 'boolean'
+    && Array.isArray((value as Record<string, unknown>).files);
+}
+
+function isDictationEvent(value: unknown): value is NativeDictationEvent {
+  if (typeof value !== 'object' || value === null) return false;
+  const event = value as Record<string, unknown>;
+  if (typeof event.requestId !== 'string') return false;
+  if (event.type === 'audio') {
+    // #3062: a bounded sound/silence flag only; never text or other payload.
+    return event.text === undefined && (event.code === 'sound' || event.code === 'silence');
+  }
+  return ['partial', 'result', 'recoverable', 'error'].includes(String(event.type))
+    && (event.text === undefined || typeof event.text === 'string')
+    && (event.code === undefined || typeof event.code === 'string');
+}
+
+function isTerminalDictationEvent(type: DictationEventType): boolean {
+  return type !== 'partial' && type !== 'audio';
+}
+
+function validName(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function boundedInteger(value: number, minimum: number, maximum: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(`${name} is outside its supported range.`);
+  }
+  return value;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message !== '' ? error.message : String(error);
+}

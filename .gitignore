@@ -1,0 +1,84 @@
+# JavaScript, Capacitor Android, and IDE build outputs.
+
+node_modules/
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+*.apk
+*.aab
+*.ap_
+*.dex
+
+*.class
+*.jar
+!android/gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+
+*/build/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.keystore
+!debug.keystore
+*.jks
+keystore.properties
+
+# Per-issue git worktrees used by the orchestrator/implementer/reviewer
+# loop (see process.md "Agent Worktrees"). Each implementer works in
+# .worktrees/issue-<N>/; the directory contents are themselves a separate
+# checkout and must never be tracked from the main checkout. The
+# .claude/worktrees/ entry covers the Claude Code Agent tool's
+# isolation:"worktree" mode, which creates its own per-agent worktrees
+# there automatically.
+.worktrees/
+.claude/worktrees/
+
+# Starter patches the orchestrator hands to implementers when picking up
+# in-flight draft work (see process.md "Agent Worktrees"). Kept inside the
+# repo so they survive `cd` between worktree and main, but gitignored so
+# they never accidentally get committed.
+.pickup/
+
+# Local scratch dir for screenshots viewed via PocketShell
+.tmp/
+
+# Firebase config (per-machine, not committed — #690)
+android/app/google-services.json
+
+# Generated CI journey harness output
+/artifacts/
+
+# Python bytecode caches (a stray scripts/__pycache__/*.pyc was tracked until 2026-08-15;
+# any full pytest run rewrote it and dirtied every worktree)
+__pycache__/
+*.pyc
+
+# Issue #2381: scripts/derive-version.sh write-pin's output. It only ever
+# belongs in a DETACHED copy of a checkout (the pre-release gate's `.git`-less
+# rsync worktree, which already lives under build/); committing one would
+# freeze this repo's derived version at whatever it happened to be.
+.pocketshell-version-pin

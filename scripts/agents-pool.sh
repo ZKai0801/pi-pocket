@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Agents-fixture pool CLI (issue #724) — the Docker half of parallel journey
+# testing. The AVD half (a pool of N emulators) is scripts/avd-pool.sh; this
+# brings up N ISOLATED deterministic `agents` SSH/aplexer fixtures, each on its
+# own host port, so two emulator lanes never corrupt each other's session state.
+#
+# Subcommands:
+#   up [PORT...]     bring up an agents fixture lane for each PORT (default: the
+#                    whole candidate pool), wait each healthy
+#   down [PORT...]   tear down the fixture lane(s) for each PORT (default: pool)
+#   status           show which candidate ports are claimed / fixture health
+#
+# up/down take the same machine-wide per-port flock a live --pool claim holds
+# (issue #2501) and REFUSE a port a lane is holding, instead of recreating or
+# `down -v`-ing the container underneath it. Sequential warm-up / teardown of
+# free ports is unchanged.
+#
+# Port scheme: candidate ports default to `2243 2244 2245` (override via
+# POCKETSHELL_AGENTS_POOL_PORTS). Each runs under its own container name +
+# compose project, so lanes are fully independent.
+#
+# 2222 IS NOT A CANDIDATE, and must not be added back to that list (issue
+# #1842). It is the legacy single-lane fixture (container
+# `pocketshell-test-agents`), and ~a dozen non-pool scripts recreate it
+# unconditionally without taking the port lock — so a lane handed 2222 holds a
+# lock nobody consults and gets its session registry replaced mid-run. This CLI still
+# manages it on request (`up 2222` / `down 2222` reproduce the legacy identity
+# for the single-lane tooling); it is only barred from lane ALLOCATION.
+#
+# The per-lane allocation (claim a free port + flock it for a run's lifetime) is
+# done automatically by `scripts/connected-test.sh --pool`; this CLI is for
+# explicit pool warm-up / teardown / inspection.
+#
+# Example — bring up two lanes, run two journey classes in parallel, tear down:
+#   scripts/agents-pool.sh up 2243 2244
+#   scripts/connected-test.sh --pool --suffix iA \
+#     -Pandroid.testInstrumentationRunnerArguments.class=...DeepLinkSessionSwitchE2eTest &
+#   scripts/connected-test.sh --pool --suffix iB \
+#     -Pandroid.testInstrumentationRunnerArguments.class=...ReconnectRepaintE2eTest &
+#   wait
+#   scripts/agents-pool.sh down 2243 2244
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+source "$ROOT_DIR/scripts/lib/agents-pool.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/agents-pool.sh <up|down|status> [PORT...]
+
+Brings up a pool of isolated deterministic `agents` SSH/aplexer fixtures on
+distinct host ports so parallel emulator lanes get independent session state.
+
+  up [PORT...]     bring up + wait-healthy a fixture lane per PORT (default pool)
+  down [PORT...]   tear down the fixture lane(s) per PORT (default pool)
+  status           list candidate ports, claim state, and fixture health
+
+up/down hold the per-port flock a live --pool claim holds and REFUSE a port
+that is currently claimed by a running lane, instead of recreating or tearing
+down its container mid-run (issue #2501).
+
+Env: POCKETSHELL_AGENTS_POOL_PORTS="2243 2244 2245"   (lane candidates)
+
+Do NOT put 2222 in that list (issue #1842): it is the legacy single-lane
+fixture, which ~a dozen non-pool scripts recreate without taking the port
+lock, so no lock can defend a lane that was handed it. `up 2222` /
+`down 2222` still work for managing that fixture explicitly.
+USAGE
+}
+
+resolve_ports() {
+  # Remaining args are explicit ports; otherwise the whole candidate pool.
+  if [[ "$#" -gt 0 ]]; then
+    printf '%s\n' "$@"
+  else
+    pocketshell_agents_pool_ports
+  fi
+}
+
+cmd_up() {
+  local ports
+  # shellcheck disable=SC2046
+  ports=$(resolve_ports "$@")
+  local port failures=0
+  for port in $ports; do
+    # Issue #2501: hold the same per-port flock a live claim holds, for the
+    # whole up + wait-healthy window, so a warm-up can never recreate a
+    # running lane's container. Refusing (not queueing) is deliberate: a
+    # maintenance command must not block silently behind a 9-minute lane.
+    if ! pocketshell_agents_acquire_port_lock "$ROOT_DIR" "$port"; then
+      printf 'FAIL: agents fixture port %s is held by a live pool claim (flock %s); refusing to bring it up over a running lane. Issue #2501.\n' \
+        "$port" "$(pocketshell_agents_lock_file_for_port "$ROOT_DIR" "$port")" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! pocketshell_agents_fixture_up "$ROOT_DIR" "$port" 9>&- \
+      || ! pocketshell_agents_fixture_wait_healthy "$ROOT_DIR" "$port" 9>&-; then
+      printf 'FAIL: agents fixture lane on port %s did not come up healthy.\n' "$port" >&2
+      failures=$((failures + 1))
+    fi
+    pocketshell_agents_release_port_lock
+  done
+  if (( failures > 0 )); then
+    return 1
+  fi
+  # shellcheck disable=SC2086  # $ports is an intentionally space-separated list
+  printf 'agents pool up: %s\n' "$(printf '%s ' $ports)" >&2
+}
+
+cmd_down() {
+  local ports
+  # shellcheck disable=SC2046
+  ports=$(resolve_ports "$@")
+  local port failures=0
+  for port in $ports; do
+    # Issue #2501: `compose down -v` on a HELD port is the exact cross-lane
+    # collision (it kills + destroys the container a running lane is
+    # asserting against). Take the claim's own flock atomically and refuse
+    # the teardown while a lane holds the port.
+    if ! pocketshell_agents_acquire_port_lock "$ROOT_DIR" "$port"; then
+      printf 'FAIL: agents fixture port %s is held by a live pool claim (flock %s); refusing to tear it down under a running lane. Re-run after the lane exits. Issue #2501.\n' \
+        "$port" "$(pocketshell_agents_lock_file_for_port "$ROOT_DIR" "$port")" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    pocketshell_agents_fixture_down "$ROOT_DIR" "$port" 9>&-
+    pocketshell_agents_release_port_lock
+  done
+  # shellcheck disable=SC2086  # $ports is an intentionally space-separated list
+  printf 'agents pool down: %s\n' "$(printf '%s ' $ports)" >&2
+  if (( failures > 0 )); then
+    return 1
+  fi
+  return 0
+}
+
+cmd_status() {
+  local ports
+  ports="$(pocketshell_agents_pool_ports)"
+  printf '%-8s %-10s %-12s %s\n' "PORT" "CLAIMED" "HEALTH" "CONTAINER"
+  local port
+  for port in $ports; do
+    local lock_file claimed container health
+    lock_file="$(pocketshell_agents_lock_file_for_port "$ROOT_DIR" "$port")"
+    # If a non-blocking flock succeeds, the port is FREE (no holder); if it
+    # fails, a lane holds it.
+    if [[ -e "$lock_file" ]] && ! ( flock -n 9 ) 9>"$lock_file" 2>/dev/null; then
+      claimed="yes"
+    else
+      claimed="no"
+    fi
+    container="$(pocketshell_agents_container_for_port "$port")"
+    health="$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "-")"
+    [[ -z "$health" ]] && health="-"
+    printf '%-8s %-10s %-12s %s\n' "$port" "$claimed" "$health" "$container"
+  done
+}
+
+main() {
+  local sub="${1:-}"
+  if [[ "$#" -gt 0 ]]; then
+    shift
+  fi
+  case "$sub" in
+    up) cmd_up "$@" ;;
+    down) cmd_down "$@" ;;
+    status) cmd_status "$@" ;;
+    -h|--help|"") usage ;;
+    *) printf 'Unknown subcommand: %s\n\n' "$sub" >&2; usage; exit 2 ;;
+  esac
+}
+
+main "$@"

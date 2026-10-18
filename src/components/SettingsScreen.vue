@@ -1,0 +1,232 @@
+<script setup lang="ts">
+import {
+  VOICE_LANGUAGE_OPTIONS,
+  VOICE_SILENCE_MAX_SECONDS,
+  VOICE_SILENCE_MIN_SECONDS,
+  useAppSettings,
+} from '../stores/appSettings';
+import { useNavigationStore } from '../stores/navigation';
+import { THEME_CHOICE_SYSTEM, THEMES } from '@ui/themes';
+import AppIcon from '@ui/components/AppIcon.vue';
+import KeyIcon from './KeyIcon.vue';
+import SettingsConnectionsGroup from '@ui/app/components/settings/SettingsConnectionsGroup.vue';
+import HostSnippetsScreen from './HostSnippetsScreen.vue';
+import AccountSyncScreen from './AccountSyncScreen.vue';
+import { androidSync } from '../platform/android/sync';
+
+defineProps<{
+  snippetHostId: string;
+  snippetHostLabel: string;
+}>();
+
+const settings = useAppSettings();
+const navigation = useNavigationStore();
+
+/** The phone's saved and imported hosts; loaded lazily so this screen's import stays storage-free. */
+async function loadLocalHosts() {
+  const { androidHosts } = await import('../platform/android/hosts');
+  return androidHosts.list();
+}
+
+function setTerminalFontSize(event: Event) {
+  settings.setTerminalFontSize((event.target as HTMLInputElement).value);
+}
+
+function setThemeChoice(event: Event) {
+  settings.setThemeChoice((event.target as HTMLSelectElement).value);
+}
+
+function setVoiceLanguage(event: Event) {
+  settings.setVoiceLanguage((event.target as HTMLSelectElement).value);
+}
+
+function setVoiceSilence(event: Event) {
+  settings.setVoiceSilenceSeconds(Number((event.target as HTMLInputElement).value));
+}
+</script>
+
+<template>
+  <main v-if="navigation.route === 'settings'" class="screen-content settings-screen" data-testid="settings-screen">
+    <section class="panel settings-panel" aria-labelledby="settings-title">
+      <h1 id="settings-title">Settings</h1>
+      <p class="settings-copy">Choose how PocketShell looks and how long a live terminal rides through an app switch.</p>
+
+      <label class="settings-control">
+        <span><strong>Theme</strong><small>Colors for the app and the terminal.</small></span>
+        <select :value="settings.themeChoice" data-testid="setting-theme" @change="setThemeChoice">
+          <option :value="THEME_CHOICE_SYSTEM">Follow device</option>
+          <option v-for="theme in THEMES" :key="theme.id" :value="theme.id">{{ theme.label }}</option>
+        </select>
+      </label>
+
+      <button class="settings-link" type="button" data-testid="open-terminal-settings" @click="navigation.open('settings-terminal')">
+        <span class="settings-link__icon"><AppIcon name="terminal" /></span>
+        <span><strong>Terminal</strong><small>Text size and display options</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-ssh-keys-settings" @click="navigation.open('keys')">
+        <span class="settings-link__icon"><KeyIcon /></span>
+        <span><strong>SSH keys</strong><small>Paste, import or generate keys; copy or share public keys</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-connection-settings" @click="navigation.open('settings-connections')">
+        <span class="settings-link__icon"><AppIcon name="zap" /></span>
+        <span><strong>Connections</strong><small>Background grace and reconnect</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-account-settings" @click="navigation.open('settings-account')">
+        <span class="settings-link__icon"><AppIcon name="folder" /></span>
+        <span><strong>Account &amp; sync</strong><small>Sign in with Google to sync hosts across devices</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-ports" @click="navigation.open('ports')">
+        <span class="settings-link__icon"><AppIcon name="arrow-right-left" /></span>
+        <span><strong>Port forwarding</strong><small>Find remote services and open local tunnels</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-usage" @click="navigation.open('usage')">
+        <span class="settings-link__icon"><AppIcon name="bar-chart-2" /></span>
+        <span><strong>Provider usage</strong><small>Quota and login status from the connected host</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-voice-settings" @click="navigation.open('settings-voice')">
+        <span class="settings-link__icon"><AppIcon name="tool" /></span>
+        <span><strong>Voice</strong><small>Dictation settings</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-snippet-settings" @click="navigation.open('settings-snippets')">
+        <span class="settings-link__icon"><AppIcon name="terminal" /></span>
+        <span><strong>Command chips</strong><small>Save reusable text for each SSH host</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-advanced-settings" @click="navigation.open('settings-advanced')">
+        <span class="settings-link__icon"><AppIcon name="settings" /></span>
+        <span><strong>Advanced</strong><small>Compatibility and account sync</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-diagnostics" @click="navigation.open('diagnostics')">
+        <span class="settings-link__icon"><AppIcon name="bar-chart-2" /></span>
+        <span><strong>Diagnostics</strong><small>Recent connection events for troubleshooting</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+      <button class="settings-link" type="button" data-testid="open-about" @click="navigation.open('about')">
+        <span class="settings-link__icon"><AppIcon name="file" /></span>
+        <span><strong>About PocketShell</strong><small>Version and updates</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+    </section>
+  </main>
+
+  <HostSnippetsScreen
+    v-else-if="navigation.route === 'settings-snippets'"
+    :host-id="snippetHostId"
+    :host-label="snippetHostLabel"
+  />
+
+  <main v-else-if="navigation.route === 'settings-terminal'" class="screen-content settings-screen" data-testid="terminal-settings-screen">
+    <section class="panel settings-panel" aria-labelledby="terminal-settings-title">
+      <h1 id="terminal-settings-title">Terminal</h1>
+      <p class="settings-copy">The same terminal palette is used in the interface and live SSH terminal.</p>
+      <label class="settings-control settings-control--stacked">
+        <span><strong>Terminal text size</strong><small>Changes apply immediately.</small></span>
+        <span class="font-size-control">
+          <button class="small-action" type="button" aria-label="Decrease terminal text size" :disabled="settings.terminalFontSize <= 8" @click="settings.setTerminalFontSize(settings.terminalFontSize - 1)">−</button>
+          <output data-testid="terminal-font-size">{{ settings.terminalFontSize }} px</output>
+          <button class="small-action" type="button" aria-label="Increase terminal text size" :disabled="settings.terminalFontSize >= 32" @click="settings.setTerminalFontSize(settings.terminalFontSize + 1)">+</button>
+          <input
+            class="font-size-input"
+            data-testid="terminal-font-size-input"
+            type="number"
+            inputmode="numeric"
+            min="8"
+            max="32"
+            step="1"
+            :value="settings.terminalFontSize"
+            aria-label="Terminal text size in pixels"
+            @change="setTerminalFontSize"
+          />
+        </span>
+      </label>
+      <div class="settings-preview" aria-label="Terminal text preview">$ pocketshell sessions</div>
+    </section>
+  </main>
+
+  <main v-else-if="navigation.route === 'settings-connections'" class="screen-content settings-screen" data-testid="connection-settings-screen">
+    <section class="panel settings-panel" aria-labelledby="connection-settings-title">
+      <h1 id="connection-settings-title">Connections</h1>
+      <!-- The shared Settings → Connections group (pocketshell-core, D42): grace
+           window and the Reconnect-when-I-return switch, backed by the shared
+           settings store the Android lifecycle reads. -->
+      <SettingsConnectionsGroup :show-title="false" />
+      <p class="settings-note">PocketShell does not keep the phone connection open indefinitely in the background.</p>
+    </section>
+  </main>
+
+  <main v-else-if="navigation.route === 'settings-voice'" class="screen-content settings-screen" data-testid="voice-settings-screen">
+    <section class="panel settings-panel" aria-labelledby="voice-settings-title">
+      <h1 id="voice-settings-title">Voice</h1>
+      <label class="settings-control" data-testid="voice-language-control">
+        <span><strong>Dictation language</strong><small>Choose a language hint for Android's system speech recognizer.</small></span>
+        <select :value="settings.voiceLanguage" data-testid="setting-voice-language" @change="setVoiceLanguage">
+          <option v-for="option in VOICE_LANGUAGE_OPTIONS" :key="option.code" :value="option.code">{{ option.label }}</option>
+        </select>
+      </label>
+      <p class="settings-note">Microphone access is requested only when you start dictating. Dictation always stops into an editable draft for review.</p>
+    </section>
+  </main>
+
+  <main v-else-if="navigation.route === 'settings-advanced'" class="screen-content settings-screen" data-testid="advanced-settings-screen">
+    <section class="panel settings-panel" aria-labelledby="advanced-settings-title">
+      <h1 id="advanced-settings-title">Advanced</h1>
+      <label class="settings-control settings-control--stacked" data-testid="voice-silence-control">
+        <span><strong>Recognizer silence window</strong><small>How long Android's recognizer waits through a pause before treating speech as complete. Dictation stays open until you tap Stop.</small></span>
+        <span class="voice-silence-control__value">
+          <input
+            id="voice-silence-seconds"
+            data-testid="setting-voice-silence-seconds"
+            type="range"
+            :min="VOICE_SILENCE_MIN_SECONDS"
+            :max="VOICE_SILENCE_MAX_SECONDS"
+            step="1"
+            :value="settings.voiceSilenceSeconds"
+            aria-label="Recognizer silence window in seconds"
+            @input="setVoiceSilence"
+          />
+          <output for="voice-silence-seconds" data-testid="voice-silence-value">{{ settings.voiceSilenceSeconds }} s</output>
+        </span>
+      </label>
+      <p class="settings-note">This setting is saved on this device and applies the next time dictation starts. Android providers may treat silence timing as advisory.</p>
+      <button class="settings-link" type="button" data-testid="open-account-sync" @click="navigation.open('settings-account')">
+        <span class="settings-link__icon"><AppIcon name="folder" /></span>
+        <span><strong>Account &amp; sync</strong><small>Google sign-in and host sync</small></span>
+        <AppIcon class="settings-link__chevron" name="arrow-right" :size="16" />
+      </button>
+    </section>
+  </main>
+
+  <AccountSyncScreen
+    v-else-if="navigation.route === 'settings-account'"
+    :sync="androidSync()"
+    :load-local-hosts="loadLocalHosts"
+  />
+</template>
+
+<style scoped>
+.voice-silence-control__value {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 12px;
+}
+
+.voice-silence-control__value input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.voice-silence-control__value output {
+  color: var(--fg);
+  font: 600 var(--fs-300)/1.2 var(--font-mono);
+  text-align: right;
+}
+</style>

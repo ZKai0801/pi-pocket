@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+state_file="${POCKETSHELL_BOOTSTRAP_SYSTEMCTL_STATE:-/tmp/pocketshell-bootstrap-systemctl-state}"
+read_state() {
+  if [ -f "$state_file" ]; then
+    # shellcheck disable=SC2034
+    read -r active_state enabled_state < "$state_file"
+  else
+    active_state=inactive
+    enabled_state=disabled
+  fi
+}
+
+write_state() {
+  printf '%s %s\n' "$1" "$2" > "$state_file"
+}
+
+# Issue #231 (D22 hard-cut): the bootstrapper installs/enables the unified
+# `pocketshell.service` user unit (see the bootstrap fixture).
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-active" ] && [ "${3:-}" = "pocketshell.service" ]; then
+  read_state
+  printf '%s\n' "$active_state"
+  [ "$active_state" = "active" ]
+  exit $?
+fi
+
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-enabled" ] && [ "${3:-}" = "pocketshell.service" ]; then
+  read_state
+  printf '%s\n' "$enabled_state"
+  [ "$enabled_state" = "enabled" ]
+  exit $?
+fi
+
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "daemon-reload" ]; then
+  exit 0
+fi
+
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "enable" ] && [ "${3:-}" = "--now" ] && [ "${4:-}" = "pocketshell.service" ]; then
+  write_state active enabled
+  printf 'enabled pocketshell.service\n'
+  exit 0
+fi
+
+printf 'systemctl bootstrap fixture supports pocketshell.service user-service commands\n' >&2
+exit 3

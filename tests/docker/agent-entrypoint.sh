@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+encoded_cwd="-workspace-pocketshell"
+
+# Issue #2381: keep the fixture's `pocketshell --version` in lockstep with the
+# APK under test. The app treats its own versionName's release core as the CLI
+# version it expects on the host, so a fixture pinned to a different release
+# reports VersionMismatch and the bootstrap "Host setup needed" sheet takes
+# over EVERY journey against this fixture.
+#
+# Before #2356 the Dockerfile sed'd the `versionName = "X.Y.Z"` literal out of
+# app/build.gradle.kts at image-build time and the two matched by construction.
+# That literal is gone (the version is derived from the git tag), and the git
+# history the derivation needs is not in the Docker build context — so the
+# caller passes the derived version in instead, and we stamp it here at
+# container start rather than at image build: `docker compose up -d` without
+# `--build` then still picks it up, and a changed value does not bust the
+# image layer cache.
+#
+# The env var itself cannot reach the app's probe: it arrives over sshd, which
+# does not inherit the entrypoint's environment. Writing the file is what makes
+# it visible (same mechanism as Dockerfile.agents-old-cli's #847 fixture).
+version_file="${POCKETSHELL_AGENT_FIXTURE_VERSION_FILE:-/opt/pocketshell-agent-fixture-version}"
+if [ -n "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}" ]; then
+  printf '%s\n' "$POCKETSHELL_AGENT_FIXTURE_VERSION" > "$version_file"
+fi
+
+install -d -o testuser -g testuser "/home/testuser/.claude/projects/${encoded_cwd}"
+install -d -o testuser -g testuser "/home/testuser/.codex/sessions/2026/05/22"
+install -d -o testuser -g testuser "/home/testuser/.local/share/opencode"
+
+# Seed discoverable agent profiles (#718 / #732) so a real `pocketshell
+# profiles list --json` discovery journey finds something to select. The
+# default ~/.claude dir → the "Claude" default profile; a sibling ~/.zlaude
+# dir (the maintainer's Z.AI-routed Claude) → the "Claude (Z.AI)" profile.
+# Each needs a real marker file (.claude.json / settings.json) so the
+# fixture's profiles branch (mirroring profiles.py's conservative discovery)
+# treats the dir as a true config dir rather than a phantom.
+for marker_dir in .claude .zlaude; do
+  install -d -o testuser -g testuser "/home/testuser/${marker_dir}"
+  : > "/home/testuser/${marker_dir}/.claude.json"
+  : > "/home/testuser/${marker_dir}/settings.json"
+  chown testuser:testuser \
+    "/home/testuser/${marker_dir}/.claude.json" \
+    "/home/testuser/${marker_dir}/settings.json"
+done
+
+cp "${fixture_dir}/claude-session.jsonl" "/home/testuser/.claude/projects/${encoded_cwd}/pocketshell-claude.jsonl"
+cp "${fixture_dir}/codex-session.jsonl" "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl"
+cp "${fixture_dir}/opencode-rows.jsonl" "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl"
+now_ms="$(($(date +%s) * 1000))"
+sqlite3 "/home/testuser/.local/share/opencode/opencode.db" <<SQL
+CREATE TABLE IF NOT EXISTS project (
+  id TEXT PRIMARY KEY,
+  worktree TEXT
+);
+CREATE TABLE IF NOT EXISTS session (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  directory TEXT,
+  time_created INTEGER,
+  time_updated INTEGER
+);
+CREATE TABLE IF NOT EXISTS message (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  data TEXT,
+  time_created INTEGER,
+  time_updated INTEGER
+);
+CREATE TABLE IF NOT EXISTS part (
+  id TEXT PRIMARY KEY,
+  message_id TEXT,
+  data TEXT,
+  time_created INTEGER
+);
+DELETE FROM part;
+DELETE FROM message;
+DELETE FROM session;
+DELETE FROM project;
+INSERT INTO project (id, worktree) VALUES ('opencode-project', '/workspace/pocketshell');
+INSERT INTO session (id, project_id, directory, time_created, time_updated)
+  VALUES ('opencode-fixture', 'opencode-project', '/workspace/pocketshell', ${now_ms}, ${now_ms});
+INSERT INTO message (id, session_id, data, time_created, time_updated)
+  VALUES ('opencode-user-1', 'opencode-fixture', '{"role":"user"}', ${now_ms}, ${now_ms});
+INSERT INTO part (id, message_id, data, time_created)
+  VALUES ('opencode-user-part-1', 'opencode-user-1', '{"type":"text","text":"check the app status"}', ${now_ms});
+INSERT INTO message (id, session_id, data, time_created, time_updated)
+  VALUES ('opencode-assistant-1', 'opencode-fixture', '{"role":"assistant"}', ${now_ms} + 1, ${now_ms} + 1);
+INSERT INTO part (id, message_id, data, time_created)
+  VALUES ('opencode-assistant-part-1', 'opencode-assistant-1', '{"type":"output_text","text":"The deterministic fixture is ready."}', ${now_ms} + 1);
+SQL
+chown -R testuser:testuser /home/testuser/.claude /home/testuser/.codex /home/testuser/.local
+# Create the shared parent and every workspace used by the real session
+# journeys with the same ownership. The aplexer worker requires its `--cwd`
+# to exist before it starts; precreating these exact paths also keeps a fresh
+# container independent of which journey seeded it first.
+for workspace in \
+  /home/testuser/git/pocketshell \
+  /home/testuser/git/aplexer \
+  /home/testuser/git/j04-new \
+  /home/testuser/git/j04-twice \
+  /home/testuser/git/j04-idempotent
+do
+  install -d -o testuser -g testuser "$workspace"
+done
+touch \
+  "/home/testuser/.claude/projects/${encoded_cwd}/pocketshell-claude.jsonl" \
+  "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl" \
+  "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl" \
+  "/home/testuser/.local/share/opencode/opencode.db"
+
+# Seed one real aplexer shell so every tree journey has an independent row to
+# wait for. Each journey creates and cleans up its own additional records.
+su testuser -s /bin/sh -c \
+  'HOME=/home/testuser \
+   /usr/local/bin/pocketshell-real sessions create --cwd /home/testuser/git/pocketshell \
+   --mem none --json -- claude-main >/dev/null'
+
+sh -c 'while true; do sleep 3600; done' idle-agent-a &
+sh -c 'while true; do sleep 3600; done' idle-agent-b &
+sh -c 'while true; do sleep 3600; done' idle-agent-c &
+
+exec /usr/sbin/sshd -D -e

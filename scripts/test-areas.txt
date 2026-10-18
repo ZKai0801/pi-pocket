@@ -1,0 +1,475 @@
+# PocketShell test-area manifest — the coverage-guard taxonomy (issue #2063).
+#
+# This taxonomy exists to make coverage MECHANICALLY CHECKABLE (is every class
+# mapped, reachable, and actually executed within a bounded window — the
+# #1851/#1853/#1859/#1509 class), and it scopes CI selection as a by-product.
+# Measured over 104 `main` commits it was 1.09x on the emulator lane and
+# neutral-to-slightly-negative on Unit — deliberately conservative, because a
+# scoped run was the ONLY signal: an under-selection there was a silent
+# coverage hole with nothing to catch it. docs/testing.md has the numbers.
+#
+# ISSUE #2355 CHANGED THE PRECONDITION THAT MADE THAT CONSERVATISM NECESSARY.
+# Phase 1 of epic #2350 added a scheduled FULL-suite run on `main` on a fixed
+# ~8h cadence (independent of what any push selects) plus stop-the-line +
+# revert-first (D36): a selection miss is now caught within <=8h with
+# attribution bounded to that window, and recovery is a revert, not a 2-day
+# forward-fix. That backstop is what makes deliberately TIGHTENING this
+# manifest — narrower `full` globs, fewer/narrower `couple` edges — safe now,
+# where it was not before Phase 1 existed. #2355 narrowed the two dominant
+# force-full contributors (measured: `scripts/*` and the "test-infrastructure"
+# non-*Test-file rule; see the FORCE-FULL section and docs/testing.md for the
+# before/after numbers) on exactly that basis. The map must still stay HONEST
+# — this file remains data reflecting real blast radius, not a knob tuned to
+# hit a target percentage — but selectivity is now a deliberate secondary goal
+# for genuinely narrow-blast-radius paths, not something to avoid discussing.
+#
+# ONE data file drives all four consumers, so the taxonomy cannot drift:
+#   * scripts/select-test-areas.sh            — changed paths -> areas -> what to run
+#   * scripts/check-test-execution-ledger.sh  — proves every class still executes
+#   * scripts/dev-fast-gate.sh                — local emulator fast path (devgate col)
+#   * docs/testing.md                         — the documented rule for a NEW test
+#
+# GRAMMAR (whitespace-separated; the last column may contain spaces)
+#
+#   area   <name>  <tier>  <description...>     tier = always | changed
+#   full   <glob>  <reason...>                  changing this => run EVERYTHING
+#   noop   <glob>  <reason...>                  provably cannot affect any test
+#   src    <glob>  <area>  <devgate>            production path -> area
+#   test   <glob>  <area>  <devgate>            test path      -> area
+#   class  <fqcn>  <area>                       per-class override (beats globs)
+#   couple <area>  <area,area,...>              selecting <area> also selects these
+#
+# Globs are bash `[[ path == glob ]]` patterns with extglob on, so `*` crosses
+# `/` and `+(...)` / `!(...)` are available where a rule must NOT cross a path
+# segment. Rows are first-match-wins IN FILE ORDER within their record type.
+# Evaluation order across types is fixed in scripts/lib/test-areas.sh:
+#
+#   full -> test-infrastructure rule -> noop -> class -> test -> src -> FULL
+#
+# THE RULE FOR A NEW TEST (this is the whole rule; do not re-litigate)
+#
+#   A test's area is the area of its Gradle module, or — inside :app — of its
+#   top-level `com.pocketshell.app.<pkg>` package. Add a test to an existing
+#   package and it inherits that package's area with no manifest edit at all.
+#   Only three things need a manifest edit:
+#     1. a NEW top-level package or Gradle module  -> add a src + test row;
+#     2. a class whose regression class belongs to a DIFFERENT area than its
+#        package (rare; the conversation-source cluster living in app.tmux is
+#        the only case today) -> add a `class` row;
+#     3. a new production path with cross-area blast radius -> add a `full` row.
+#   Forget all three and the guard fails with "unmapped path" while the run
+#   falls back to FULL: the map can only lag LOUDLY, never silently.
+#
+# TIERS
+#   always  — this area's tests run on EVERY push regardless of the diff. Held
+#             for the D28/G8 worst-reopen areas (connection/reconnect/lease,
+#             conversation-source/agent-detection, terminal render/ANR) plus the
+#             app shell. Per-area justification: docs/testing.md.
+#   changed — runs when the area (or something coupled to it, or a force-full
+#             path) is in the diff, plus nightly, plus the release gate.
+#
+# WHAT DECIDES THAT A TEST RUNS (read this before adding a `couple` row)
+#
+# A test CLASS runs on a push when any of these holds:
+#
+#   1. the run is FULL (force-full path, unmapped path, manifest load failure);
+#   2. its area is `always`-tier;
+#   3. its own area is in the diff, or in the `couple` closure of the diff;
+#   4. it IMPORTS the production code of an area that is in the diff — derived
+#      from the class's own `import com.pocketshell.…` lines, NOT from any row
+#      in this file;
+#   5. DELETED (issue #2643): the host-CLI WIRE SEAM. The producer moved to
+#      PocketShell-io/pocketshell-cli, and the seam machinery that mapped a
+#      producer-side change onto the Kotlin wire tests was deleted with it
+#      (D22: the guard's subject left the repo). The protection survives in
+#      the `full tests/docker/*` row below: the producer-side trigger inside
+#      this repo is tests/docker/fixture-pins.txt (the pinned wheel the Docker
+#      fixtures install), and bumping it force-fulls the run — every
+#      wire-reading journey and unit class runs, plus the rest. Cross-repo
+#      contract drift itself is owned by the CLI repo's own CI.
+#
+# Rules 4 and 5 are computed in scripts/lib/test-areas.sh; that file's index
+# comment carries the full rationale, the two stronger designs that were
+# measured and rejected (both degenerate to "run everything" because the
+# production import graph is strongly connected), and the bound this one accepts
+# (direct compile edges only — transitive production dependencies are not
+# chased; the always tier, nightly and the release gate are the backstops).
+# `--verify-manifest` check 7 floors each seam END separately, including how far
+# the seam reaches into `shared/*`, because a total-only floor is exactly what
+# hid B6: 15 packages looked healthy while one whole end was at zero.
+#
+# So `couple` rows exist ONLY for BEHAVIOURAL coupling that no import expresses:
+# composer-always-present across screens, ui-kit tokens reaching every surface,
+# a host record the tree reads. Do not add a `couple` row for a compile-level
+# dependency — rule 4 already has it, and a hand row that duplicates the import
+# graph is how round 1 ended up asserting two edges it did not have.
+#
+# EVERY app2 and core-transport/core-hostapi row carries devgate `full`, and
+# that is deliberate rather than lazy. dev-fast-gate.sh's coarse stages
+# (ui | bootstrap | terminal | full) were cut for the OLD module's screen
+# layout; its pre-#2063 inline arms know nothing about `app2/` or
+# `shared/core-transport/`, so they classify every one of those paths as
+# force-full. scripts/dev-fast-gate-parity-selftest.sh enforces the one-way
+# property that this manifest may never be LESS conservative than those arms,
+# so naming a narrower stage here would be a real loosening of the local gate
+# with nothing behind it. Re-cutting the dev-fast-gate stages around app2's
+# screens is its own piece of work; until then the safe direction is the whole
+# stage.
+#
+# devgate is consumed ONLY by scripts/dev-fast-gate.sh, whose coarse emulator
+# stages (ui | bootstrap | terminal | full) answer a different question from the
+# test areas. It is a per-ROW column, not a per-AREA one, precisely because the
+# old inline arms split some areas across stages (shared/core-ssh was
+# `terminal` while shared/core-connection fell through to force-full). Keeping
+# it per-row is what let dev-fast-gate move onto this manifest with every one of
+# its decisions unchanged — proven over every tracked file by
+# scripts/dev-fast-gate-parity-selftest.sh.
+
+# ---------------------------------------------------------------------------
+# AREAS
+# ---------------------------------------------------------------------------
+area   connection-core      always   SSH transport, lease, reconnect, grace, tmux -CC control protocol (D28 core)
+area   terminal-render      always   Terminal emulation, parsing, render and the drain scheduler (#796/#803 ANR class)
+area   app-shell            always   Application entry, DI graph, navigation, startup and test-access seams
+area   tmux-session         changed  The session/terminal screen, grace/reconnect coordination and session UI state (app2 `terminal` package)
+area   composer-voice       changed  Prompt composer, outbound queue, dictation, voice assistant and messaging
+area   projects-tree        changed  Session tree, folders, repos and git surfaces
+area   portfwd              changed  Port forwarding core, panel, notification text and forwarding service
+area   files                changed  File viewer and file explorer
+area   hosts-settings       changed  Hosts, settings, preferences and local storage
+area   share                changed  Share target and attachment intake
+area   usage-costs          changed  Usage panel, provider quotas and cost reporting
+area   bootstrap            changed  The Kotlin host-CLI client (:shared:core-hostapi) and app2's host-CLI factory
+area   diagnostics-crash    changed  Diagnostics, crash reporting, env and snippets
+area   ui-shell             changed  Shared ui-kit design system, layout, insets and branding
+area   ci-harness           changed  JVM-driven shell harness tests for the CI scripts
+# The `host-cli` AREA was DELETED with its subject (issue #2643): the CLI's
+# pytest suite lives in PocketShell-io/pocketshell-cli, and no tracked path
+# classifies into the area any more — the producer trigger (fixture-pins.txt)
+# deliberately force-fulls via `full tests/docker/*` instead, and an area
+# representative must classify INTO its area, which a force-full path cannot.
+# The #847 lockstep property is asserted by selftest case 16a/16a-2: a pin
+# bump runs every journey and unit class, including the wire readers.
+
+# ---------------------------------------------------------------------------
+# FORCE-FULL — blast-radius escapes. Evaluated FIRST, in this order.
+#
+# The test that would have caught a cross-area change must never be skipped, so
+# anything whose effect provably leaves its own area runs everything. Every row
+# here is a deliberate cost, and every one is cheaper than a missed regression.
+# ---------------------------------------------------------------------------
+full   .github/*                     CI workflow definitions decide what runs at all
+full   .gitattributes                attributes alter the checked-out bytes of any matched path (verbatim fixtures, #2584) — full blast radius
+# scripts/* WAS one blanket row here (measured #2355: over 30 sampled commits
+# it alone caused 53 of 75 total force-full glob hits — by far the dominant
+# contributor, matching docs/testing.md's "scripts/* (18 commits)" finding).
+# `scripts/` holds ~170 files, and the overwhelming majority are release/
+# workbench/dev-loop tooling with NO bearing on which Kotlin/journey tests a
+# push needs — most already carry their OWN unconditional self-test, run every
+# push by the SEPARATE `guards-static`/`guards-ci-harness`/`guards-test-
+# selection` CI jobs regardless of what this manifest selects (see
+# .github/workflows/tests.yml; `scripts/ci-test-selection-guards.sh` is that
+# job's body for the taxonomy's own guards). Narrowing this row does not lose
+# that protection — it was never provided BY force-full in the first place.
+# What stays `full` below is the set that is genuinely taxonomy-self-
+# referential (the manifest cannot verify itself if the thing checking it is
+# stale) or that changes the MECHANICS of how connected/journey tests execute,
+# where a bug would not be caught by that class's own narrow self-test alone.
+# Everything else in scripts/ falls through to the `src scripts/* ci-harness`
+# catch-all near the bottom of this section.
+full   scripts/test-areas.txt                       the manifest itself — the whole taxonomy, as data
+full   scripts/lib/test-areas.sh                    the classification engine every consumer reads
+full   scripts/select-test-areas.sh                 the selection/coverage-guard engine itself
+full   scripts/select-test-areas-selftest.sh        its own red/green self-test
+full   scripts/ci-test-selection-guards.sh          wires the #2063 guards into the unconditional guards-test-selection job
+full   scripts/ci-app2-journey-suite.sh             the journey registry — defines what "every journey" means
+full   scripts/test-unconventional-test-files.txt   the unconventional-@Test exemption baseline this manifest's own guard checks
+full   scripts/check-test-execution-ledger.sh       proves every registered class actually executes
+full   scripts/check-test-execution-ledger-selftest.sh
+full   scripts/check-test-execution-ledger-wiring.py
+full   scripts/ci-record-test-execution-ledger.sh
+full   scripts/check-ci-unit-forced-execution.py    asserts the full Unit run stays forced/uncached
+full   scripts/check-executed-test-counts.sh        the anti-vacuous-green test-count guard (issue #1646)
+full   scripts/check-test-validity.sh               D32/#657 regression-proof-validity guard
+full   scripts/check-test-validity-selftest.sh
+full   scripts/check-tests-referenced.sh            proves every tests/scripts/* harness has a live caller
+full   scripts/check-script-interpreter-hygiene.sh  proves every script runs under its own shebang's interpreter (issue #2066)
+full   scripts/connected-test.sh                    how every connected/journey test physically runs (AVD lock, applicationIdSuffix)
+full   scripts/agents-pool.sh                       Docker agents-fixture allocation every parallel journey lane depends on
+full   scripts/journey-quarantine.txt               the flake-quarantine list itself (issue #2355 / D36)
+full   scripts/lib/journey-quarantine.sh            the quarantine list's parsing/consumption library
+full   scripts/check-journey-quarantine-expiry.sh   the quarantine expiry guard (issue #2355 / D36)
+full   scripts/report-journey-flake.sh              the semi-automated auto-file/quarantine helper (issue #2355 / D36)
+# tests/* WAS one blanket row here too (measured #2355: only 4 of 75 hits, far
+# behind scripts/*, but still narrowed on the same basis). `tests/docker/*`
+# stays FULL: it is the Docker fixture (fake agent CLIs, sshd config, compose
+# topology) that essentially every connection-core/terminal/tmux/agent journey
+# across EVERY app area depends on — narrowing that specific subtree would
+# need a per-fixture blast-radius audit this round did not do, and getting it
+# wrong is exactly the #1509/#847 "fixture changed, the test it protects did
+# not re-run" shape. `tests/scripts/*` (shell harnesses that test scripts/*,
+# invoked from the app.scripts Kotlin test package via ProcessBuilder — see
+# `test app/src/*/java/.../scripts/*` below) is the tests/ sibling of the
+# scripts/* case above and narrows the same way.
+full   tests/docker/*                Docker fixtures every connection/terminal/tmux/agent journey depends on
+full   gradle/*                      version catalogue and wrapper properties
+full   */gradle/*                    nested gradle directories
+full   gradlew*                      the wrapper entry points
+full   *build.gradle.kts             module build configuration
+full   *.gradle.kts                  any Gradle Kotlin script
+full   *.gradle                      any Gradle Groovy script
+full   gradle.properties             daemon/heap/parallelism config changes every test task
+full   cgroups.toml                  local run confinement used by the gates
+full   debug.keystore                signing input for every built APK
+full   shared/test-support/*         the ONE audited settle pump; every runTest consumer depends on it
+# The old `app` module's force-full rows moved to `app2` with the rewrite's
+# hard cut (D22): the same blast radii exist, in the module that now holds
+# them. `app/src/proofTest/*` has no app2 successor and is simply gone.
+full   app2/src/main/java/com/pocketshell/next/di/*           the Hilt/DI graph wires every area together
+full   app2/src/test/java/com/pocketshell/next/di/*           tests of the Hilt/DI graph verify real cross-area wiring (#2488)
+full   app2/src/main/java/com/pocketshell/next/nav/*          the navigation graph reaches every screen
+full   app2/src/main/java/com/pocketshell/next/App.kt         application object: lifecycle fan-out to every surface
+full   app2/src/main/java/com/pocketshell/next/MainActivity.kt  single activity host for every destination
+full   app2/src/main/res/*           theme tokens, strings and drawables reach every screen (#453/#641 class)
+full   app2/src/main/AndroidManifest.xml        components, permissions and exported surfaces
+full   app2/src/debug/*              debug-variant instrumentation seams (Hilt test application) every journey builds against
+full   app2/src/release/*            release-variant manifest overrides (e.g. the Robolectric host-activity declaration) every screen's testReleaseUnitTest run builds against
+
+# ---------------------------------------------------------------------------
+# NOOP — provably cannot affect any test.
+#
+# Narrow on purpose: prose only. No Gradle test and no journey reads a repo
+# markdown file at runtime, and `select-test-areas.sh --verify-manifest`
+# re-proves that on every run by scanning the test trees for doc-file reads, so
+# this row set cannot quietly become wrong. A noop-only diff still runs the
+# always tier — "select nothing" is unreachable by construction (the always-tier
+# union in lib/test-areas.sh happens last and unconditionally).
+# ---------------------------------------------------------------------------
+noop   *.md                          prose; no test reads a markdown file at runtime
+noop   docs/*                        planning docs and mockups
+noop   .claude/*                     agent role prompts
+noop   .gitignore                    ignore rules
+noop   LICENSE                       all-rights-reserved notice; prose, no test reads it (#2641)
+# The browser-loop half of ui-mock remains inert to Gradle tests. The Android
+# library source sets below are real code and have explicit src/test rows.
+# render.init.gradle and build.gradle.kts still force-full via `full *.gradle`.
+noop   ui-mock/*.py                  standalone browser design tool (issue #2636)
+noop   ui-mock/tests/*               Python-only browser-tool tests
+noop   ui-mock/web/*                 static browser client
+noop   ui-mock/*.md                  module/tool documentation
+noop   ui-mock/.gitignore            browser-tool generated-output ignores
+
+# ---------------------------------------------------------------------------
+# PRODUCTION PATHS -> AREA. Ordered specific-before-general.
+# ---------------------------------------------------------------------------
+
+# -- shared modules --
+# core-ssh / core-tmux / core-connection / core-agents were DELETED by the
+# rewrite; :shared:core-transport is the surviving D28 connection core and
+# :shared:core-hostapi is the Kotlin end of the host-CLI wire.
+src    shared/core-transport/*       connection-core      full
+src    shared/core-terminal/*        terminal-render      terminal
+src    shared/core-hostapi/*         bootstrap            full
+src    shared/core-voice/*           composer-voice       full
+src    shared/core-assistant/*       composer-voice       full
+src    shared/core-portfwd/*         portfwd              full
+src    ui-mock/src/main/*            app-shell            full
+# #2636 D16: the runnable mock shell (Android application module). Same
+# app-shell family as :ui-mock — the shell renders the real shared screens
+# driven by the pure mock reducer, so anything shell-side selects app-shell.
+src    ui-mock-app/src/main/*        app-shell            full
+src    shared/core-storage/*         hosts-settings       full
+src    shared/core-usage/*           usage-costs          full
+# #2636 D19: the diagnostics instrumentation core (event bus / JSONL store /
+# recorder) moved here from app2's next/diagnostics package; it keeps its
+# diagnostics-crash ownership on the shared side.
+src    shared/core-diagnostics/*     diagnostics-crash    full
+src    shared/ui-kit/*               ui-shell             ui
+# #2636 D1/D2/D4/D7/D8/D9: the presentation-boundary module carries one screen
+# family per package, and each package maps to its own family's area — the
+# generic row below is the module default (the hosts family, D1); the composer
+# row carves out the composer presentation state (D2), the share row the share
+# target's screen + pure state (D4), and the D8 rows the leftovers families
+# (connect trust sheet + pure state, files markdown model/parser/renderer,
+# ports table chrome, usage reset banner + event, workspaces session mark).
+# Two slices need no carve-out of their own: the sync family (D7), because
+# app2's own sync rows (#2633) already map that family to hosts-settings, the
+# module default; and D9, whose Transfers page lands in the existing files row
+# and whose SSH-key unlock panel lands on the hosts-settings default. The
+# module's boundary test imports types from ALL of these families, so its
+# import-derived dependency set keeps the module's own test task selected no
+# matter which family changed (I11).
+src    shared/ui-screens/src/main/java/com/pocketshell/next/composer/*     composer-voice       full
+src    shared/ui-screens/src/main/java/com/pocketshell/next/share/*        share                full
+src    shared/ui-screens/src/main/java/com/pocketshell/next/connect/*      connection-core      full
+src    shared/ui-screens/src/main/java/com/pocketshell/next/files/*        files                full
+src    shared/ui-screens/src/main/java/com/pocketshell/next/ports/*        portfwd              full
+src    shared/ui-screens/src/main/java/com/pocketshell/next/usage/*        usage-costs          full
+# The #2636 D12 crash/diagnostics-display family moved here from app2's
+# crash/ package; it keeps its diagnostics-crash ownership on the shared side.
+src    shared/ui-screens/src/main/java/com/pocketshell/next/crash/*        diagnostics-crash    full
+src    shared/ui-screens/src/main/java/com/pocketshell/next/workspaces/*   projects-tree        full
+src    shared/ui-screens/*           hosts-settings       full
+
+# -- :app2 production packages --
+src    app2/src/main/java/com/pocketshell/next/connect/*      connection-core      full
+src    app2/src/main/java/com/pocketshell/next/terminal/*     tmux-session         full
+src    app2/src/main/java/com/pocketshell/next/composer/*     composer-voice       full
+src    app2/src/main/java/com/pocketshell/next/voice/*        composer-voice       full
+src    app2/src/main/java/com/pocketshell/next/tree/*         projects-tree        full
+src    app2/src/main/java/com/pocketshell/next/workspaces/*  projects-tree        full
+src    app2/src/main/java/com/pocketshell/next/ports/*        portfwd              full
+src    app2/src/main/java/com/pocketshell/next/files/*        files                full
+src    app2/src/main/java/com/pocketshell/next/hosts/*        hosts-settings       full
+src    app2/src/main/java/com/pocketshell/next/settings/*     hosts-settings       full
+# Optional Google sign-in settings sync (#2633): reads/writes the hosts table
+# and hangs off the Settings index, so it shares the hosts-settings area.
+src    app2/src/main/java/com/pocketshell/next/sync/*         hosts-settings       full
+src    app2/src/main/java/com/pocketshell/next/release/*      hosts-settings       full
+src    app2/src/main/java/com/pocketshell/next/share/*        share                full
+src    app2/src/main/java/com/pocketshell/next/usage/*        usage-costs          full
+src    app2/src/main/java/com/pocketshell/next/hostcli/*      bootstrap            full
+src    app2/src/main/java/com/pocketshell/next/crash/*        diagnostics-crash    full
+
+# -- host CLI --
+# No `src … host-cli` row any more (issue #2643): the producer-side trigger is
+# tests/docker/fixture-pins.txt, already force-full via `full tests/docker/*`.
+
+# -- CI/dev-tooling scripts NOT covered by an explicit `full` row above
+#    (issue #2355). Most have their own unconditional self-test (a sibling
+#    `guards-static`/`guards-ci-harness` CI step, independent of this
+#    manifest's selection) or, for the tests/scripts/* shell harnesses
+#    specifically, a `test app/src/*/java/.../scripts/*` Kotlin caller below
+#    that ProcessBuilder-invokes them directly — that Kotlin package IS this
+#    row's real regression coverage, which is why it maps here rather than to
+#    `noop` (these files are not provably inert; they are covered elsewhere).
+src    scripts/*                     ci-harness           full
+src    tests/scripts/*               ci-harness           full
+
+# ---------------------------------------------------------------------------
+# TEST PATHS -> AREA. Ordered specific-before-general.
+#
+# Files in a test source set that are NOT named *Test.kt never reach these
+# rows: the test-infrastructure rule in lib/test-areas.sh force-fulls them
+# first, because a shared fixture's blast radius is exactly as unknown as a DI
+# module's.
+# ---------------------------------------------------------------------------
+
+# -- shared module test trees --
+test   shared/core-transport/*       connection-core      full
+test   shared/core-terminal/*        terminal-render      terminal
+test   shared/core-hostapi/*         bootstrap            full
+test   shared/core-voice/*           composer-voice       full
+test   shared/core-assistant/*       composer-voice       full
+test   shared/core-portfwd/*         portfwd              full
+test   shared/core-storage/*         hosts-settings       full
+test   shared/core-usage/*           usage-costs          full
+test   shared/core-diagnostics/*     diagnostics-crash    full
+test   shared/ui-kit/*               ui-shell             ui
+# #2636 D1: UiScreensDependencyBoundaryTest (the module's classpath + source
+# guard). D2 gave it imports from both screen families, so a composer-side
+# change selects it through the import-derived dependency set even though the
+# row itself keeps the hosts default.
+test   shared/ui-screens/*           hosts-settings       full
+
+# -- :app2 test packages (unit + androidTest share one taxonomy) --
+test   app2/src/*/java/com/pocketshell/next/connect/*      connection-core      full
+test   app2/src/*/java/com/pocketshell/next/terminal/*     tmux-session         full
+test   app2/src/*/java/com/pocketshell/next/composer/*     composer-voice       full
+test   app2/src/*/java/com/pocketshell/next/voice/*        composer-voice       full
+test   app2/src/*/java/com/pocketshell/next/tree/*         projects-tree        full
+test   app2/src/*/java/com/pocketshell/next/workspaces/*  projects-tree        full
+test   app2/src/*/java/com/pocketshell/next/ports/*        portfwd              full
+test   app2/src/*/java/com/pocketshell/next/files/*        files                full
+test   app2/src/*/java/com/pocketshell/next/hosts/*        hosts-settings       full
+test   app2/src/*/java/com/pocketshell/next/settings/*     hosts-settings       full
+# Mirrors the src row above: the #2633 sync tests share hosts-settings.
+test   app2/src/*/java/com/pocketshell/next/sync/*         hosts-settings       full
+test   app2/src/*/java/com/pocketshell/next/release/*      hosts-settings       full
+test   app2/src/*/java/com/pocketshell/next/share/*        share                full
+test   app2/src/*/java/com/pocketshell/next/usage/*        usage-costs          full
+test   app2/src/*/java/com/pocketshell/next/crash/*        diagnostics-crash    full
+# The app2 design-render suites (P-6) render app2 composables built from the
+# ui-kit primitives, so a ui-kit token change is what breaks them.
+test   app2/src/*/java/com/pocketshell/next/render/*       ui-shell             full
+test   app2/src/*/java/com/pocketshell/next/nav/*          app-shell            full
+# The #2636 standalone mock-sandbox module: pure navigation/destination
+# reducer, deterministic fixtures, local platform mirrors and boundary guard.
+test   ui-mock/src/*/java/com/pocketshell/next/mockapp/*   app-shell            full
+# #2636 D16: the runnable mock shell's tests — routing/projection seam and
+# the module boundary guard (declared deps, app2 no-edge, classpath purity).
+test   ui-mock-app/src/*/java/com/pocketshell/uimock/*     app-shell            full
+# Keep the former app2 row additively while the move is uncommitted: the
+# manifest verifier reads the index, where the deleted source paths remain
+# tracked until the orchestrator lands the slice. It is inert after the move.
+test   app2/src/*/java/com/pocketshell/next/mockapp/*      app-shell            full
+# :app2 ROOT-level test classes (App / nav host / Robolectric side-effect guard).
+# `+([A-Za-z0-9_])` cannot cross `/`, so this row matches only files sitting
+# directly in the `next` package — a test in a NEW subpackage falls through to
+# unmapped => FULL + a loud guard failure, which is the point.
+test   app2/src/*/java/com/pocketshell/next/+([A-Za-z0-9_])Test.kt  app-shell  full
+
+# -- host CLI tests --
+# The `test tools/pocketshell/tests/* host-cli full` row was DELETED with the
+# tree it mapped (issue #2643): the CLI's pytest suite now lives in
+# PocketShell-io/pocketshell-cli.
+
+# ---------------------------------------------------------------------------
+# PER-CLASS OVERRIDES
+#
+# The six conversation-source classes that lived in the old
+# com.pocketshell.app.tmux package while belonging to the conversation-agents
+# area are gone with that package and area (D22 hard cut).
+#
+# GraceWindowSettingWiringTest lives in com.pocketshell.next.di (the DI graph
+# package, `full` — no package-level area of its own to inherit), but its own
+# regression class is the grace window: it proves AppModule.provideGraceCoordinator
+# actually carries AppSettings.backgroundGraceMillis into GraceCoordinator
+# (#2488). GraceCoordinator is the tmux-session area's own subject, so that is
+# this class's area even though SettingsRepository is its secondary dependency.
+class  com.pocketshell.next.di.GraceWindowSettingWiringTest  tmux-session
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# AREA COUPLING — BEHAVIOURAL edges only.
+#
+# Selecting the left area also selects everything on the right, transitively.
+# Each edge exists because a change on the left has repeatedly broken the right
+# in a way NO import expresses — a screen-level invariant, a shared design
+# token, a record one surface writes and another reads.
+#
+# Compile-level coupling is NOT listed here and must not be added here: it is
+# derived per test class from the import graph (rule 4 in the header). Round 1
+# hand-listed compile coupling, claimed two edges the file did not contain, and
+# 29 journeys that compile against connection-core production types were not
+# run by a connection-core change.
+# ---------------------------------------------------------------------------
+# The composer is present on the session screen, so a composer change must run
+# the session-screen journeys and vice versa. (The old third leg of this seam,
+# conversation-agents, was deleted with the agent-detection subsystem.)
+couple composer-voice       tmux-session
+couple tmux-session         composer-voice,terminal-render
+# The two always-tier engine areas fan OUT to the session screen when they
+# actually change. Note this is not redundant with their `always` tier: the
+# closure in lib/test-areas.sh runs over the CHANGED seed areas only and unions
+# the always tier afterwards, so these edges fire on a real connection/terminal
+# change and stay silent when those areas are merely the always-on floor.
+couple connection-core      tmux-session
+couple terminal-render      tmux-session
+# ui-kit tokens reach every screen (#453/#641): a design-system change selects
+# every UI-bearing area. Deliberately near-full — do not try to be clever here.
+couple ui-shell             tmux-session,composer-voice,projects-tree,files,hosts-settings,share,usage-costs,bootstrap,diagnostics-crash,portfwd
+# The tree creates and resumes sessions and lands on the session screen.
+couple projects-tree        tmux-session
+# The file viewer is reached from the session screen, so a viewer change must
+# run those journeys. There is deliberately NO projects-tree <-> files edge: no
+# journey crosses that boundary.
+couple files                tmux-session
+# The host record hosts-settings writes is what the tree and the host-CLI
+# client read back.
+couple hosts-settings       bootstrap,projects-tree
+couple bootstrap            hosts-settings
+# Share hands its payload to the composer, and the composer renders it. Both
+# directions for the same reason.
+couple share                composer-voice
+couple composer-voice       share

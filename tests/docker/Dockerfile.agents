@@ -1,0 +1,288 @@
+# Agent-capable local test image for PocketShell.
+#
+# This image is intentionally deterministic: it exposes the command names
+# PocketShell probes without installing real provider CLIs or requiring API
+# credentials. Use it for local emulator + Docker smoke tests only.
+#
+# BASE: debian:trixie-slim, NOT alpine (issue #2563, slice 1 of #2561).
+#
+# aplexer is the only session backend shipped by the product. It
+# manylinux wheels/release binaries only (glibc >= 2.28) and no sdist, so a
+# musl image physically cannot run the pinned `a`. Until #2563 this image faked
+# aplexer with a 61-line shell stub that answered one dead verb (`a --json
+# sessions`) and hosted no attachable process, so no journey could ever
+# exercise a real aplexer session. That stub is deleted (D22 hard cut) and the
+# REAL pinned binaries are installed below. The fixture deliberately does not
+# install the retired session backend, so every session journey exercises the same
+# lifecycle as the product.
+#
+# Two things about the base are load-bearing and were each paid for once:
+#
+#   * It must be TRIXIE, not bookworm. The shared tests/docker/sshd_config
+#     carries `PerSourcePenalties no` (issue #2150), a keyword OpenSSH 9.2
+#     (bookworm) does not know — and sshd REFUSES TO START on an unknown
+#     keyword, so the whole fixture dies at container start. Trixie ships
+#     OpenSSH 10.x. The older glibc fixture base is therefore the wrong base to
+#     copy for this image.
+#   * `ln -sfn /usr/lib/openssh /usr/lib/ssh` keeps the SHARED sshd_config's
+#     Alpine `Subsystem sftp /usr/lib/ssh/sftp-server` path resolving. That is
+#     what stops this base swap from fanning out into the other four
+#     Dockerfiles sharing that config file, and it keeps J10's SFTP channel
+#     working unchanged.
+#
+# THE BASE SWAP MOVES EVERY TOOL VERSION IN THIS IMAGE. Nothing currently
+# depends on the difference (the whole `Integration tests (Docker)` set is
+# green on trixie), but a journey debugged three weeks from now should find
+# this table here rather than rediscover it from a red run. Measured
+# `--no-cache` on both images, back to back:
+#
+#     tool      alpine:latest (was)   debian:trixie-slim (now)
+#     OpenSSH   10.3p1                10.0p2
+#     python3   3.14.7                3.13.5
+#     nano      9.2                   8.4
+#     sqlite3   3.53.4                3.46.1
+#     git       2.54.0                2.47.3
+#
+FROM debian:trixie-slim
+
+# Issue #1091: `nano` is the maintainer's real dogfood TUI (he was trapped in
+# GNU nano, unable to save/exit from PocketShell). The connected nano save/exit
+# journey opens a real nano buffer and drives `^O`/`^X` from the hotkeys panel,
+# so the fixture must ship a real `nano`.
+# Issue #2276: `python3-yaml` is required because the fixture's `engines list
+# --json` arm delegates to the wheel-installed real `pocketshell.engines`
+# registry (see agent-bin/pocketshell), which reads
+# ~/.config/pocketshell/engines.yaml. Without PyYAML the registry silently
+# ignores the fixture's engine rows.
+#
+# Alpine -> Debian package mapping (issue #2563):
+#   openssh-sftp-server -> shipped INSIDE openssh-server on Debian
+#   sqlite              -> sqlite3
+#   py3-yaml            -> python3-yaml. py3-click is deliberately NOT mapped:
+#                          the pinned wheel owns `click` — an apt-installed
+#                          click has no pip RECORD file, and the wheel's
+#                          dependency upgrade aborts with
+#                          uninstall-no-record-file
+#   adduser -D          -> useradd -m
+#   passwd -u           -> usermod -p '*'  (Debian's passwd(1) refuses to
+#                          unlock into a passwordless account and exits 3;
+#                          busybox's is lenient)
+# `curl` + `ca-certificates` exist to fetch the pinned aplexer release
+# binaries below; `python3-pip` installs the pinned `pocketshell` wheel
+# (issue #2643 — the CLI is no longer built from this repo).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-server openssh-client \
+        procps iproute2 bash sqlite3 git nano ca-certificates curl \
+        python3 python3-pip python3-yaml \
+    && find /var/lib/apt/lists -mindepth 1 -delete \
+    && ln -sfn /usr/lib/openssh /usr/lib/ssh \
+    && mkdir -p /run/sshd \
+    && ssh-keygen -A \
+    && useradd -m -s /bin/sh testuser \
+    && usermod -p '*' testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+# The pins this fixture installs (issue #2643). Copied on its own so editing
+# unrelated test code does not invalidate the download/install layers below.
+COPY tests/docker/fixture-pins.txt /opt/pocketshell-fixture/pins.txt
+
+# THE REAL, PINNED host CLI + aplexer (issues #2563, #2643).
+#
+# Since #2643 the CLI is not built from this repo at all: the pinned PyPI
+# wheel is installed, so the fixture exercises exactly what production hosts
+# run (`uv tool install pocketshell`). The pip install runs BEFORE the
+# agent-bin COPY below, so the wheel's `pocketshell`/`quse` console scripts
+# are deliberately overwritten by the fixture shims that shadow them on PATH;
+# the real entry point stays `python3 -m pocketshell`. `--break-system-packages`
+# is the sanctioned way to install into Debian's externally-managed system
+# interpreter.
+#
+# WHERE the `a` binary lands is load-bearing; being on PATH is NOT enough.
+# `pocketshell.aplexer::_bundled_bin_dirs` resolves `a` next to
+# `sys.executable` and nowhere else — the PATH lookup is a D22 hard cut
+# (#2543). With `a` only on PATH the real CLI reports no aplexer rows and exit
+# 0: a fixture that is silently green-and-empty,
+# the exact vacuous-pass shape docs/ci-pitfalls.md catalogues. `/usr/bin/a`
+# sitting next to `/usr/bin/python3` is what makes the resolution succeed, and
+# the self-check further down fails the BUILD if that ever stops being true.
+# (The aplexer wheel that arrives as a dependency of the pocketshell wheel may
+# also drop an `a` in /usr/local/bin — harmless: resolution is
+# interpreter-adjacent and never a PATH walk, and the self-check asserts it.)
+#
+# `a` also needs its sibling worker: aplexer/src/lib.rs::worker_executable
+# resolves `aplexer` next to `current_exe`, so both binaries ship.
+#
+# Both versions are DERIVED from tests/docker/fixture-pins.txt — never a
+# hardcoded literal and never a `--build-arg` default, which is exactly the
+# drift a fixture must not have. Bump the pin and the fixture follows in the
+# same commit; they cannot disagree.
+#
+# The GitHub release asset is byte-identical to the binary inside the PyPI
+# wheel (aplexer's release.yml builds `target/<t>/release/a` once, then both
+# wheel-packs it and uploads it), so this is the production artefact rather
+# than "a build of the same version" — the 143-commit version trap recorded in
+# AGENTS.md does not apply. Nothing here greps `a --version`: the pin is
+# asserted by BEHAVIOUR (the self-check below, and the aplexer contract test
+# in PocketShell-io/pocketshell-cli).
+RUN set -eu; \
+    cli_pin="$(sed -n 's/^POCKETSHELL_PIN=\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-fixture/pins.txt | head -1)"; \
+    test -n "$cli_pin" || { echo "FATAL: no POCKETSHELL_PIN in fixture-pins.txt" >&2; exit 1; }; \
+    ver="$(sed -n 's/^APLEXER_PIN=\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-fixture/pins.txt | head -1)"; \
+    test -n "$ver" || { echo "FATAL: no APLEXER_PIN in fixture-pins.txt" >&2; exit 1; }; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset_arch=linux-amd64 ;; \
+      arm64) asset_arch=linux-arm64 ;; \
+      *) echo "FATAL: aplexer publishes no release binary for dpkg arch $arch" >&2; exit 1 ;; \
+    esac; \
+    echo "pinned pocketshell=$cli_pin (PyPI wheel), aplexer=$ver $asset_arch (derived from fixture-pins.txt)"; \
+    base="https://github.com/alexeygrigorev/aplexer/releases/download/v${ver}"; \
+    curl -fsSL -o /usr/bin/a "$base/a-${asset_arch}"; \
+    curl -fsSL -o /usr/bin/aplexer "$base/aplexer-${asset_arch}"; \
+    chmod +x /usr/bin/a /usr/bin/aplexer; \
+    pip install --break-system-packages --no-cache-dir "pocketshell==${cli_pin}"
+
+COPY tests/docker/sshd_config /etc/ssh/sshd_config
+COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
+# Issue #150: see Dockerfile.ssh — same rationale for the in-container
+# compose healthcheck. The private key is a committed test fixture.
+COPY tests/docker/test_key /root/test_key
+COPY tests/docker/agent-bin/ /usr/local/bin/
+# Issue #2240: the standard fixture keeps its deterministic probes, but the
+# acknowledged send verb delegates to the real host implementation so a
+# connected test can leave and reread a genuine pending journal record. The
+# real implementation itself is the pinned PyPI wheel installed above (issue
+# #2643) — there is no source COPY anymore.
+# The #1302/#1208 idle-incremental-claude.sh TUI fixture was DELETED here (D22).
+# It painted a full TUI frame once and then repainted only a spinner in place —
+# an idle agent that cannot self-heal a lost grid, so recovery had to come from
+# the reconciler. Its only invoker was a composite recovery journey in the
+# removed app module, and no app2 journey drives an agent TUI yet, so it shipped
+# into the image with nothing ever running it (scripts/check-tests-referenced.sh
+# flagged exactly that). Recreate it from git history if app2 grows a
+# terminal-recovery journey that needs the non-self-healing repaint shape.
+COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
+COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+COPY tests/docker/agents-aplexer-selfcheck.py /usr/local/bin/pocketshell-fixture-aplexer-selfcheck
+
+# Issue #2381: the baked version is only the floor. #2356 removed the
+# `versionName = "X.Y.Z"` literal this image used to sed out of a COPYed
+# app/build.gradle.kts, so that COPY + sed silently degraded to a fixed
+# placeholder and the fixture stopped tracking the APK. Both are deleted here
+# (D22 hard cut, no dead fallback): the caller now passes the derived version
+# as POCKETSHELL_AGENT_FIXTURE_VERSION and the entrypoint stamps it into this
+# same file at container start. `0.0.0-dev` matches what
+# scripts/derive-version.sh yields for a tagless checkout, so an unset caller
+# and a tagless-checkout APK still agree.
+#
+# `/usr/local/bin/a` is no longer chmod'd here: the shell stub it used to name
+# is deleted, and `a` is now the real binary in /usr/bin (see above). Nothing
+# symlinks it onto /usr/local/bin either — a PATH-facing `a` is precisely the
+# shape that made the fixture look green while enumerating nothing, so the ONE
+# copy lives next to the interpreter and callers that want it on PATH get it
+# from /usr/bin, which is already on every PATH the fixture uses.
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
+    && chmod +x /usr/local/bin/claude \
+        /usr/local/bin/codex \
+        /usr/local/bin/opencode \
+        /usr/local/bin/pocketshell \
+        /usr/local/bin/quse \
+        /usr/local/bin/agent-log-explorer \
+        /usr/local/bin/uv \
+        /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-altscreen-tui \
+        /usr/local/bin/pocketshell-fake-agent \
+        /usr/local/bin/pocketshell-agent-entrypoint \
+        /usr/local/bin/pocketshell-fixture-aplexer-selfcheck \
+        /usr/local/bin/pocketshell-real \
+    && printf '%s\n' "0.0.0-dev" > /opt/pocketshell-agent-fixture-version \
+    && chown -R testuser:testuser /home/testuser/.ssh
+
+# Issue #2276: the engine-availability journey needs the state the maintainer
+# actually hit, which lives BETWEEN "on the PATH" and "absent everywhere": a
+# harness that is installed and launchable from an interactive LOGIN shell but
+# invisible to the app's NON-interactive SSH `exec` channel. Two such rows are
+# installed here, one per resolution rung:
+#
+#   * `nvm-only-agent`  -> ~/.nvm/versions/node/v24.13.1/bin, exactly where the
+#     maintainer's `codex`/`opencode` live. No shell config mentions it, so
+#     ONLY the absolute-candidate rung can find it.
+#   * `login-only-agent` -> /opt/site-agents/bin, exported from ~/.profile,
+#     which a login shell reads and a non-interactive `exec` never does (the
+#     same shape as the ~/.bashrc interactive early-return guard behind #484).
+#
+# `fixture-missing-engine` stays genuinely absent everywhere (the negative
+# control), `codex-disabled` is present-but-disabled, and `forced-engine` has
+# no binary at all but pins itself with the `force_available:` escape hatch.
+RUN install -d -o testuser -g testuser \
+        /home/testuser/.nvm/versions/node/v24.13.1/bin \
+        /home/testuser/.config/pocketshell \
+    && install -d /opt/site-agents/bin \
+    && printf '#!/bin/sh\nprintf "nvm-only fixture harness\\n"\nexec sleep 3600\n' \
+        > /home/testuser/.nvm/versions/node/v24.13.1/bin/nvm-only-agent \
+    && printf '#!/bin/sh\nprintf "login-only fixture harness\\n"\nexec sleep 3600\n' \
+        > /opt/site-agents/bin/login-only-agent \
+    && chmod +x /home/testuser/.nvm/versions/node/v24.13.1/bin/nvm-only-agent \
+        /opt/site-agents/bin/login-only-agent \
+    && printf '%s\n' \
+        '# Login shells only (issue #2276 fixture): a non-interactive SSH' \
+        '# `exec` channel never sources this file, so /opt/site-agents/bin is' \
+        '# reachable from an interactive login shell but not from the manifest command.' \
+        'export PATH="/opt/site-agents/bin:$PATH"' \
+        > /home/testuser/.profile \
+    && printf '%s\n' \
+        'engines:' \
+        '  - id: fixture-missing-engine' \
+        '    family: codex' \
+        '    harness: fixture-missing-engine' \
+        '    label: Missing fixture engine' \
+        '  - id: codex-disabled' \
+        '    family: codex' \
+        '    harness: codex' \
+        '    label: Disabled Codex fixture' \
+        '    enabled: false' \
+        '  - id: nvm-only-engine' \
+        '    family: codex' \
+        '    harness: nvm-only-agent' \
+        '    label: Nvm-only fixture engine' \
+        '  - id: login-only-engine' \
+        '    family: codex' \
+        '    harness: login-only-agent' \
+        '    label: Login-only fixture engine' \
+        '  - id: forced-engine' \
+        '    family: codex' \
+        '    harness: never-installed-agent' \
+        '    label: Forced fixture engine' \
+        '    force_available: true' \
+        > /home/testuser/.config/pocketshell/engines.yaml \
+    && chown -R testuser:testuser /home/testuser/.nvm /home/testuser/.config \
+        /home/testuser/.profile
+
+# THE ANTI-VACUOUS-GREEN GATE (issue #2563).
+#
+# The image cannot be built hollow. This drives the REAL, unmodified
+# `pocketshell` CLI (`python3 -m pocketshell`, the same entry point
+# pocketshell-real uses) through a full aplexer lifecycle as `testuser`:
+# resolve the bundled `a` -> `sessions create` -> `sessions list --json` must
+# `phase: "running"`, `alive: true` -> `sessions kill` must report
+# `killed: true, reaped: true` -> the row must be gone.
+#
+# Any deviation — a stub `a`, `a` moved somewhere only PATH can see, a missing
+# sibling worker, a session that starts but cannot be enumerated or killed —
+# fails the BUILD with a named diagnostic instead of producing an image that
+# reports zero aplexer rows and exit 0 forever after.
+#
+# What this check does NOT prove is the binary's VINTAGE. A neighbouring
+# release that still satisfies this lifecycle would pass it, and that is fine:
+# the vintage guarantee comes from the pins above (the wheel version is read
+# out of tests/docker/fixture-pins.txt, and bumping that pin is a deliberate,
+# reviewed app-repo change) plus the release URL it builds, not from anything
+# asserted at run time. Version STRINGS are never
+# consulted anywhere here — see the note above the download for why they are
+# not evidence.
+RUN su testuser -s /bin/sh -c 'HOME=/home/testuser /usr/local/bin/pocketshell-fixture-aplexer-selfcheck'
+
+EXPOSE 22
+
+CMD ["/usr/local/bin/pocketshell-agent-entrypoint"]

@@ -1,0 +1,24 @@
+# Flake quarantine list — issue #2355, policy D36 (process.md, "Main health:
+# stop-the-line, revert-first, ownership, and flake quarantine").
+#
+# Read scripts/lib/journey-quarantine.sh's header before editing this file —
+# it documents the format, the fail-safe direction, and exactly what changes
+# (and what does NOT change) for a class listed here.
+#
+# One row per quarantined TEST METHOD, TAB-separated:
+#   <FQCN#method><TAB><issue><TAB><added YYYY-MM-DD><TAB><expires YYYY-MM-DD><TAB><reason>
+#
+# A row is a REGISTRY entry, not a runtime exclusion. The quarantine itself is
+# the `@Ignore("quarantined: #<issue>, expires <date> — <reason>")` annotation on
+# the method; this file is what gives that annotation an owner and a deadline.
+# The guard reconciles the two in BOTH directions, so neither can drift:
+# a row without its @Ignore is a lie, and an @Ignore without a row is a
+# graveyard entry.
+#
+# scripts/check-journey-quarantine-expiry.sh fails CI once `expires` has
+# passed. Resolve an entry by DELETING its row AND its @Ignore (the method is
+# fixed or removed) or by RE-TRIAGING it (a fresh `added`/`expires` in both
+# places, and a reason that says why it is still broken) — never let a row sit
+# expired.
+com.pocketshell.app.smoke.JsFastKeysDockerJourneyTest#fastKeysStayReachableAndWriteExactBytesAcrossImeBackAndReconnect	#3056	2026-10-06	2026-10-20	strike 3/3: AssertionError 'catalog state must keep its terminal slot within the clipped panel' (terminalSlotInsideTerminalPanel:false) at stage dictation-listening-ctrl-open-ime-open — run 37319816493 (main 5fd807b) and 37319447742 attempts 1+3 (PR #3054, d723215), identical signature; transient layout overflow while the inline dictation status row is up, timing-sensitive on the hosted api-35 emulator; main tiebreakers 37324970072 and 37324970464 passed; filed #3056 2026-10-06
+com.pocketshell.app.smoke.UsagePortsDockerJourneyTest#usageAndPortForwardingPoliciesUseDockerAndNativePlugin	#3076	2026-10-09	2026-10-23	strike 2: AssertionError WebView condition did not become true: terminal-viewport .xterm-rows has no row equal to REMOTE_OUTPUT_<id>_HE — scheduled JS full suite runs 37753848124 (main 2c57366d1, 2026-10-08) and 37909446947 (main aabbbcedd, 2026-10-09), identical signature; push runs on the same SHAs passed; typed remote output never renders in time on the hosted api-35 emulator (#2946 family); filed #3076 2026-10-09
