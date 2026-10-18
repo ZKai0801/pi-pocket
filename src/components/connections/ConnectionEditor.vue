@@ -1,0 +1,317 @@
+<script setup lang="ts">
+/**
+ * The add/edit sheet for a saved host. Fields match spec §8.3 and §9.1: name,
+ * host/IP, port, user, auth method, plus the per-host Pi session directory and
+ * pi command the discovery path reads. v1 is key auth (this build has no
+ * password credential store yet), so the password choice is offered but cannot
+ * be saved.
+ */
+import { computed, onMounted, reactive, ref } from 'vue';
+import AppIcon from '@ui/components/AppIcon.vue';
+import KeyIcon from '../KeyIcon.vue';
+import { listSshKeys, type SshKeyMetadata } from '../../native/sshKeyVault';
+import { validateSavedHost, type SavedHost } from '../../platform/android/hostStore';
+
+const props = defineProps<{ host?: SavedHost | null }>();
+const emit = defineEmits<{ save: [host: SavedHost]; cancel: [] }>();
+
+const form = reactive({
+  name: props.host?.name ?? '',
+  hostname: props.host?.hostname ?? '',
+  port: String(props.host?.port ?? 22),
+  user: props.host?.user ?? '',
+  authKind: props.host?.auth?.kind === 'password' ? 'password' : 'key',
+  keyHandleId: props.host?.keyHandleId ?? '',
+  piSessionsDir: props.host?.piSessionsDir ?? '',
+  piCommand: props.host?.piCommand ?? '',
+});
+
+const keys = ref<SshKeyMetadata[]>([]);
+const keysError = ref('');
+const error = ref('');
+
+const isKeyAuth = computed(() => form.authKind === 'key');
+const canSave = computed(() => isKeyAuth.value);
+
+onMounted(async () => {
+  try {
+    keys.value = await listSshKeys();
+  } catch (caught) {
+    keysError.value = caught instanceof Error && caught.message.length > 0
+      ? caught.message
+      : 'The key vault could not be read.';
+  }
+});
+
+function selectAuth(kind: 'key' | 'password'): void {
+  form.authKind = kind;
+  if (kind === 'password') error.value = 'Password authentication is not available in this build yet.';
+  else error.value = '';
+}
+
+function submit(): void {
+  const host: SavedHost = {
+    name: form.name.trim(),
+    hostname: form.hostname.trim(),
+    port: Number(form.port),
+    user: form.user.trim(),
+    keyHandleId: isKeyAuth.value ? form.keyHandleId : '',
+  };
+  if (form.piSessionsDir.trim()) host.piSessionsDir = form.piSessionsDir.trim();
+  if (form.piCommand.trim()) host.piCommand = form.piCommand.trim();
+  const problem = validateSavedHost(host);
+  if (problem) {
+    error.value = problem;
+    return;
+  }
+  emit('save', host);
+}
+</script>
+
+<template>
+  <section class="connection-editor" aria-label="连接编辑">
+    <header class="connection-editor__bar">
+      <button type="button" class="connection-editor__close" aria-label="取消" @click="emit('cancel')">
+        <AppIcon name="close" />
+      </button>
+      <h2 class="connection-editor__title">{{ props.host ? '编辑连接' : '新增连接' }}</h2>
+    </header>
+
+    <form class="connection-editor__form" @submit.prevent="submit">
+      <label class="connection-editor__field">
+        <span class="connection-editor__label">名称</span>
+        <input v-model="form.name" type="text" autocomplete="off" placeholder="kai" />
+      </label>
+
+      <label class="connection-editor__field">
+        <span class="connection-editor__label">主机 / IP</span>
+        <input v-model="form.hostname" type="text" autocomplete="off" inputmode="url" placeholder="192.168.1.3" />
+      </label>
+
+      <label class="connection-editor__field">
+        <span class="connection-editor__label">端口</span>
+        <input v-model="form.port" type="text" inputmode="numeric" placeholder="22" />
+      </label>
+
+      <label class="connection-editor__field">
+        <span class="connection-editor__label">用户</span>
+        <input v-model="form.user" type="text" autocomplete="off" placeholder="kai" />
+      </label>
+
+      <fieldset class="connection-editor__auth">
+        <legend class="connection-editor__label">认证方式</legend>
+        <div class="connection-editor__segments">
+          <button
+            type="button"
+            class="connection-editor__segment"
+            :class="{ 'connection-editor__segment--active': isKeyAuth }"
+            :aria-pressed="isKeyAuth"
+            @click="selectAuth('key')"
+          >
+            <KeyIcon :size="16" /> 密钥
+          </button>
+          <button
+            type="button"
+            class="connection-editor__segment"
+            :class="{ 'connection-editor__segment--active': !isKeyAuth }"
+            :aria-pressed="!isKeyAuth"
+            @click="selectAuth('password')"
+          >
+            密码
+          </button>
+        </div>
+      </fieldset>
+
+      <template v-if="isKeyAuth">
+        <label class="connection-editor__field">
+          <span class="connection-editor__label">密钥</span>
+          <select v-model="form.keyHandleId">
+            <option value="">选择密钥…</option>
+            <option v-for="key in keys" :key="key.handleId" :value="key.handleId">{{ key.label }}</option>
+          </select>
+        </label>
+        <p v-if="keysError" class="connection-editor__hint connection-editor__hint--error">{{ keysError }}</p>
+        <p v-else-if="keys.length === 0" class="connection-editor__hint">
+          密钥库为空 — 先在密钥页导入一把密钥。
+        </p>
+      </template>
+
+      <label class="connection-editor__field">
+        <span class="connection-editor__label">Pi 会话目录</span>
+        <input v-model="form.piSessionsDir" type="text" autocomplete="off" spellcheck="false" placeholder="留空则自动探测" />
+      </label>
+
+      <label class="connection-editor__field">
+        <span class="connection-editor__label">Pi 命令</span>
+        <input v-model="form.piCommand" type="text" autocomplete="off" spellcheck="false" placeholder="pi" />
+      </label>
+
+      <p v-if="error" class="connection-editor__hint connection-editor__hint--error" role="alert">{{ error }}</p>
+
+      <div class="connection-editor__actions">
+        <button type="button" class="connection-editor__cancel" @click="emit('cancel')">取消</button>
+        <button type="submit" class="connection-editor__save" :disabled="!canSave">保存</button>
+      </div>
+    </form>
+  </section>
+</template>
+
+<style scoped>
+.connection-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  padding: var(--sp-3);
+}
+
+.connection-editor__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.connection-editor__close {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.connection-editor__close:focus-visible,
+.connection-editor__segment:focus-visible,
+.connection-editor__cancel:focus-visible,
+.connection-editor__save:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.connection-editor__title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-500);
+  font-weight: var(--fw-semibold);
+}
+
+.connection-editor__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.connection-editor__field {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.connection-editor__label {
+  color: var(--fg-secondary);
+  font-size: var(--fs-100);
+  font-weight: var(--fw-medium);
+}
+
+.connection-editor__field input,
+.connection-editor__field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  padding: 0 var(--sp-2);
+  color: var(--fg);
+  font: var(--fs-300) var(--font-ui);
+  outline: none;
+}
+
+.connection-editor__field input:focus,
+.connection-editor__field select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.connection-editor__auth {
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.connection-editor__segments {
+  display: flex;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+
+.connection-editor__segment {
+  display: inline-flex;
+  min-height: 48px;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--fg-secondary);
+  font: var(--fw-medium) var(--fs-200) / 1 var(--font-ui);
+}
+
+.connection-editor__segment--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.connection-editor__hint {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--fs-200);
+  line-height: 1.45;
+}
+
+.connection-editor__hint--error {
+  color: var(--error);
+}
+
+.connection-editor__actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.connection-editor__cancel,
+.connection-editor__save {
+  display: inline-flex;
+  min-width: 48px;
+  min-height: 48px;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  font: var(--fw-semibold) var(--fs-300) / 1 var(--font-ui);
+}
+
+.connection-editor__cancel {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.connection-editor__save {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.connection-editor__save:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+}
+</style>
