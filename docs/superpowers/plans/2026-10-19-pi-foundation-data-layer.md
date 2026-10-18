@@ -542,23 +542,29 @@ git commit -m "feat(pi): list projects/sessions and read a session over a transp
   test; RF3 → Task 2 thinking-only test; RF4 → Task 5 empty-root/no-header;
   RF5 → Task 5 failing-command test.
 
-## Follow-on plans (not in this document)
+## Follow-on plans (all written; none implemented)
 
-2. **App shell, three tabs, WeChat visual layer** — remove the legacy/shared
-   screens, add the bottom tab bar, Connections/Projects/Sessions/Chat
-   screens, phone-layer WeChat tokens; wire key-auth connect and Tasks 2–5.
-   **Owns `resolveSessionRoot(transport, home, env, override)`**, which probes
-   the candidates from `candidateSessionRoots` (Task 3) in order with `test -d`
-   and returns the first that exists — Plan 1 exports the candidate list but
-   deliberately does not probe, so the spec §9.1 "first that exists" resolution
-   is unimplemented until this plan lands. Plan 2 also inherits the non-blocking
-   deferrals listed at the end of this document.
-3. **Chat send** — `PiTurnRunner` PTY turn (§9.4), refresh, and the
-   Pi-command/PATH per-host config.
-4. **Native credentials** — remember passphrase + password auth (§7.1, §7.2).
-5. **Cleanup + Android acceptance** — delete remaining unneeded modules,
-   relax the exact-manifest JS gate for the fork, install the Windows Android
-   toolchain, packaged-APK emulator acceptance.
+2. [`2026-10-19-phone-shell-tabs-chat.md`](2026-10-19-phone-shell-tabs-chat.md)
+   — **App shell, three tabs, WeChat visual layer.** One shell, the bottom tab
+   bar, Connections/Projects/Sessions/Chat screens, phone-layer WeChat tokens,
+   key-auth connect, and the deletion of the shared shell + unused screens.
+   **Owns `resolveSessionRoot(transport, home, env, override)`** (Task 2), which
+   probes the candidates from `candidateSessionRoots` (Task 3) in order with
+   `test -d` and returns the first that exists — Plan 1 exports the candidate
+   list but deliberately does not probe, so the spec §9.1 "first that exists"
+   resolution is unimplemented until Plan 2 lands. Plan 2 also inherits the
+   non-blocking deferrals listed at the end of this document.
+3. [`2026-10-19-chat-send-pty-turn.md`](2026-10-19-chat-send-pty-turn.md)
+   — **Chat send.** `PiTurnRunner` PTY turn (§9.4), turn completion, the
+   Pi-command/PATH per-host config (§9.4), and new-conversation start (§9.5).
+4. [`2026-10-19-native-credentials.md`](2026-10-19-native-credentials.md)
+   — **Credentials.** Remembered key passphrase and remembered password (§7.1,
+   §7.2). Note: password auth itself already exists natively
+   (`SshCapabilityPlugin.java:360-368`); the work is persistence + UI.
+5. [`2026-10-19-cleanup-android-acceptance.md`](2026-10-19-cleanup-android-acceptance.md)
+   — **Build path, reduced gate, emulator acceptance.** The Windows Android
+   toolchain, a bash-free debug build, the fork's reduced CI posture, and
+   packaged-APK acceptance.
 
 ## Deferred from Plan 1's final review (non-blocking)
 
@@ -570,7 +576,8 @@ here so a later plan can pick them up rather than rediscover them.
   `scripts/js-unit-test-manifest.json`, and cannot be without collapsing their
   multiple top-level `describe`s (the loader supports one level per file).
   Ships red for `scripts/run-js-unit-gate.sh` only; the branch is unpushed.
-  Owned by follow-on plan 5.
+  Owned by Plan 2 Task 10 (reconcile the manifest) and finished by Plan 5 Task 4
+  (a bash-free `scripts/run-js-unit-gate.ps1`).
 - **`parsePiSession.ts:76`** — F3 fixed the blank-`user` flush path, but no
   test exercises a whitespace-only `user` message directly.
 - **`sessionRoot.ts`** — duplicate candidates, a trailing-slash `home`, and
