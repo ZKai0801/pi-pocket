@@ -7,14 +7,20 @@
  *  - hosts imported from the signed 0.5.x app (`readImportedLegacyHosts`),
  *    dialled with the native key handle their key was imported under;
  *  - hosts added on this phone, saved with the handle of a key in the
- *    Android key vault (#2926). Key bytes never enter the WebView: a host
- *    only names its handle, and the native plugin resolves it at dial time.
+ *    Android key vault (#2926). Secret material never enters the WebView: a
+ *    host names either a key handle or an opaque password-credential id, and
+ *    the native plugin resolves the secret at dial time.
  */
 import type { HostEntry, SshHostTarget } from '@pocketshell/core';
 import { makeLegacySshHostTarget } from '@/migration/legacySshTarget';
 import type { ImportedLegacyHost } from '@/migration/installedDataMigration';
 
 export const ANDROID_HOSTS_STORAGE_KEY = 'pocketshell.android.hosts.v1';
+
+/** How a saved host authenticates. Only opaque ids ever reach storage. */
+export type HostAuth =
+  | { kind: 'key'; keyHandleId: string }
+  | { kind: 'password'; passwordCredentialId: string };
 
 export interface SavedHost {
   name: string;
@@ -23,6 +29,16 @@ export interface SavedHost {
   user: string;
   /** The Android key vault handle this host authenticates with (#2926). */
   keyHandleId: string;
+  /**
+   * Explicit auth kind. Absent on a v1 record, which already is a key host
+   * (its `keyHandleId` names the key). A password host carries an opaque
+   * credential id resolved by the native plugin — never a password.
+   */
+  auth?: HostAuth;
+  /** Where this host's pi agent keeps its sessions, if overridden. */
+  piSessionsDir?: string;
+  /** The pi executable to run on this host, if overridden. */
+  piCommand?: string;
 }
 
 export interface StringStorage {
@@ -63,6 +79,14 @@ function toEntry(host: Omit<SavedHost, 'keyHandleId'>): HostEntry {
   };
 }
 
+function isHostAuth(value: unknown): value is HostAuth {
+  if (typeof value !== 'object' || value === null) return false;
+  const auth = value as Record<string, unknown>;
+  if (auth.kind === 'key') return typeof auth.keyHandleId === 'string';
+  if (auth.kind === 'password') return typeof auth.passwordCredentialId === 'string';
+  return false;
+}
+
 function isSavedHost(value: unknown): value is SavedHost {
   if (typeof value !== 'object' || value === null) return false;
   const host = value as Record<string, unknown>;
@@ -70,7 +94,10 @@ function isSavedHost(value: unknown): value is SavedHost {
     && typeof host.hostname === 'string' && host.hostname.length > 0
     && typeof host.user === 'string'
     && typeof host.port === 'number' && Number.isInteger(host.port) && host.port > 0 && host.port < 65536
-    && (host.keyHandleId === undefined || typeof host.keyHandleId === 'string');
+    && (host.keyHandleId === undefined || typeof host.keyHandleId === 'string')
+    && (host.auth === undefined || isHostAuth(host.auth))
+    && (host.piSessionsDir === undefined || typeof host.piSessionsDir === 'string')
+    && (host.piCommand === undefined || typeof host.piCommand === 'string');
 }
 
 export function validateSavedHost(host: SavedHost): string | null {
@@ -78,7 +105,7 @@ export function validateSavedHost(host: SavedHost): string | null {
   if (!host.hostname.trim()) return 'Enter a hostname or IP address.';
   if (!host.user.trim()) return 'Enter the SSH user.';
   if (!Number.isInteger(host.port) || host.port < 1 || host.port > 65535) return 'Port must be 1–65535.';
-  if (!host.keyHandleId) return 'Choose an SSH key from the key vault.';
+  if (host.auth?.kind !== 'password' && !host.keyHandleId) return 'Choose an SSH key from the key vault.';
   return null;
 }
 
@@ -102,12 +129,15 @@ export class AndroidHostStore {
   save(host: SavedHost): void {
     const problem = validateSavedHost(host);
     if (problem) throw new Error(problem);
-    const record = {
+    const record: SavedHost = {
       name: host.name.trim(),
       hostname: host.hostname.trim(),
       port: host.port,
       user: host.user.trim(),
       keyHandleId: host.keyHandleId,
+      auth: host.auth,
+      piSessionsDir: host.piSessionsDir,
+      piCommand: host.piCommand,
     };
     // A host of the same name is replaced where it stands, never duplicated.
     const saved = this.readSaved();
@@ -161,6 +191,11 @@ export class AndroidHostStore {
       (request.user ? saved.find((host) => atAddress(host) && host.user === request.user) : undefined) ??
       saved.find(atAddress);
     if (savedMatch) {
+      if (savedMatch.auth?.kind === 'password') {
+        // The secret lives in the native vault (Plan 4); refuse rather than
+        // dial it keyless with a misleading "choose a key" message.
+        throw new Error(`“${savedMatch.name}” uses a password credential that is not available yet.`);
+      }
       if (!savedMatch.keyHandleId) throw new MissingHostCredential(savedMatch);
       return {
         hostId: `${savedMatch.user}@${savedMatch.hostname}:${savedMatch.port}`,
