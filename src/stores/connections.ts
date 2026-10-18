@@ -35,7 +35,8 @@ export interface ConnectionsStoreState {
 export interface ConnectionsStore extends ConnectionsStoreState {
   load(): void;
   save(host: SavedHost): void;
-  remove(name: string): void;
+  /** Removes the host and, if it is the live one, closes it first (D8). */
+  remove(name: string): Promise<void>;
   connect(name: string): Promise<void>;
   disconnect(): Promise<void>;
   /** `connected` only for the active host; every other host is `idle` (D8). */
@@ -69,13 +70,10 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     load();
   }
 
-  function remove(name: string): void {
+  async function remove(name: string): Promise<void> {
+    // D8: never drop the tracking of a live connection without closing it.
+    if (state.activeName === name) await disconnect();
     deps.hosts.remove(name);
-    if (state.activeName === name) {
-      state.activeName = null;
-      state.status = 'idle';
-      state.lastError = null;
-    }
     load();
   }
 
@@ -94,45 +92,65 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     state.lastError = null;
   }
 
+  // D8 under interleaving: a second `connect()` while one is dialling must not
+  // skip the close-and-redial bookkeeping and dial a second connection. Claimed
+  // synchronously before the first `await`; released on every exit path.
+  let inFlight = false;
+
   async function connect(name: string): Promise<void> {
-    const host = state.hosts.find((candidate) => candidate.name === name)
-      ?? deps.hosts.savedHosts().find((candidate) => candidate.name === name);
-    if (!host) {
-      state.status = 'error';
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const host = state.hosts.find((candidate) => candidate.name === name)
+        ?? deps.hosts.savedHosts().find((candidate) => candidate.name === name);
+      if (!host) {
+        // A validation failure, not a dial: it must not disturb a live
+        // connection. Record the error and leave `activeName`/`status` saying
+        // what is actually connected (D8).
+        state.lastError = `No saved host named “${name}”.`;
+        return;
+      }
+      // D8: one live connection — close the current host before opening another.
+      if (state.activeName !== null) await disconnect();
+      state.status = 'connecting';
       state.activeName = null;
-      state.lastError = `No saved host named “${name}”.`;
-      return;
-    }
-    // D8: one live connection — close the current host before opening another.
-    if (state.activeName !== null) await disconnect();
-    state.status = 'connecting';
-    state.activeName = null;
-    state.lastError = null;
+      state.lastError = null;
 
-    let target: SshHostTarget;
-    try {
-      target = await deps.hosts.resolve({
-        host: host.hostname,
-        port: host.port,
-        user: host.user,
-        hostAlias: host.name,
-      });
-    } catch (error) {
-      state.status = 'error';
-      state.lastError = errorMessage(error);
-      return;
-    }
+      let target: SshHostTarget;
+      try {
+        target = await deps.hosts.resolve({
+          host: host.hostname,
+          port: host.port,
+          user: host.user,
+          hostAlias: host.name,
+        });
+      } catch (error) {
+        state.status = 'error';
+        state.lastError = errorMessage(error);
+        return;
+      }
 
-    try {
-      await deps.port.connect(target);
-    } catch (error) {
-      state.status = 'error';
-      state.lastError = errorMessage(error);
-      return;
-    }
+      let result: { ok: boolean };
+      try {
+        result = await deps.port.connect(target);
+      } catch (error) {
+        state.status = 'error';
+        state.lastError = errorMessage(error);
+        return;
+      }
+      // A resolved `{ ok: false }` is a failed dial, handled exactly like a
+      // thrown one — never a false "connected" (D8).
+      if (!result.ok) {
+        state.status = 'error';
+        state.lastError = `The connection to “${host.name}” did not open.`;
+        return;
+      }
 
-    state.activeName = host.name;
-    state.status = 'connected';
+      state.activeName = host.name;
+      state.status = 'connected';
+    } finally {
+      inFlight = false;
+    }
   }
 
   return reactive({

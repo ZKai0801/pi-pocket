@@ -51,7 +51,7 @@ function saveHost(host: SavedHost): void {
 
 function removeHost(name: string): void {
   menuFor.value = null;
-  store.remove(name);
+  void store.remove(name);
 }
 
 function toggleConnect(host: SavedHost): void {

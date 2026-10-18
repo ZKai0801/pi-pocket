@@ -74,12 +74,51 @@ describe('connections store', () => {
     expect(d.port.connect).not.toHaveBeenCalled();
   });
 
-  it('saves and removes through the host store', () => {
+  it('saves and removes through the host store, closing a removed live host (D8)', async () => {
     const d = deps();
     const store = createConnectionsStore(d as never);
+    await store.connect('kai');
     store.save({ ...kai, name: 'renamed' });
     expect(d.hosts.save).toHaveBeenCalledWith(expect.objectContaining({ name: 'renamed' }));
-    store.remove('kai');
+    await store.remove('kai');
     expect(d.hosts.remove).toHaveBeenCalledWith('kai');
+    expect(d.port.disconnect).toHaveBeenCalledTimes(1);
+    expect(store.activeName).toBeNull();
+  });
+
+  it('treats a resolved { ok: false } dial as a failure, not a connection (D8)', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => ({ ok: false }));
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    expect(store.status).toBe('error');
+    expect(store.activeName).toBeNull();
+    expect(store.lastError).toBeTruthy();
+  });
+
+  it('leaves a live connection alone when the named host is unknown (D8)', async () => {
+    const d = deps();
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    await store.connect('ghost');
+    expect(store.activeName).toBe('kai');
+    expect(store.statusFor('kai')).toBe('connected');
+    expect(d.port.disconnect).not.toHaveBeenCalled();
+    expect(d.port.connect).toHaveBeenCalledTimes(1);
+    expect(store.lastError).toContain('ghost');
+  });
+
+  it('does not dial twice when connect() is re-entered (D8 interleaving)', async () => {
+    const d = deps();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    d.port.connect = vi.fn(async () => { await gate; return { ok: true }; });
+    const store = createConnectionsStore(d as never);
+    const first = store.connect('kai');
+    const second = store.connect('other');
+    release();
+    await Promise.all([first, second]);
+    expect(d.port.connect).toHaveBeenCalledTimes(1);
+    expect(store.activeName).toBe('kai');
   });
 });
