@@ -91,6 +91,12 @@ export class PiRepository {
   async listSessions(project: PiProject): Promise<PiSessionMeta[]> {
     const dir = `${this.sessionRoot}/${encodePiCwd(project.path)}`;
     const listing = await this.transport.exec(listSessionFilesCommand(dir), EXEC_TIMEOUT_MS);
+    if (listing.exitCode !== 0) {
+      // The listing is a `find … | sort -rn` pipeline, so this exit code is `sort`'s, not `find`'s: this guard catches transport-level failures only, while a missing root still reads as an empty list.
+      throw new PiRepositoryError(
+        `failed to list sessions (exit ${listing.exitCode}): ${listing.stderr.trim()}`,
+      );
+    }
 
     const sessions: PiSessionMeta[] = [];
     for (const rawLine of listing.stdout.split('\n')) {

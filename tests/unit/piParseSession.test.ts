@@ -48,4 +48,22 @@ describe('parsePiSession', () => {
     expect(sessionPreview(parsePiSession([header, user, assistantText].join('\n')))).toBe('ninfer is busy.');
     expect(sessionPreview(parsePiSession(''))).toBeNull();
   });
+
+  it('separates assistant text fragments across tool round-trips with a newline', () => {
+    const multiUser = '{"type":"message","id":"mu","parentId":"s1","timestamp":"2026-10-18T02:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"check the build"}],"timestamp":1792288400001}}';
+    const roundTripText1 = '{"type":"message","id":"r1","parentId":"mu","timestamp":"2026-10-18T02:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I\'ll check."},{"type":"text","text":"One moment."}],"timestamp":1792288401001}}';
+    const roundTripTool = '{"type":"message","id":"rt","parentId":"r1","timestamp":"2026-10-18T02:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c9","name":"bash","arguments":{}}],"timestamp":1792288402001}}';
+    const roundTripResult = '{"type":"message","id":"rr","parentId":"rt","timestamp":"2026-10-18T02:00:03.000Z","message":{"role":"toolResult","toolCallId":"c9","toolName":"bash","content":[{"type":"text","text":"busy"}],"isError":false}}';
+    const roundTripText2 = '{"type":"message","id":"r2","parentId":"rr","timestamp":"2026-10-18T02:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"It\'s busy."}],"timestamp":1792288404001}}';
+    const finalAssistant = '{"type":"message","id":"r3","parentId":"r2","timestamp":"2026-10-18T02:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"All done."}],"timestamp":1792288405001}}';
+
+    const parsed = parsePiSession(
+      [header, multiUser, roundTripText1, roundTripTool, roundTripResult, roundTripText2, finalAssistant].join('\n'),
+    );
+    const assistantTurns = parsed.turns.filter((turn) => turn.role === 'assistant');
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0].text).toBe("I'll check.\nOne moment.\nIt's busy.\nAll done.");
+    expect(assistantTurns[0].text).not.toContain('check.One');
+    expect(assistantTurns[0].timestampMs).toBe(1792288405001);
+  });
 });

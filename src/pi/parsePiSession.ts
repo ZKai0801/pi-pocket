@@ -27,7 +27,7 @@ function messageText(content: string | PiContentBlock[] | undefined): string {
   return content
     .filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text as string)
-    .join('');
+    .join('\n');
 }
 
 function messageTimestamp(message: PiMessage, entry: PiEntry): number {
@@ -73,15 +73,21 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
     if (role !== 'user' && role !== 'assistant') continue;
 
     const text = messageText(entry.message.content);
-    if (!text.trim()) continue;
 
     if (role === 'user') {
       flushAssistant();
-      parsed.turns.push({ role: 'user', text, timestampMs: messageTimestamp(entry.message, entry) });
-    } else if (pendingAssistant) {
-      pendingAssistant.text += text;
+      if (text.trim()) {
+        parsed.turns.push({ role: 'user', text, timestampMs: messageTimestamp(entry.message, entry) });
+      }
     } else {
-      pendingAssistant = { role: 'assistant', text, timestampMs: messageTimestamp(entry.message, entry) };
+      if (!text.trim()) continue;
+      const timestampMs = messageTimestamp(entry.message, entry);
+      if (pendingAssistant) {
+        pendingAssistant.text += pendingAssistant.text ? `\n${text}` : text;
+        pendingAssistant.timestampMs = timestampMs;
+      } else {
+        pendingAssistant = { role: 'assistant', text, timestampMs };
+      }
     }
   }
 
