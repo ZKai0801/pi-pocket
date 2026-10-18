@@ -850,3 +850,20 @@ button { color: inherit; }
   user-select: none;
   -webkit-touch-callout: none;
 }
+
+/* ---- Phone layer: the WeChat roles the phone UI adds (spec §10) --------
+   The WeChat look is a layer over the shared dark tokens, not a fork. Every
+   role below is derived from a token that already exists (never a raw hex),
+   so the palette keeps one source of truth and `designTokens.test.ts` can
+   still prove it. WeChat green is `--success`; the phone has no green of its
+   own to mint, it only names the one role the chat and tab bar both wear. */
+:root {
+  --chat-bg: var(--bg);                 /* grey page ground behind the chat */
+  --bubble-self-bg: var(--success);     /* the user's WeChat green bubble */
+  --bubble-self-fg: var(--on-accent);   /* dark ink on the green fill */
+  --bubble-other-bg: var(--surface-2);  /* the assistant's raised bubble */
+  --bubble-other-fg: var(--fg);
+  --tabbar-bg: var(--surface);          /* bottom bar sits above the page */
+  --tabbar-fg: var(--fg-secondary);     /* inactive icon + label */
+  --tabbar-active: var(--success);      /* active tab shares the WeChat green */
+}
