@@ -22,3 +22,7 @@ export function listSessionFilesCommand(dir: string): string {
 export function readSessionTailCommand(path: string, maxBytes: number): string {
   return `tail -c ${maxBytes} -- ${quoteShell(path)} 2>/dev/null`;
 }
+
+export function resolveSessionRootCommand(root: string): string {
+  return `test -d ${quoteShell(root)} && echo yes`;
+}

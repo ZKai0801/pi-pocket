@@ -8,6 +8,8 @@ export {
   quoteShell,
   readProjectCwdCommand,
   readSessionTailCommand,
+  resolveSessionRootCommand,
 } from './piCommands';
 export type { PiProject, PiSessionMeta, PiTransport } from './piRepository';
 export { PiRepository, PiRepositoryError } from './piRepository';
+export { resolveSessionRoot } from './resolveSessionRoot';
