@@ -53,9 +53,10 @@ the shared UI kit at `@ui`, Capacitor 8.
 These follow from the spec but no task's happy path exercises them; each gets a
 test in the task that owns the code.
 
-1. A **v1 host record with a `keyHandleId`** must migrate to a v2
-   `{kind:'key'}` record without losing the field, and a record already in v2
-   shape must be left alone (idempotent re-run).
+1. A **v1 host record with a `keyHandleId` and no `auth`** must load as a key
+   host with the handle intact, and a password host must be refused by
+   `resolve` rather than dialled keyless — the additive shape is only safe if
+   both halves hold.
 2. `resolveSessionRoot` must **stop at the first candidate that exists** and must
    not treat a *file* as a root (a `.pi-agent/sessions` file is not a directory).
 3. When the probe finds **no** candidate, the Projects tab shows an actionable
@@ -68,95 +69,120 @@ test in the task that owns the code.
 
 ---
 
-### Task 1: Saved-host store v2 with a v1→v2 migration
+### Task 1: Extend `SavedHost` with an auth union (one storage key)
 
 **Files:**
 - Modify: `src/platform/android/hostStore.ts`
-- Test: `tests/unit/hostStoreV2.test.ts`
+- Test: `tests/unit/hostStoreAuth.test.ts`
 
 **Interfaces:**
 - Consumes: nothing (pure).
 - Produces:
-  - `type HostAuth = { kind: 'key'; keyHandleId: string; rememberPassphrase: boolean } | { kind: 'password'; passwordCredentialId: string }`
-  - `interface SavedHostV2 { name: string; hostname: string; port: number; user: string; auth: HostAuth; piSessionsDir?: string; piCommand?: string }`
-  - `const ANDROID_HOSTS_STORAGE_KEY_V2 = 'pocketshell.android.hosts.v2'`
-  - `function migrateHostsV1(v1: unknown): SavedHostV2[]`
-  - `function readHosts(storage: StringStorage): SavedHostV2[]`
-  - `function writeHosts(storage: StringStorage, hosts: SavedHostV2[]): void`
-  - `validateSavedHost` extended to the v2 shape.
+  - `type HostAuth = { kind: 'key'; keyHandleId: string } | { kind: 'password'; passwordCredentialId: string }`
+  - `SavedHost` gains **optional** `auth?: HostAuth`, `piSessionsDir?: string`,
+    `piCommand?: string`. The existing `keyHandleId: string` stays.
+  - `validateSavedHost` accepts a password host (empty `keyHandleId` **and**
+    `auth.kind === 'password'`).
+  - `AndroidHostStore.resolve` refuses a password host with a clear error until
+    Plan 4 supplies the secret.
+  - **Rejected by ruling (R7):** a `SavedHostV2` type, a
+    `pocketshell.android.hosts.v2` storage key, and a `migrateHostsV1`
+    function. `src/platform/android/hostStore.ts:17` already owns the one key
+    (`pocketshell.android.hosts.v1`) and `AndroidHostStore` the one store; ~20
+    files read them. A second key or a parallel free-function API would create a
+    second source of truth for saved hosts. A v1 record with `keyHandleId` and no
+    `auth` **already is** a key host, so there is nothing to migrate.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/unit/hostStoreV2.test.ts
+// tests/unit/hostStoreAuth.test.ts
 import { describe, expect, it } from 'vitest';
-import { migrateHostsV1, readHosts, writeHosts } from '../../src/platform/android/hostStore';
+import { AndroidHostStore, validateSavedHost, type SavedHost } from '../../src/platform/android/hostStore';
 
-const v1 = JSON.stringify([
-  { name: 'kai', hostname: '192.168.1.3', port: 22, user: 'kai', keyHandleId: 'h-1' },
-]);
+function make(seed?: string) {
+  const map = new Map<string, string>();
+  if (seed) map.set('pocketshell.android.hosts.v1', seed);
+  const storage = {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => void map.set(k, v),
+  };
+  return new AndroidHostStore({ storage, readLegacyHosts: async () => [] });
+}
 
-describe('hostStore v2', () => {
-  it('migrates a v1 key-only record to an auth.key record', () => {
-    expect(migrateHostsV1(JSON.parse(v1))).toEqual([
-      { name: 'kai', hostname: '192.168.1.3', port: 22, user: 'kai',
-        auth: { kind: 'key', keyHandleId: 'h-1', rememberPassphrase: false } },
+describe('SavedHost auth', () => {
+  it('loads a v1 record with no auth as a key host', () => {
+    const seed = JSON.stringify([
+      { name: 'kai', hostname: 'h', port: 22, user: 'kai', keyHandleId: 'h-1' },
+    ]);
+    expect(make(seed).savedHosts()).toEqual([
+      { name: 'kai', hostname: 'h', port: 22, user: 'kai', keyHandleId: 'h-1' },
     ]);
   });
 
-  it('is idempotent on an already-v2 record', () => {
-    const once = migrateHostsV1(JSON.parse(v1));
-    expect(migrateHostsV1(once)).toEqual(once);
+  it('round-trips a password host under the same storage key', () => {
+    const store = make();
+    const host: SavedHost = { name: 'p', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
+      auth: { kind: 'password', passwordCredentialId: 's-1' } };
+    expect(validateSavedHost(host)).toBeNull();
+    store.save(host);
+    expect(store.savedHosts()[0]!.auth).toEqual({ kind: 'password', passwordCredentialId: 's-1' });
   });
 
-  it('drops a v1 record with no key handle and keeps the rest', () => {
-    const mixed = [...JSON.parse(v1), { name: 'x', hostname: 'h', port: 22, user: 'u' }];
-    expect(migrateHostsV1(mixed).map((h) => h.name)).toEqual(['kai']);
+  it('still requires a key for a key host', () => {
+    expect(validateSavedHost({ name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: '' }))
+      .toMatch(/key/i);
   });
 
-  it('returns [] for absent or garbage input', () => {
-    expect(migrateHostsV1(undefined)).toEqual([]);
-    expect(migrateHostsV1('nonsense')).toEqual([]);
+  it('keeps piSessionsDir and piCommand through a save', () => {
+    const store = make();
+    store.save({ name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: 'h-1',
+      piSessionsDir: '/home/projects/.pi-agent/sessions', piCommand: '/opt/bin/pi' });
+    expect(store.savedHosts()[0]).toMatchObject({
+      piSessionsDir: '/home/projects/.pi-agent/sessions', piCommand: '/opt/bin/pi',
+    });
   });
 
-  it('reads v2 first and falls back to migrating v1', () => {
-    const store = new Map<string, string>();
-    const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) };
-    store.set('pocketshell.android.hosts.v1', v1);
-    expect(readHosts(storage).map((h) => h.name)).toEqual(['kai']);
-    writeHosts(storage, [{ name: 'p', hostname: 'h', port: 22, user: 'u',
-      auth: { kind: 'password', passwordCredentialId: 'c-1' } }]);
-    expect(readHosts(storage)).toHaveLength(1);
-    expect(readHosts(storage)[0].auth).toEqual({ kind: 'password', passwordCredentialId: 'c-1' });
+  it('refuses to dial a password host until Plan 4 wires the secret', async () => {
+    const seed = JSON.stringify([{ name: 'p', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
+      auth: { kind: 'password', passwordCredentialId: 's-1' } }]);
+    await expect(make(seed).resolve({ host: 'h', user: 'u', hostAlias: 'p' }))
+      .rejects.toThrow(/password|credential/i);
   });
 });
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pnpm exec vitest run tests/unit/hostStoreV2.test.ts`
-Expected: FAIL — the named exports do not exist.
+Run: `npx vitest run tests/unit/hostStoreAuth.test.ts`
+Expected: FAIL — a password host is rejected by `validateSavedHost` and the
+extra fields are dropped by `save`.
 
 - [ ] **Step 3: Implement**
 
-Add `HostAuth`/`SavedHostV2` and the four functions to `hostStore.ts`.
-`migrateHostsV1` accepts `unknown`: non-array → `[]`; per entry, if it already
-has a valid `auth` keep it verbatim, else if it has a non-empty `keyHandleId`
-produce `{kind:'key', keyHandleId, rememberPassphrase:false}`, else drop it.
-`readHosts` reads the v2 key; if absent, migrates v1 and **writes the result
-back**. Secret material never lands in `localStorage` — only handles/ids
-(spec §7.1, D2). Keep `validateSavedHost` exported and extend it.
+Add the `HostAuth` type and the three optional fields to `SavedHost`; carry
+`auth`, `piSessionsDir` and `piCommand` through `save`'s `record` object and
+through `isSavedHost`; make `validateSavedHost` require a key handle only when
+`auth?.kind !== 'password'`; and make `resolve` throw for a password host
+(`MissingHostCredential` or a dedicated error) rather than dialing it keyless.
+Update the doc comment at the top of the file, which currently says a host
+"only names its handle". Secret material still never reaches `localStorage` —
+only a `passwordCredentialId` (spec §7.1, D2).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pnpm exec vitest run tests/unit/hostStoreV2.test.ts`
+Run: `npx vitest run tests/unit/hostStoreAuth.test.ts`
 Expected: PASS (5 tests).
+Run: `npx vitest run tests/unit/androidHostKeys.test.ts tests/unit/androidPlatform.test.ts`
+Expected: PASS — the additive change did not disturb the existing store tests.
+Run: `npx vue-tsc --noEmit`
+Expected: exit 0 — no consumer of `SavedHost` breaks (that is R7's whole point).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/platform/android/hostStore.ts tests/unit/hostStoreV2.test.ts
-git commit -m "feat(hosts): saved-host v2 with auth union and a v1 migration"
+git add src/platform/android/hostStore.ts tests/unit/hostStoreAuth.test.ts
+git commit -m "feat(hosts): an auth union on SavedHost, one storage key"
 ```
 
 ---
@@ -247,12 +273,19 @@ git commit -m "feat(pi): probe the candidate session roots for the first that ex
 - Test: `tests/unit/piTransport.test.ts`
 
 **Interfaces:**
-- Consumes: `PiTransport` (Plan 1), core `SshCapability`/`ConnectionController`.
+- Consumes: the **shipped** `PiTransport` — `src/pi/piRepository.ts:11-17`:
+  `exec(command: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number | null }>`
+  and `sftpRead(path: string, maxBytes: number): Promise<string>`.
 - Produces:
   - `interface PiExecTarget { exec(command: string, options: { timeoutMs: number }): Promise<{ stdout: string; stderr: string; exitCode: number | null }> }`
   - `interface PiSftpReader { sftpRead(options: { path: string; maxBytes: number }): Promise<{ dataBase64: string }> }`
   - `function createPiTransport(exec: PiExecTarget, sftp: PiSftpReader): PiTransport`
   - `function decodeBase64Utf8(dataBase64: string): string`
+- **This module is a seam between two deliberately different shapes** (R5): the
+  native Capacitor bridge only accepts a single options object and hands back a
+  base64 envelope, while the shipped `PiTransport` takes `(command, timeoutMs)`
+  positionally and returns decoded `string`. The adapter is where those are
+  reconciled; do not "fix" either side to match the other.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -459,11 +492,21 @@ git commit -m "refactor(shell): one phone shell, shared-shell path removed"
 - Test: `tests/unit/connectionsStore.test.ts`
 
 **Interfaces:**
-- Consumes: `readHosts`/`writeHosts`, `SavedHostV2`/`HostAuth` (Task 1),
-  `ConnectionController`, `hostKeyCard`, `hostStore`.
+- Consumes: `AndroidHostStore` and `SavedHost` (Task 1, `src/platform/android/hostStore.ts`), the existing `androidHosts` singleton (`src/platform/android/hosts.ts`), `hostKeyCard.ts`.
 - Produces:
-  - `useConnectionsStore()` with state `{ hosts: SavedHostV2[]; activeName: string | null; status: 'idle' | 'connecting' | 'connected' | 'error'; lastError: string | null }` and actions `load()`, `save(host)`, `remove(name)`, `connect(name)`, `disconnect()`.
-  - `statusFor(name): 'connected' | 'idle'` — only `activeName` can be `connected` (D8).
+  - `interface ConnectionPort { connect(target: SshHostTarget): Promise<{ ok: boolean }>; disconnect(): Promise<void> }`
+  - `type ConnectionsHosts = Pick<AndroidHostStore, 'savedHosts' | 'save' | 'remove' | 'resolve'>`
+  - `function createConnectionsStore(deps: { hosts: ConnectionsHosts; port: ConnectionPort }): ConnectionsStore`
+  - `useConnectionsStore()` — the Pinia wrapper binding `androidHosts`; its `port` comes from `installConnectionPort(port)` at `src/session/connectionPort.ts`, which Task 5 calls when the single shell owns the live connection.
+  - State `{ hosts: SavedHost[]; activeName: string | null; status: 'idle' | 'connecting' | 'connected' | 'error'; lastError: string | null }`; actions `load()`, `save(host)`, `remove(name)`, `connect(name)`, `disconnect()`; `statusFor(name): 'connected' | 'idle'` — only `activeName` can be `connected` (D8).
+- **Deviations from this plan's earlier text (rulings R7/R8):** there are no
+  `readHosts`/`writeHosts` free functions and no `SavedHostV2` — Task 1 kept the
+  single `AndroidHostStore` (methods `savedHosts`/`save`/`remove`/`resolve`) and
+  the single storage key. The store therefore depends on **`AndroidHostStore`'s
+  method surface**, not on free functions. And rather than coupling this store
+  to the large core `ConnectionController`, it takes a **narrow injected
+  `ConnectionPort`**; `AndroidHostStore.resolve()` already returns the
+  `SshHostTarget` (with its credential) that the port consumes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -472,68 +515,126 @@ git commit -m "refactor(shell): one phone shell, shared-shell path removed"
 import { describe, expect, it, vi } from 'vitest';
 import { createConnectionsStore } from '../../src/stores/connections';
 
-const host = { name: 'kai', hostname: '192.168.1.3', port: 22, user: 'kai', keyHandleId: 'h-1' };
+const kai = { name: 'kai', hostname: '192.168.1.3', port: 22, user: 'kai', keyHandleId: 'h-1' };
+const other = { name: 'other', hostname: '10.0.0.9', port: 22, user: 'root', keyHandleId: 'h-2' };
+
+function deps(over: Record<string, unknown> = {}) {
+  const hosts = {
+    savedHosts: () => [kai, other],
+    save: vi.fn(),
+    remove: vi.fn(),
+    resolve: vi.fn(async (request: { hostAlias?: string }) => ({
+      hostId: `${request.hostAlias}@192.168.1.3:22`,
+      hostname: '192.168.1.3', port: 22, username: 'kai',
+      credential: { kind: 'key-handle', handleId: 'h-1' },
+    })),
+  };
+  const port = { connect: vi.fn(async () => ({ ok: true })), disconnect: vi.fn(async () => {}) };
+  return { hosts, port, ...over };
+}
 
 describe('connections store', () => {
-  it('migrates the legacy list on load', async () => {
-    const store = createConnectionsStore({ readHosts: () => [{ name: 'kai', hostname: 'h', port: 22, user: 'u', auth: { kind: 'key', keyHandleId: 'h-1', rememberPassphrase: false } }], writeHosts: vi.fn(), controller: { connect: vi.fn(), disconnect: vi.fn() } });
-    await store.load();
-    expect(store.hosts).toHaveLength(1);
+  it('loads the saved hosts, none of them connected', () => {
+    const store = createConnectionsStore(deps() as never);
+    store.load();
+    expect(store.hosts).toHaveLength(2);
+    expect(store.statusFor('kai')).toBe('idle');
+    expect(store.status).toBe('idle');
+  });
+
+  it('only the active host reports connected', async () => {
+    const store = createConnectionsStore(deps() as never);
+    await store.connect('kai');
+    expect(store.statusFor('kai')).toBe('connected');
+    expect(store.statusFor('other')).toBe('idle');
+  });
+
+  it('dials the resolved target, not the raw record', async () => {
+    const d = deps();
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    expect(d.hosts.resolve).toHaveBeenCalledWith({ host: '192.168.1.3', port: 22, user: 'kai', hostAlias: 'kai' });
+    expect(d.port.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ credential: { kind: 'key-handle', handleId: 'h-1' } }),
+    );
+  });
+
+  it('closes the current connection before opening another (D8)', async () => {
+    const d = deps();
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    await store.connect('other');
+    expect(d.port.disconnect).toHaveBeenCalledTimes(1);
+    expect(store.activeName).toBe('other');
     expect(store.statusFor('kai')).toBe('idle');
   });
 
-  it('only the active host can report connected', async () => {
-    const controller = { connect: vi.fn(async () => ({ ok: true })), disconnect: vi.fn(async () => {}) };
-    const store = createConnectionsStore({ readHosts: () => [], writeHosts: vi.fn(), controller: controller as never });
-    await store.connect('a');
-    expect(store.statusFor('a')).toBe('connected');
-    expect(store.statusFor('b')).toBe('idle');
-  });
-
-  it('closes the current connection before opening another', async () => {
-    const controller = { connect: vi.fn(async () => ({ ok: true })), disconnect: vi.fn(async () => {}) };
-    const store = createConnectionsStore({ readHosts: () => [], writeHosts: vi.fn(), controller: controller as never });
-    await store.connect('a'); await store.connect('b');
-    expect(controller.disconnect).toHaveBeenCalledTimes(1);
-  });
-
-  it('surfaces a dial failure as status error, not a throw', async () => {
-    const controller = { connect: vi.fn(async () => { throw new Error('auth failed'); }), disconnect: vi.fn() };
-    const store = createConnectionsStore({ readHosts: () => [], writeHosts: vi.fn(), controller: controller as never });
-    await store.connect('a');
+  it('surfaces a dial failure as error status, not a throw', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => { throw new Error('auth failed'); });
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
     expect(store.status).toBe('error');
     expect(store.lastError).toContain('auth failed');
+    expect(store.activeName).toBeNull();
+  });
+
+  it('reports a missing credential instead of dialling', async () => {
+    const d = deps();
+    d.hosts.resolve = vi.fn(async () => { throw new Error('No SSH key is chosen'); });
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    expect(store.status).toBe('error');
+    expect(d.port.connect).not.toHaveBeenCalled();
+  });
+
+  it('saves and removes through the host store', () => {
+    const d = deps();
+    const store = createConnectionsStore(d as never);
+    store.save({ ...kai, name: 'renamed' });
+    expect(d.hosts.save).toHaveBeenCalledWith(expect.objectContaining({ name: 'renamed' }));
+    store.remove('kai');
+    expect(d.hosts.remove).toHaveBeenCalledWith('kai');
   });
 });
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pnpm exec vitest run tests/unit/connectionsStore.test.ts`
+Run: `npx vitest run tests/unit/connectionsStore.test.ts`
 Expected: FAIL — cannot resolve `../../src/stores/connections`.
 
 - [ ] **Step 3: Implement the store, then the two views**
 
-`createConnectionsStore(deps)` takes its dependencies (`readHosts`, `writeHosts`,
-`controller`) as arguments so it is testable without Pinia or a device; export a
-`useConnectionsStore()` wrapper that binds the real ones. `connect` disconnects
-any current host first and never throws — it records `status: 'error'` and
-`lastError`. Then build the list (green/red dot, name, `host · user`, key glyph
-from `KeyIcon.vue`, `…` for edit/delete, `+` in the app bar, empty state with a
-big 新增连接 button) and the editor (name, host, port, user, auth method; key
-picker from the vault; **Pi sessions directory** and **pi command** fields per
-spec §9.1). On connect with an unknown host key, drive core's
-`HostKeyTrustPrompt.vue` through `hostKeyCard.ts`.
+`createConnectionsStore(deps)` takes its dependencies as arguments so it is
+testable without Pinia or a device; `load()` reads `hosts.savedHosts()`.
+`connect(name)` finds the record, `disconnect()`s any current host first,
+resolves the dial target via `hosts.resolve({ host, port, user, hostAlias: name })`
+and hands it to `ports.connect` — a `resolve` failure and a `connect` failure
+both land as `status: 'error'` + `lastError`, never a throw, and neither leaves
+`activeName` set. Then build the list (green/red dot, name, `host · user`, key
+glyph, `…` for edit/delete, `+`, empty state with a big 新增连接 button) and the
+editor (name, host, port, user, auth method; key picker from
+`listSshKeys()`; **Pi sessions directory** and **pi command** fields per spec
+§9.1). Verify `KeyIcon.vue` and core's `HostKeyTrustPrompt.vue` exist before
+importing them; if a glyph or component does not exist, choose the nearest
+existing one rather than adding to the pinned core. Wire an unknown host key
+through `hostKeyCard.ts`. Every style must satisfy `tests/unit/designTokens.test.ts`
+(tokens only — no colour literals, no undefined `var()`).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pnpm exec vitest run tests/unit/connectionsStore.test.ts`
-Expected: PASS (4 tests).
+Run: `npx vitest run tests/unit/connectionsStore.test.ts`
+Expected: PASS (7 tests).
+Run: `npx vitest run tests/unit/designTokens.test.ts`
+Expected: PASS — the new components' styles are token-only.
+Run: `npx vue-tsc --noEmit`
+Expected: exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/stores/connections.ts src/components/connections tests/unit/connectionsStore.test.ts
+git add src/stores/connections.ts src/session/connectionPort.ts src/components/connections tests/unit/connectionsStore.test.ts
 git commit -m "feat(connections): saved-host list and editor backed by a store"
 ```
 
@@ -883,7 +984,8 @@ git commit -m "chore(cleanup): delete the unused screens and reconcile the unit 
   Task 1; §8.1 → Task 4; §8.2/§8.3 → Task 6; §8.4 + §9.1 discovery → Tasks 2, 7;
   §8.5 + §9.2 → Task 8; §8.6 → Task 8; §8.7 → Task 9; §10 → Task 4. §7.2, §9.4
   are Plan 4 and Plan 3 respectively.
-- **Review Focus:** RF1 → Task 1 idempotence test; RF2/RF3 → Task 2 and the
+- **Review Focus:** RF1 → Task 1's key-host load and password-refusal tests;
+  RF2/RF3 → Task 2 and the
   Task 7 `no-root` test; RF4 → Task 7 error test; RF5 → Task 8 sanitizer test
   plus Task 4's "no raw hex" assertion.
 - **Interface consistency:** `SavedHostV2`/`HostAuth` (Task 1) are what Task 6
