@@ -309,9 +309,9 @@ git commit -m "docs(acceptance): packaged-APK acceptance for the WeChat UI"
 
 For every workflow in `.github/workflows/` and every `scripts/check-*.sh` still
 referenced by one, write one line: what it guards, whether it still applies, and
-the decision (kept / retired + reason). The retired-by-construction set is at
-least the 0.5.x and app2 lanes and anything asserting the shared shell or the
-deleted screens.
+  the decision (kept / retired + reason). The retired-by-construction set is at
+  least the Kotlin-era release lanes and anything asserting the shared shell or
+  the deleted screens.
 
 - [ ] **Step 2: Retire, don't delete blindly**
 
