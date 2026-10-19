@@ -974,13 +974,79 @@ git commit -m "feat(sessions): project session list and a sanitized read-only ch
 ### Task 9: Terminal as a secondary screen
 
 **Files:**
+- Create: `src/session/terminalPty.ts`
 - Create: `src/components/terminal/TerminalScreen.vue`
-- Modify: `src/phone/PhoneApp.vue`
+- Test: `tests/unit/terminalScreenWiring.test.ts`
 
 **Interfaces:**
-- Consumes: `TerminalViewport.vue`, `ConnectionController`'s attach path
-  (`buildAttachCommand` from core `hostCliSessions`).
-- Produces: a route-less overlay opened by 打开终端 from a project or session.
+- Consumes: `TerminalViewport.vue` (retained, `src/components/TerminalViewport.vue`)
+  and the new `terminalPty` seam (created by this task; the shell installs its
+  implementation in Task 5). The core attach path (`ConnectionController`'s
+  `buildAttachCommand` from `hostCliSessions`) is consumed by the Task 5
+  implementation, not by this screen.
+- Produces:
+  - `src/session/terminalPty.ts`: the `TerminalPty` interface plus
+    `installTerminalPty`/`terminalPty` (house seam pattern, like
+    `connectionPort.ts`/`piLive.ts`).
+  - `src/components/terminal/TerminalScreen.vue`: a route-less overlay (D5),
+    opened by 打开终端 from a project or session (the opener is Task 5).
+- **Deviations from this plan's earlier text (ruling R12):**
+  1. Scope/ordering: R1 runs Task 9 before Task 5, and Task 5 is what creates
+     `src/phone/PhoneApp.vue` (`src/phone/` does not exist on disk — verified).
+     This task therefore does **not** touch `PhoneApp.vue`. The overlay
+     integration — PhoneApp owns the overlay state, the 打开终端 trigger from
+     the project/session header, and `installTerminalPty` implemented against
+     the shell's `ConnectionController` (attach by name = `listSessions()`
+     lookup + `attachSession(row)`, the data pump to `onData`, PTY writes,
+     resize, `detach` on close) — is carried to Task 5 and must be in Task 5's
+     preflight.
+  2. Seam contract (`src/session/terminalPty.ts`), reusing `TerminalGeometry`
+     from `src/terminalGeometry.ts`:
+     ```ts
+     export interface TerminalPty {
+       /** Open the PTY attached to the named aplexer session (core `buildAttachCommand`). */
+       attach(sessionName: string, geometry: TerminalGeometry): Promise<{ ok: boolean; error?: string }>;
+       /** Stream PTY output as decoded text chunks; `detach()` stops the stream. */
+       onData(callback: (data: string) => void): void;
+       write(data: string): Promise<void>;
+       resize(cols: number, rows: number): Promise<void>;
+       /** Close the PTY and stop the pump. Idempotent. */
+       detach(): Promise<void>;
+     }
+     export function installTerminalPty(pty: TerminalPty | null): void;
+     /** Throws when no shell has installed an implementation. */
+     export function terminalPty(): TerminalPty;
+     ```
+     The screen resolves the seam lazily at attach time and treats an
+     uninstalled seam as an error state (「请先连接」-style), never a throw —
+     the same house style as Task 7's uninstalled `piLive`.
+  3. Name-agnostic screen: props are `sessionName: string` (the aplexer
+     session name to attach to) and `title?: string` (display title, defaults
+     to `sessionName`); it emits `close`. The Pi project/session → aplexer
+     session name mapping happens in the opener (Task 5); v1 = the project
+     path's basename (spec §8.7 "for that workspace" — aplexer's naming
+     convention is not verifiable from the build box, so this is flagged for
+     dogfood sign-off).
+  4. Screen wiring:
+     - No direct `@xterm/xterm` import — `TerminalViewport`
+       (`../TerminalViewport.vue`) is the only xterm owner.
+     - On mount: `fit()` the viewport; the initial attach geometry is the last
+       viewport `resize` emit, falling back to `{ cols: 80, rows: 24 }` when
+       the first emit has not landed. Then `attach(sessionName, geometry)`;
+       on success the viewport is `enabled` and focused.
+     - Viewport `input` → `pty.write(data)`; viewport `resize` →
+       `pty.resize(cols, rows)` (only after a successful attach). PTY output
+       lands in the viewport's exposed `write`.
+     - Attach failure → error panel (the session name plus the returned
+       `error`) with 重试 / 关闭 actions (48px targets).
+     - 关闭 (header) and `onBeforeUnmount` both `detach()` so the PTY is
+       released (the plan's "close it on leave"); the detach is guarded so
+       close-then-unmount cannot double-detach.
+     - Phone tokens only (the token gate scans `src/components/**/*.vue`, so
+       this file is in scope), Chinese labels, 48px touch targets.
+  5. Test: the two plan assertions stand; add one pinning the seam import:
+     the SFC must reference `terminalPty` and must not reference
+     `ConnectionController` (the screen drives the PTY through the seam only).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -999,6 +1065,11 @@ describe('terminal screen', () => {
   it('attaches through the core host-CLI session command', () => {
     expect(read('../../src/components/terminal/TerminalScreen.vue')).toContain('attach');
   });
+  it('drives the PTY through the shell-owned seam, not a controller', () => {
+    const sfc = read('../../src/components/terminal/TerminalScreen.vue');
+    expect(sfc).toContain('terminalPty');
+    expect(sfc).not.toContain('ConnectionController');
+  });
 });
 ```
 
@@ -1009,24 +1080,28 @@ Expected: FAIL — the file does not exist.
 
 - [ ] **Step 3: Implement**
 
-Build `TerminalScreen.vue` around the retained `TerminalViewport.vue`, wired to
-the live `ConnectionController` the way legacy `App.vue` did (pass a
-`writePty`-style effect and consume the PTY stream), attaching via core's
-`buildAttachCommand` (`pocketshell sessions attach -- '<name>'`, an aplexer
-`a attach`). Open it from a project/session header action; it is an overlay, not
-a fourth tab (D5). Close it on leave so its PTY is released.
+Create the `src/session/terminalPty.ts` seam (R12.2) with no implementation.
+Build `TerminalScreen.vue` around the retained `TerminalViewport.vue`
+(`../TerminalViewport.vue`), driving the PTY only through the seam (R12.4):
+attach on mount with the viewport's measured geometry, forward `input`/
+`resize`, write the data pump into the viewport's exposed `write`, an error
+state for an uninstalled seam and for attach failure (Chinese labels, 48px
+actions), and `detach()` on close/unmount so the PTY is released. The overlay
+opening (打开终端 from a project or session, D5) and the seam's real
+implementation are Task 5's — the screen takes `sessionName`/`title` props and
+emits `close`.
 
 - [ ] **Step 4: Run the test and the typecheck**
 
 Run: `pnpm exec vitest run tests/unit/terminalScreenWiring.test.ts`
-Expected: PASS (2 tests).
+Expected: PASS (3 tests).
 Run: `pnpm typecheck`
 Expected: exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/components/terminal/TerminalScreen.vue src/phone/PhoneApp.vue tests/unit/terminalScreenWiring.test.ts
+git add src/session/terminalPty.ts src/components/terminal/TerminalScreen.vue tests/unit/terminalScreenWiring.test.ts
 git commit -m "feat(terminal): retain the terminal as a secondary screen"
 ```
 
