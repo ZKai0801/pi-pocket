@@ -39,6 +39,6 @@ export function installTerminalPty(pty: TerminalPty | null): void {
  * owns one — the screen turns that into an error state, never a crash.
  */
 export function terminalPty(): TerminalPty {
-  if (!installed) throw new Error('No terminal PTY owner is installed yet.');
+  if (!installed) throw new Error('No terminal owner is installed yet.');
   return installed;
 }
