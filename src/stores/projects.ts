@@ -12,6 +12,12 @@
  * The wrapper resolves the live seam lazily at call time (R9): a discovery
  * before the shell owns a connection rejects through `resolveRoot` and
  * lands in `state: 'error'` — never a throw.
+ *
+ * `discover()` resolves with `true` when this call ran the discovery and
+ * `false` when it was suppressed because a run was already in flight; the
+ * suppressed promise resolves only after that in-flight run completes, so a
+ * caller (e.g. the host-switch watch) can re-discover instead of being
+ * dropped.
  */
 import { computed, reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
@@ -57,7 +63,12 @@ export interface ProjectsStoreState {
 export interface ProjectsStore extends ProjectsStoreState {
   /** `projects` filtered by `query`, case-insensitively on path and name. */
   readonly filtered: PiProject[];
-  discover(): Promise<void>;
+  /**
+   * Runs the discovery. Resolves with `true` when this call ran it; with
+   * `false` when a run was already in flight, in which case the promise
+   * resolves only after that run completes so the caller can retry.
+   */
+  discover(): Promise<boolean>;
   setQuery(query: string): void;
   addProject(path: string): void;
   select(path: string): void;
@@ -135,10 +146,18 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
     }
   }
 
-  // A second `discover()` while one is running must not re-list: claimed
+  // A second `discover()` while one is running must not re-list, and must
+  // not drop its caller either (D8 interleaving, host-switch fix): it
+  // resolves with `false` only after the in-flight run completes. Claimed
   // synchronously before the first `await`; released on every exit path.
-  async function discover(): Promise<void> {
-    if (discovering) return;
+  const suppressed: Array<() => void> = [];
+
+  async function discover(): Promise<boolean> {
+    if (discovering) {
+      return new Promise<boolean>((resolve) => {
+        suppressed.push(() => resolve(false));
+      });
+    }
     discovering = true;
     try {
       state.state = 'loading';
@@ -151,21 +170,24 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
         // list what the user added by hand.
         state.projects = added;
         state.state = 'no-root';
-        return;
+        return true;
       }
       const discovered = await deps.listProjects(root);
       const seen = new Set(discovered.map((project) => project.path));
       // Discovered first, added behind, de-duped by path (R9).
       state.projects = [...discovered, ...added.filter((project) => !seen.has(project.path))];
       state.state = 'ready';
+      return true;
     } catch (error) {
       // A failed discovery is an error, never an empty list masquerading as
       // "no projects" (Review Focus 4).
       state.projects = [];
       state.state = 'error';
       state.error = errorMessage(error);
+      return true;
     } finally {
       discovering = false;
+      for (const resolve of suppressed.splice(0)) resolve();
     }
   }
 
@@ -369,13 +391,20 @@ export const useProjectsStore = defineStore('projects', () => {
   // The added record and the discovery both key off the active host: the
   // moment the host changes, the previous host's list and selection are
   // stale, so re-discover. Switching to null leaves the connect-first hint
-  // to speak (the shell releases the live seam on disconnect).
+  // to speak (the shell releases the live seam on disconnect). A suppressed
+  // re-discover (the previous host's run still settling) must not be
+  // dropped: retry once, only while the host is still the one that
+  // triggered the watch.
   const connections = useConnectionsStore();
   watch(
     () => connections.activeName,
     (name) => {
       store.selected = null;
-      if (name !== null) void store.discover();
+      if (name === null) return;
+      const triggeredFor = name;
+      void store.discover().then((ran) => {
+        if (!ran && connections.activeName === triggeredFor) void store.discover();
+      });
     },
   );
 

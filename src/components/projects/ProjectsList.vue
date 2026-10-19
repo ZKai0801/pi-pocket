@@ -126,38 +126,40 @@ function addCurrentDirectory(): void {
 
       <p v-else-if="store.state === 'error'" class="projects__error" role="alert">{{ store.error }}</p>
 
-      <p v-else-if="store.state === 'no-root'" class="projects__status">
-        这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来。
-      </p>
+      <template v-else>
+        <p v-if="store.state === 'no-root'" class="projects__status">
+          这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来。
+        </p>
 
-      <ul v-else-if="store.filtered.length > 0" class="projects__list">
-        <li
-          v-for="project in store.filtered"
-          :key="project.path"
-          class="projects__row"
-          :class="{ 'projects__row--selected': store.selected === project.path }"
-        >
-          <button
-            type="button"
-            class="projects__item"
-            :aria-pressed="store.selected === project.path"
-            @click="selectProject(project.path)"
+        <ul v-if="(store.state === 'ready' || store.state === 'no-root') && store.filtered.length > 0" class="projects__list">
+          <li
+            v-for="project in store.filtered"
+            :key="project.path"
+            class="projects__row"
+            :class="{ 'projects__row--selected': store.selected === project.path }"
           >
-            <AppIcon name="folder" class="projects__folder" />
-            <span class="projects__text">
-              <span class="projects__name">{{ project.name }}</span>
-              <span class="projects__path">{{ project.path }}</span>
-            </span>
-          </button>
-        </li>
-      </ul>
+            <button
+              type="button"
+              class="projects__item"
+              :aria-pressed="store.selected === project.path"
+              @click="selectProject(project.path)"
+            >
+              <AppIcon name="folder" class="projects__folder" />
+              <span class="projects__text">
+                <span class="projects__name">{{ project.name }}</span>
+                <span class="projects__path">{{ project.path }}</span>
+              </span>
+            </button>
+          </li>
+        </ul>
 
-      <div v-else class="projects__empty">
-        <p class="projects__empty-text">{{ store.query ? '没有匹配的项目' : '还没有项目' }}</p>
-        <button v-if="store.query === ''" type="button" class="projects__empty-button" @click="void store.openBrowse()">
-          新增项目
-        </button>
-      </div>
+        <div v-else class="projects__empty">
+          <p class="projects__empty-text">{{ store.query ? '没有匹配的项目' : '还没有项目' }}</p>
+          <button v-if="store.query === ''" type="button" class="projects__empty-button" @click="void store.openBrowse()">
+            新增项目
+          </button>
+        </div>
+      </template>
     </div>
 
     <div v-if="store.browse.open" class="projects__sheet-scrim" @click.self="store.closeBrowse()">
@@ -282,7 +284,7 @@ function addCurrentDirectory(): void {
 
 .projects__search-input {
   width: 100%;
-  min-height: 44px;
+  min-height: 48px;
   border: 0;
   background: transparent;
   color: var(--fg);

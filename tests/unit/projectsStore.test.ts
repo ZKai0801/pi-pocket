@@ -132,6 +132,27 @@ describe('projects store', () => {
     expect(store.state).toBe('ready');
   });
 
+  it('resolves a suppressed discover() with false only after the in-flight run finishes', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const d = deps({ resolveRoot: vi.fn(async () => { await gate; return '/root'; }) });
+    const store = createProjectsStore(d as never);
+    const first = store.discover();
+    const second = store.discover();
+    let secondResolved = false;
+    void second.then(() => { secondResolved = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(secondResolved).toBe(false);
+    release();
+    const [firstRan, secondRan] = await Promise.all([first, second]);
+    expect(firstRan).toBe(true);
+    expect(secondRan).toBe(false);
+    expect(store.state).toBe('ready');
+    const third = await store.discover();
+    expect(third).toBe(true);
+    expect(d.listProjects).toHaveBeenCalledTimes(2);
+  });
+
   it('selects a project for the sessions tab', async () => {
     const store = createProjectsStore(deps() as never);
     await store.discover();
