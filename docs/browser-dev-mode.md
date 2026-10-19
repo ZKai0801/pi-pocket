@@ -9,9 +9,8 @@ pnpm dev:live -- --host user@hostname[:port][=name] --identity ~/.ssh/id_ed25519
                   # then open the URL it prints (…/#devBridgeToken=…)
 ```
 
-Both shells work: `http://localhost:5173/` is the legacy phone shell and
-`http://localhost:5173/?shell=shared` is the shared app. Edits under `src/`
-(and the shared UI in `vendor/pocketshell-core/packages/ui`) hot-reload.
+One shell: `http://localhost:5173/` is the phone shell (#2936). Edits under
+`src/` (and the shared UI in `vendor/pocketshell-core/packages/ui`) hot-reload.
 
 This is for UI work and quick checks. It is not acceptance evidence: the
 packaged emulator journeys stay the gate (see [testing.md](testing.md) and
@@ -23,14 +22,14 @@ In Chrome or Edge open DevTools (F12), toggle the device toolbar
 (Ctrl+Shift+M / Cmd+Shift+M) and pick a phone such as "Pixel 7" or set
 412 × 915. Firefox: Responsive Design Mode (Ctrl+Shift+M). The page then has a
 phone viewport and touch emulation; a desktop keyboard still types into the
-terminal and the composer.
+terminal.
 
 ## `pnpm dev:mock`
 
 A believable fake dev box lives in the page:
 
 - one saved host, `mock-devbox` (`dev@devbox.mock:22`), and an in-memory SSH
-  key; the legacy connect form fills itself in;
+  key; the phone shell's connections tab lists it;
 - the first connect shows the real host-key trust prompt (the mock host has a
   fixed ed25519 key);
 - five sessions in three workspaces, two with mock agents (Claude working,
@@ -42,6 +41,11 @@ A believable fake dev box lives in the page:
   four providers, and listening ports 3000/5173/5432/8000 for the port screen;
 - host names containing `fail` or `denied` simulate a refused connection or a
   rejected login.
+
+The phone shell at this stage has connections, projects and sessions tabs but
+no session-list, terminal, composer, settings or usage screen yet, so the mock
+host's sessions, terminal, usage and ports are only reachable once those
+screens land (Plan 3/Plan 5). The plugins themselves are ready.
 
 The mock Vite server listens on all interfaces like `pnpm dev`, so a phone on
 the same network can open it too; nothing secret crosses a mock page.
@@ -150,14 +154,10 @@ before `@capacitor/core` loads, so the app code runs unchanged and sees the
 | `@capacitor/app` | the toolbar's Back button is the Android back button; tab visibility drives pause/resume |
 | `NativeCrashReports`, `InstalledDataMigration`, `BridgeReady` | in-memory list, a fresh install with nothing to migrate, an immediate ping answer |
 
-The small **DEV** tab on the right edge holds Back, Kbd, Share, Host (fill the
-connect form) and, in mock mode, Drop (simulate a network loss). Click DEV to
-collapse it; `?devToolbar=0` hides it. `?devTrace=1` logs each SSH call
-(method, command, outcome code — never PTY bytes) to the browser console.
-
-The legacy shell's build strip reads "Build verification failed" under the dev
-server: there is no bundled asset manifest to verify, exactly as with plain
-`pnpm dev`.
+The small **DEV** tab on the right edge holds Back, Kbd and Share, plus Drop
+in mock mode. Click DEV to collapse it; `?devToolbar=0` hides it.
+`?devTrace=1` logs each SSH call (method, command, outcome code — never PTY
+bytes) to the browser console.
 
 ## Never in the APK
 
@@ -178,10 +178,14 @@ finds one (or finds nothing to scan).
   (the real `dev:live` launcher: foreign `Host` gets 403, the page carries no
   token, the proxied bridge refuses a foreign `Origin`) run in
   `scripts/run-js-unit-gate.sh`.
-- `node scripts/dev-browser-smoke.mjs mock` starts `dev:mock` and drives both
-  shells headlessly in Chromium (connect, trust, sessions, terminal echo,
-  composer, settings, back, HMR). `node scripts/dev-browser-smoke.mjs live
+- `node scripts/dev-browser-smoke.mjs mock` starts `dev:mock` and drives the
+  phone shell headlessly in Chromium (the seeded host, host-key trust, the
+  live phase, the three tabs and HMR). Steps the shell cannot reach yet
+  (projects discovery, terminal echo, composer, usage) are recorded as
+  `deferred` checks with their owner instead of being dropped. `node
+  scripts/dev-browser-smoke.mjs live
   --host testuser@127.0.0.1:2222=fixture --identity tests/docker/test_key`
-  types into a real PTY on the Docker fixture and checks the result over an
-  independent SSH connection. Both run in the `JS checks and Android debug APK`
-  CI job; screenshots and `result.json` land in `build/dev-browser-smoke/`.
+  does the same against the Docker fixture and checks the presented key
+  against an independent SSH handshake; the real-PTY step is a deferred Plan 5
+  check. Both run in the `JS checks and Android debug APK` CI job; screenshots
+  and `result.json` land in `build/dev-browser-smoke/`.

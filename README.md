@@ -48,8 +48,7 @@ pnpm dev:mock   # fake host with sessions, a scripted terminal, files, usage and
 pnpm dev:live -- --host testuser@127.0.0.1:2222=fixture --identity tests/docker/test_key
 ```
 
-Open <http://localhost:5173/> (legacy shell) or
-<http://localhost:5173/?shell=shared> (shared app), then switch Chrome DevTools
+Open <http://localhost:5173/> (the one phone shell), then switch Chrome DevTools
 to a phone viewport (Ctrl+Shift+M, e.g. "Pixel 7"). `dev:live` reaches real
 hosts through a local ssh2 bridge bound to 127.0.0.1; open the URL it prints
 (it carries the bridge token in its `#` fragment). Details, security notes

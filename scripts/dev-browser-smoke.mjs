@@ -12,16 +12,18 @@
  *   --artifacts <dir>   where screenshots and result.json go (default build/dev-browser-smoke/<mode>)
  *   --chrome <path>     Chromium/Chrome executable (default: $CHROME_PATH, then common locations)
  *
- * mock journeys: legacy shell (host form → host-key trust → sessions →
- * terminal echo → composer send → settings/usage → Android back) and the
- * shared app (?shell=shared: host → trust → session → terminal echo), plus a
- * Vite HMR update without a page reload.
+ * mock journeys: the single phone shell at `/` — the seeded dev host is listed,
+ * connecting asks for host-key trust, trusting it records the pin and the shell
+ * reports a live connection, and the three tabs switch. The phone shell has no
+ * composer, usage, session-list or terminal surface yet, so those steps are
+ * recorded as explicit DEFER checks naming their owner instead of being
+ * dropped (see the `smoke.defer()` calls).
  *
- * live journey: the legacy shell against the real host — it creates a fresh
- * session, types a command whose output only a real shell produces, and an
- * independent SSH connection (not the bridge) reads the file that command
- * wrote; then the shared app opens the same session and types into it. The
- * session and file are removed afterwards.
+ * live journey: the same phone shell against the real host — the connect asks
+ * for the key the host presents, checked against an independent SSH handshake,
+ * and trusting it reaches a live connection. Creating a session and typing
+ * into its real PTY needs the packaged terminal screen, so it is a DEFER
+ * check for Plan 5 rather than a silent omission.
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -197,26 +199,16 @@ class Smoke {
       throw error;
     }
   }
-}
 
-async function terminalText(page) {
-  return page.evaluate(() => [...document.querySelectorAll('.xterm-rows > div')].map((row) => row.textContent ?? '').join('\n'));
-}
-
-async function waitForTerminalLine(page, expected, timeoutMs = 15_000) {
-  const until = Date.now() + timeoutMs;
-  while (Date.now() < until) {
-    const lines = (await terminalText(page)).split('\n').map((line) => line.trimEnd());
-    if (lines.some((line) => line === expected)) return;
-    await page.waitForTimeout(150);
+  /**
+   * A step this round cannot drive yet, recorded rather than dropped: it stays
+   * in result.json as `deferred` with the owner and the one-line reason, so the
+   * gap is visible in CI evidence instead of vanishing from the script.
+   */
+  defer(name, reason) {
+    this.checks.push({ name, ok: true, deferred: true, reason });
+    process.stdout.write(`DEFER ${name} — ${reason}\n`);
   }
-  throw new Error(`terminal never showed the line ${JSON.stringify(expected)}; last screen:\n${(await terminalText(page)).trim().slice(-800)}`);
-}
-
-async function typeInTerminal(page, text) {
-  await page.locator('.xterm:visible').first().click();
-  await page.keyboard.type(text, { delay: 15 });
-  await page.keyboard.press('Enter');
 }
 
 async function shot(page, smoke, name) {
@@ -255,94 +247,92 @@ function liveHostFingerprint(options) {
   });
 }
 
-async function connectLegacy(page, smoke, expectedHost, expectedFingerprint) {
-  await smoke.step('legacy: connect form opens prefilled with the dev host', async () => {
-    await page.waitForSelector('[data-testid="ssh-connect"]', { timeout: 30_000 });
-    await page.waitForFunction((host) => document.querySelector('[data-testid="ssh-host"]')?.value === host, expectedHost, { timeout: 15_000 });
-    await shot(page, smoke, 'legacy-01-connect');
-    return expectedHost;
+/**
+ * Connect the seeded dev host through the phone shell: the saved host row, the
+ * host-key prompt and the live phase. The phone shell owns the controller, so
+ * there is no separate connect form any more.
+ */
+async function connectPhone(page, smoke, hostLabel, expectedFingerprint) {
+  await smoke.step('phone: the connections tab lists the saved dev host', async () => {
+    await page.waitForSelector('[data-testid="phone-tab-connections"]', { timeout: 30_000 });
+    await visibleText(page, hostLabel).waitFor({ timeout: 20_000 });
+    await shot(page, smoke, 'phone-01-connections');
+    return hostLabel;
   });
-  await smoke.step('legacy: host-key trust prompt shows the presented fingerprint', async () => {
-    await page.click('[data-testid="ssh-connect"]');
-    await page.waitForSelector('[data-testid="trust-host-key"]', { timeout: 20_000 });
+  await smoke.step('phone: tapping the host asks for host-key trust with the presented fingerprint', async () => {
+    await visibleText(page, hostLabel).click();
+    await page.waitForSelector('[data-testid="host-key-decision"]', { timeout: 20_000 });
     const text = await page.locator('body').innerText();
     if (!text.includes(expectedFingerprint)) throw new Error(`the trust prompt does not show the host's fingerprint ${expectedFingerprint}`);
-    await shot(page, smoke, 'legacy-02-trust');
+    await shot(page, smoke, 'phone-02-trust');
     await page.click('[data-testid="trust-host-key"]');
     return expectedFingerprint;
   });
-  await smoke.step('legacy: sessions list loads after trusting the host', async () => {
-    await page.waitForSelector('.session-row', { timeout: 30_000 });
-    const count = await page.locator('.session-row').count();
-    await shot(page, smoke, 'legacy-03-sessions');
-    return `${count} sessions`;
+  await smoke.step('phone: trusting the key records the pin and reaches a live connection', async () => {
+    await page.waitForFunction(
+      () => ['connected', 'listing', 'live'].includes(document.querySelector('[data-testid="phone-shell"]')?.getAttribute('data-ssh-phase') ?? ''),
+      null,
+      { timeout: 30_000 },
+    );
+    const pins = await page.evaluate(() => Object.keys(localStorage)
+      .filter((key) => key.startsWith('pocketshell.ssh.host-key.'))
+      .map((key) => ({ key, value: localStorage.getItem(key) })));
+    if (pins.length === 0) throw new Error('no host-key pin was recorded after trusting the key');
+    // The pin must be the key the host actually presented, read independently
+    // over SSH for the live host and rebuilt from the mock's fixed key.
+    if (!pins.some((pin) => pin.value?.includes(expectedFingerprint))) {
+      throw new Error(`the recorded pin does not carry the presented fingerprint ${expectedFingerprint}`);
+    }
+    const phase = await page.getAttribute('[data-testid="phone-shell"]', 'data-ssh-phase');
+    await shot(page, smoke, 'phone-03-connected');
+    return `phase ${phase}; pin ${pins[0].key}`;
   });
 }
 
 async function mockJourneys(browser, base, smoke) {
   const context = await browser.newContext(PHONE);
-  const page = smoke.watch(await context.newPage(), 'legacy');
-  const marker = `DEVSMOKE_${randomBytes(4).toString('hex')}`;
-  await smoke.open(page, `${base}/?shell=legacy&devSpeech=stub`);
-  await connectLegacy(page, smoke, 'devbox.mock', mockHostFingerprint());
-  await smoke.step('legacy: the mock host lists its five sessions across three workspaces', async () => {
-    const names = await page.locator('.session-row').evaluateAll((rows) => rows.map((row) => row.getAttribute('data-session-name')));
-    if (names.length !== 5 || !names.includes('pocketshell:shell')) throw new Error(`unexpected sessions ${names.join(', ')}`);
-    return names.join(', ');
-  });
-  await smoke.step('legacy: attach a session and see typed input echoed by the PTY', async () => {
-    await page.click('[data-session-name="pocketshell:shell"]');
-    await page.locator('.xterm:visible').first().waitFor({ timeout: 15_000 });
-    await waitForTerminalLine(page, 'dev@devbox:~/git/pocketshell$', 10_000).catch(() => undefined);
-    await typeInTerminal(page, `echo ${marker}`);
-    await waitForTerminalLine(page, marker);
-    await shot(page, smoke, 'legacy-04-terminal');
-    return marker;
-  });
-  await smoke.step('legacy: the prompt composer sends a command to the terminal', async () => {
-    await page.click('[data-testid="prompt-composer-launcher"]');
-    await page.waitForSelector('[data-testid="prompt-draft"]', { timeout: 10_000 });
-    await page.fill('[data-testid="prompt-draft"]', `echo composer-${marker}`);
-    await shot(page, smoke, 'legacy-05-composer');
-    await page.locator('[data-testid="prompt-composer"] button', { hasText: /^Send$/u }).first().click();
-    await waitForTerminalLine(page, `composer-${marker}`);
-    return `composer-${marker}`;
-  });
-  await smoke.step('legacy: settings → provider usage shows the mock providers', async () => {
-    if (await page.locator('[data-testid="prompt-composer"]').isVisible()) await page.click('[data-testid="composer-close"]').catch(() => undefined);
-    await page.click('[aria-label="Settings"]');
-    await page.click('[data-testid="open-usage"]');
-    await visibleText(page, 'Claude Code').waitFor({ timeout: 10_000 });
-    await shot(page, smoke, 'legacy-06-usage');
-    return 'Claude Code, Codex, Copilot, Gemini';
-  });
-  await smoke.step('legacy: the dev toolbar Back button acts as the Android back button', async () => {
-    await page.click('[data-testid="dev-back"]');
-    await page.waitForSelector('[data-testid="open-usage"]', { timeout: 10_000 });
-    return 'usage → settings';
-  });
-  await context.close();
-
-  const shared = await browser.newContext(PHONE);
-  const sharedPage = smoke.watch(await shared.newPage(), 'shared');
-  await smoke.open(sharedPage, `${base}/?shell=shared`);
-  await smoke.step('shared: the seeded mock host is listed and asks for host-key trust', async () => {
-    await visibleText(sharedPage, 'mock-devbox').click({ timeout: 30_000 });
-    await sharedPage.waitForSelector('[data-testid="trust-host-key"]', { timeout: 20_000 });
-    if (!(await sharedPage.locator('body').innerText()).includes(mockHostFingerprint())) {
-      throw new Error('the shared trust prompt does not show the mock host fingerprint');
+  const page = smoke.watch(await context.newPage(), 'phone');
+  await smoke.open(page, `${base}/`);
+  await smoke.step('phone: the single shell mounts with its three tabs', async () => {
+    await page.waitForSelector('[data-testid="phone-shell"]', { timeout: 30_000 });
+    for (const tab of ['connections', 'projects', 'sessions']) {
+      await page.waitForSelector(`[data-testid="phone-tab-${tab}"]`, { timeout: 10_000 });
     }
-    await shot(sharedPage, smoke, 'shared-01-trust');
-    await sharedPage.click('[data-testid="trust-host-key"]');
+    return '连接 / 项目 / 会话';
   });
-  await smoke.step('shared: the session tree opens a terminal that echoes typed input', async () => {
-    await visibleText(sharedPage, 'codex-review').click({ timeout: 20_000 });
-    await sharedPage.locator('.xterm:visible').first().waitFor({ timeout: 15_000 });
-    await typeInTerminal(sharedPage, `echo shared-${marker}`);
-    await waitForTerminalLine(sharedPage, `shared-${marker}`);
-    await shot(sharedPage, smoke, 'shared-02-terminal');
-    return `shared-${marker}`;
+  await connectPhone(page, smoke, 'mock-devbox', mockHostFingerprint());
+  await smoke.step('phone: the tab bar switches between the three roots', async () => {
+    const heading = (tab) => page.locator(`[data-testid="phone-shell"][data-route="${tab}"]`);
+    await page.click('[data-testid="phone-tab-projects"]');
+    await heading('projects').waitFor({ timeout: 10_000 });
+    await page.getByRole('heading', { name: '项目' }).waitFor({ timeout: 10_000 });
+    await shot(page, smoke, 'phone-04-projects');
+    await page.click('[data-testid="phone-tab-sessions"]');
+    await heading('sessions').waitFor({ timeout: 10_000 });
+    await page.getByRole('heading', { name: '会话' }).waitFor({ timeout: 10_000 });
+    await page.click('[data-testid="phone-tab-connections"]');
+    await heading('connections').waitFor({ timeout: 10_000 });
+    return 'projects → sessions → connections';
   });
+  // The mock host does not answer the phone shell's remote-context probe
+  // (`printf '%s\n%s\n' "$HOME" "${PI_CODING_AGENT_SESSION_DIR-}"`) or the
+  // `test -d` root probe, so the projects list cannot be discovered here yet.
+  smoke.defer(
+    'phone: projects discovery lists the mock host workspaces',
+    'DEFERRED — the mock host does not answer the phone shell remote-context/test -d probes; owner: Plan 2 follow-up',
+  );
+  smoke.defer(
+    'phone: a session opens the terminal and echoes typed input',
+    'DEFERRED — the phone shell has no session selection until projects discovery works, and the terminal is Plan 5 packaged acceptance',
+  );
+  smoke.defer(
+    'phone: the composer sends a command to the terminal',
+    'DEFERRED — the phone shell has no composer; owner: Plan 3',
+  );
+  smoke.defer(
+    'phone: provider usage and settings are reachable',
+    'DEFERRED — the phone shell has no settings or usage surface; owner: Plan 5 packaged acceptance',
+  );
 
   await smoke.step('vite: a hot update applies without reloading the page', async () => {
     const probeDir = path.join(repoRoot, 'build', 'dev-browser-smoke', 'hmr');
@@ -351,67 +341,32 @@ async function mockJourneys(browser, base, smoke) {
     writeFileSync(probe, ':root { --ps-hmr-probe: one; }\n');
     try {
       const url = `/${path.relative(repoRoot, probe).split(path.sep).join('/')}`;
-      await sharedPage.evaluate(async (specifier) => {
+      await page.evaluate(async (specifier) => {
         window.__psHmrPageMarker = 'still-the-same-page';
         await import(/* @vite-ignore */ specifier);
       }, url);
-      const read = () => sharedPage.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--ps-hmr-probe').trim());
-      await sharedPage.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--ps-hmr-probe').trim() === 'one', null, { timeout: 10_000 });
+      const read = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--ps-hmr-probe').trim());
+      await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--ps-hmr-probe').trim() === 'one', null, { timeout: 10_000 });
       writeFileSync(probe, ':root { --ps-hmr-probe: two; }\n');
-      await sharedPage.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--ps-hmr-probe').trim() === 'two', null, { timeout: 15_000 });
-      const sameDocument = await sharedPage.evaluate(() => window.__psHmrPageMarker === 'still-the-same-page');
+      await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--ps-hmr-probe').trim() === 'two', null, { timeout: 15_000 });
+      const sameDocument = await page.evaluate(() => window.__psHmrPageMarker === 'still-the-same-page');
       if (!sameDocument) throw new Error('the page reloaded instead of hot-updating');
       return `--ps-hmr-probe ${'one'} → ${await read()} in place`;
     } finally {
       rmSync(probe, { force: true });
     }
   });
-  await shared.close();
-}
-
-function oracleExec(options, command) {
-  return new Promise((resolve, reject) => {
-    const client = new ssh2.Client();
-    client.once('ready', () => {
-      client.exec(command, (error, stream) => {
-        if (error) {
-          client.end();
-          reject(error);
-          return;
-        }
-        let stdout = '';
-        let stderr = '';
-        stream.on('data', (chunk) => { stdout += chunk; });
-        stream.stderr.on('data', (chunk) => { stderr += chunk; });
-        stream.on('close', (code) => {
-          client.end();
-          resolve({ code, stdout, stderr });
-        });
-      });
-    });
-    client.once('error', reject);
-    client.connect({
-      host: options.host.hostname,
-      port: options.host.port,
-      username: options.host.user,
-      privateKey: readFileSync(options.identity),
-      readyTimeout: 15_000,
-    });
-  });
+  await context.close();
 }
 
 async function liveJourney(browser, base, smoke, options, token) {
   if (!token) throw new Error('dev:live did not print the page URL with its bridge token');
   // The token rides in the fragment, exactly as a developer opens the printed URL.
   const entry = (pathAndQuery) => `${base}${pathAndQuery}#devBridgeToken=${token}`;
-  const tag = `devsmoke-${randomBytes(4).toString('hex')}`;
-  const file = `/tmp/${tag}.txt`;
-  const expected = `DEVSMOKE_42_${tag}`;
   const context = await browser.newContext(PHONE);
-  const page = smoke.watch(await context.newPage(), 'legacy');
-  let sessionName = null;
+  const page = smoke.watch(await context.newPage(), 'phone');
   try {
-    await smoke.open(page, entry('/?shell=legacy&devSpeech=stub'));
+    await smoke.open(page, entry('/'));
     await smoke.step('live: the page takes the bridge token from the fragment and clears it from the URL', async () => {
       await page.waitForFunction(() => document.documentElement.dataset.devBrowser === 'live', null, { timeout: 30_000 });
       if (page.url().includes(token)) throw new Error('the bridge token is still in the address bar');
@@ -419,58 +374,27 @@ async function liveJourney(browser, base, smoke, options, token) {
       if (html.includes(token)) throw new Error('the served page carries the bridge token');
       return page.url();
     });
-    await connectLegacy(page, smoke, options.host.hostname, await liveHostFingerprint(options));
-    await smoke.step('live: create a fresh session on the real host', async () => {
-      await page.fill('[data-testid="new-session-name"]', tag);
-      await page.click('[data-testid="create-session"]');
-      const row = page.locator(`.session-row[data-session-tag="${tag}"]`);
-      await row.first().waitFor({ timeout: 60_000 });
-      sessionName = await row.first().getAttribute('data-session-name');
-      return sessionName;
-    });
-    await smoke.step('live: type into the real PTY and see the shell evaluate it', async () => {
-      if (!(await page.locator('.xterm:visible').first().isVisible().catch(() => false))) {
-        await page.click(`.session-row[data-session-tag="${tag}"]`);
+    await smoke.step('live: the phone shell mounts with its three tabs', async () => {
+      await page.waitForSelector('[data-testid="phone-shell"]', { timeout: 30_000 });
+      for (const tab of ['connections', 'projects', 'sessions']) {
+        await page.waitForSelector(`[data-testid="phone-tab-${tab}"]`, { timeout: 10_000 });
       }
-      await page.locator('.xterm:visible').first().waitFor({ timeout: 30_000 });
-      await page.waitForTimeout(1_500);
-      // Only a real shell turns $((40+2)) into 42; the typed text never contains it.
-      await typeInTerminal(page, `echo DEVSMOKE_$((40+2))_${tag} | tee ${file}`);
-      await waitForTerminalLine(page, expected, 30_000);
-      await shot(page, smoke, 'live-01-terminal');
-      return expected;
+      return '连接 / 项目 / 会话';
     });
-    await smoke.step('live: an independent SSH connection reads what the PTY command wrote', async () => {
-      const result = await oracleExec(options, `cat ${file}`);
-      if (result.code !== 0 || result.stdout.trim() !== expected) {
-        throw new Error(`host oracle read ${JSON.stringify(result.stdout.trim())} (exit ${result.code}), expected ${expected}`);
-      }
-      const listing = await oracleExec(options, 'pocketshell sessions list --json');
-      if (!listing.stdout.includes(`"${sessionName}"`)) throw new Error(`host listing does not show ${sessionName}`);
-      return `${file} = ${result.stdout.trim()}; ${sessionName} listed by the host`;
-    });
-    await smoke.step('live shared: the shared app opens the same session and types into its real PTY', async () => {
-      const shared = await browser.newContext(PHONE);
-      try {
-        const sharedPage = smoke.watch(await shared.newPage(), 'shared');
-        await smoke.open(sharedPage, entry('/?shell=shared'));
-        await visibleText(sharedPage, options.host.name).click({ timeout: 30_000 });
-        await sharedPage.waitForSelector('[data-testid="trust-host-key"]', { timeout: 20_000 });
-        await sharedPage.click('[data-testid="trust-host-key"]');
-        await visibleText(sharedPage, tag, { exact: true }).click({ timeout: 30_000 });
-        await sharedPage.locator('.xterm:visible').first().waitFor({ timeout: 30_000 });
-        await sharedPage.waitForTimeout(1_500);
-        await typeInTerminal(sharedPage, `echo SHARED_$((40+2))_${tag}`);
-        await waitForTerminalLine(sharedPage, `SHARED_42_${tag}`, 30_000);
-        await shot(sharedPage, smoke, 'live-02-shared-terminal');
-        return `SHARED_42_${tag}`;
-      } finally {
-        await shared.close();
-      }
-    });
+    await connectPhone(page, smoke, options.host.name, await liveHostFingerprint(options));
+    // The phone shell's terminal is the secondary screen Plan 5 accepts on a
+    // device; the browser smoke can reach the live connection but has no
+    // session list to open a PTY from.
+    smoke.defer(
+      'live: create a fresh session on the real host',
+      'DEFERRED — the phone shell creates sessions from the packaged terminal screen; owner: Plan 5 packaged acceptance',
+    );
+    smoke.defer(
+      'live: type into the real PTY and an independent SSH connection reads what it wrote',
+      'DEFERRED — needs the terminal screen and a session to attach to; owner: Plan 5 packaged acceptance',
+    );
   } finally {
     await context.close();
-    await oracleExec(options, `rm -f ${file}${sessionName ? `; pocketshell sessions kill -- '${sessionName.replace(/'/gu, `'\\''`)}'` : ''}`).catch(() => undefined);
   }
 }
 

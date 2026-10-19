@@ -1,8 +1,7 @@
 /**
  * Browser dev mode (#3022): a small floating toolbar for the things a phone
  * has and a desktop browser does not — the Android back button, the soft
- * keyboard, the share sheet — plus filling the connect form with the dev
- * host. Hide it with `?devToolbar=0`.
+ * keyboard and the share sheet. Hide it with `?devToolbar=0`.
  */
 import type { SeedHost } from './liveBridge';
 
@@ -16,27 +15,6 @@ export interface DevToolbarApi {
 }
 
 const EXPANDED_KEY = 'pocketshell.dev-toolbar.expanded';
-
-function setInputValue(input: HTMLInputElement | null, value: string): void {
-  if (!input) return;
-  input.value = value;
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-/** Fill the legacy connect form (hostname/port/user/key) from the first dev host. */
-export function fillConnectForm(doc: Document, host: SeedHost | undefined): boolean {
-  const hostname = doc.querySelector<HTMLInputElement>('[data-testid="ssh-host"]');
-  if (!host || !hostname) return false;
-  setInputValue(hostname, host.hostname);
-  setInputValue(doc.querySelector<HTMLInputElement>('[data-testid="ssh-port"]'), String(host.port));
-  setInputValue(doc.querySelector<HTMLInputElement>('[data-testid="ssh-username"]'), host.user);
-  const key = doc.querySelector<HTMLSelectElement>('[data-testid="ssh-key-selection"]');
-  if (key && [...key.options].some((option) => option.value === host.keyHandleId)) {
-    key.value = host.keyHandleId;
-    key.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-  return true;
-}
 
 export function createDevToolbar(doc: Document, api: DevToolbarApi): HTMLElement {
   const bar = doc.createElement('div');
@@ -87,27 +65,11 @@ export function createDevToolbar(doc: Document, api: DevToolbarApi): HTMLElement
   if (api.mode === 'mock') {
     button('Drop', 'Drop the SSH connection as a network loss would', 'dev-drop', () => api.dropConnections());
   }
-  if (api.seedHosts.length > 0) {
-    button('Host', `Fill the connect form with ${api.seedHosts[0].user}@${api.seedHosts[0].hostname}:${api.seedHosts[0].port}`,
-      'dev-fill-host', () => fillConnectForm(doc, api.seedHosts[0]));
-  }
   label.addEventListener('click', () => {
     const show = buttons.style.display === 'none';
     buttons.style.display = show ? 'flex' : 'none';
     globalThis.sessionStorage?.setItem(EXPANDED_KEY, show ? '1' : '0');
   });
   doc.body.append(bar);
-
-  // Zero-setup: fill the connect form once, the first time it appears empty.
-  if (api.seedHosts.length > 0 && typeof MutationObserver !== 'undefined') {
-    const observer = new MutationObserver(() => {
-      const hostname = doc.querySelector<HTMLInputElement>('[data-testid="ssh-host"]');
-      const key = doc.querySelector<HTMLSelectElement>('[data-testid="ssh-key-selection"]');
-      if (!hostname || !key || key.options.length < 2) return;
-      observer.disconnect();
-      if (!hostname.value) fillConnectForm(doc, api.seedHosts[0]);
-    });
-    observer.observe(doc.body, { childList: true, subtree: true });
-  }
   return bar;
 }

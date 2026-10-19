@@ -12,11 +12,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { Capacitor } from '@capacitor/core';
 import {
-  fromAndroidTrustedHostKeySha256,
   type ConnectionSnapshot,
   type HostKeyTrustChoice,
-  type HostKeyTrustPin,
-  type HostKeyTrustStore,
   type SessionRow,
   type SshHostTarget,
 } from '@pocketshell/core';
@@ -44,6 +41,8 @@ import { useConnectionsStore } from '../stores/connections';
 import { sshCapability } from '../native/sshCapability';
 import { keyboardInsets, type KeyboardInsetsState } from '../native/keyboardInsets';
 import { createKeyboardInsetsStateSync } from '../native/keyboardInsetsState';
+import { createLocalTrustStore } from '../platform/android/trustStore';
+import { createTerminalTextDecoder } from './terminalText';
 import type { TerminalGeometry } from '../terminalGeometry';
 
 const EXEC_TIMEOUT_MS = 15_000;
@@ -69,55 +68,17 @@ let attachedSession: SessionRow | null = null;
 let activePassphrase: string | undefined;
 let requestSequence = 0;
 
-const decoder = new TextDecoder();
+const decoder = createTerminalTextDecoder();
 const encoder = new TextEncoder();
 
 /* ------------------------------------------------------------------ trust */
 
-function pinStoreKey(hostId: string): string {
-  return `pocketshell.ssh.host-key.${hostId}`;
-}
-
-/** The legacy phone's stored pin, including the bare-fingerprint Android rows. */
-function readStoredPin(hostId: string): HostKeyTrustPin | null {
-  const stored = localStorage.getItem(pinStoreKey(hostId));
-  if (stored == null) return null;
-  try {
-    const parsed: unknown = JSON.parse(stored);
-    if (typeof parsed === 'string') return fromAndroidTrustedHostKeySha256(parsed);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const pin = parsed as Record<string, unknown>;
-    if (pin.kind === 'sha256-fingerprint' && typeof pin.fingerprintSha256 === 'string') {
-      return { kind: 'sha256-fingerprint', fingerprintSha256: pin.fingerprintSha256 };
-    }
-    if (
-      pin.kind === 'wire-key'
-      && typeof pin.fingerprintSha256 === 'string'
-      && typeof pin.keyType === 'string'
-      && typeof pin.keyB64 === 'string'
-    ) {
-      return {
-        kind: 'wire-key',
-        fingerprintSha256: pin.fingerprintSha256,
-        keyType: pin.keyType,
-        keyB64: pin.keyB64,
-      };
-    }
-    return null;
-  } catch {
-    // Older Android host rows store the SHA256 fingerprint as a bare string.
-    return fromAndroidTrustedHostKeySha256(stored);
-  }
-}
-
-const trustStore: HostKeyTrustStore = {
-  async get(hostId) {
-    return readStoredPin(hostId);
-  },
-  async record(hostId, pin) {
-    localStorage.setItem(pinStoreKey(hostId), JSON.stringify(pin));
-  },
-};
+/**
+ * The same pins the legacy phone screens wrote
+ * (`pocketshell.ssh.host-key.<hostId>`), read through the Android platform
+ * store so a pin recorded by either shell is honoured here.
+ */
+const trustStore = createLocalTrustStore(localStorage);
 
 const trustDecision = computed(() => snapshot.value?.trustDecision ?? null);
 const trustCard = computed(() => (
@@ -178,6 +139,7 @@ async function closeController(): Promise<void> {
   attachedSession = null;
   terminalDataHandler = null;
   pendingTerminalOutput = '';
+  decoder.reset();
   snapshot.value = null;
   terminalTarget.value = null;
   releaseSeams();
@@ -195,6 +157,7 @@ const connectionPort: ConnectionPort = {
       && dialedTarget?.hostId === target.hostId
       && USABLE_PHASES.has(controller.getSnapshot().phase)
     ) {
+      connectionMessage.value = '';
       installSeams();
       return { ok: true };
     }
@@ -212,6 +175,8 @@ const connectionPort: ConnectionPort = {
       return { ok: false };
     }
     activePassphrase = undefined;
+    // A successful dial retires any message left by an earlier host's refusal.
+    connectionMessage.value = '';
     installSeams();
     return { ok: true };
   },
@@ -305,6 +270,9 @@ const terminalPtyImplementation: TerminalPty = {
     if (!result.ok) return { ok: false, error: result.message };
     attachedSession = result.value;
     pendingTerminalOutput = '';
+    // A new session starts a new byte stream: never inherit the previous
+    // session's half-decoded codepoint.
+    decoder.reset();
     return { ok: true };
   },
   onData(callback) {
@@ -333,6 +301,7 @@ const terminalPtyImplementation: TerminalPty = {
     attachedSession = null;
     terminalDataHandler = null;
     pendingTerminalOutput = '';
+    decoder.reset();
     if (active && row) await active.detachSession(row).catch(() => undefined);
   },
 };

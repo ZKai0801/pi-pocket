@@ -65,7 +65,7 @@ jobs:
           scripts/run-js-unit-gate.sh
 
       # Issue #3022: the browser dev mode (pnpm dev:mock) must keep booting
-      # both shells with no Android, and its shim guard must stay sharp.
+      # the phone shell with no Android, and its shim guard must stay sharp.
       - name: Check browser dev-mode shim guard and run the dev:mock smoke
         run: |
           python3 scripts/check-no-dev-shims.py --self-test
@@ -232,8 +232,9 @@ jobs:
           wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/js-lifecycle-agents-health.log 60
           cat /tmp/js-lifecycle-agents-health.log
 
-      # Issue #3022: dev:live through the local ssh2 bridge into a real PTY on
-      # the fixture, checked by an independent SSH read of what it wrote.
+      # Issue #3022: dev:live through the local ssh2 bridge must connect and
+      # trust the fixture's host key, checked against an independent handshake.
+      # (The phone shell has no session/PTY surface yet; Plan 5 owns that step.)
       - name: Run the browser dev:live smoke against the Docker agents fixture
         run: node scripts/dev-browser-smoke.mjs live --host testuser@127.0.0.1:2222=fixture --identity tests/docker/test_key --artifacts build/dev-browser-smoke/live
 

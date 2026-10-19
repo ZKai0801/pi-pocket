@@ -7,9 +7,9 @@ import { bridgeWarmUp, type BridgeWarmUp } from '../native/bridgeReady';
 /**
  * The Android implementations of the shared app's optional platform seams
  * (pocketshell-core packages/ui `app/api.ts`): `app.info`, `update`,
- * `diagnostics` and the `diag.log` sink. #2936 hands these to `provideApi`
- * when Android mounts the shared app; until then they run here so runtime
- * errors are captured from launch.
+ * `diagnostics` and the `diag.log` sink. #2936 mounts the phone shell instead
+ * of the shared app, so these are installed at launch only to capture runtime
+ * errors into the diagnostics sink from the first frame.
  */
 export interface AndroidPlatformServices {
   appInfo(): Promise<InstalledAppInfo>;
