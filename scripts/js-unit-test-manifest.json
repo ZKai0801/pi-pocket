@@ -919,6 +919,173 @@
         "the adapter follows the store: current while unlocked, lock through it, presence follows probe",
         "accepts only ephemeral handles and never echoes key material"
       ]
+    },
+    "tests/unit/chatMarkdown.test.ts": {
+      "suite": "renderChatMarkdown",
+      "tests": [
+        "renders emphasis and a fenced code block",
+        "drops raw html from the source",
+        "strips script nodes and event handlers",
+        "neutralises a javascript: link"
+      ]
+    },
+    "tests/unit/connectionsStore.test.ts": {
+      "suite": "connections store",
+      "tests": [
+        "loads the saved hosts, none of them connected",
+        "only the active host reports connected",
+        "dials the resolved target, not the raw record",
+        "closes the current connection before opening another (D8)",
+        "surfaces a dial failure as error status, not a throw",
+        "reports a missing credential instead of dialling",
+        "saves and removes through the host store, closing a removed live host (D8)",
+        "treats a resolved { ok: false } dial as a failure, not a connection (D8)",
+        "leaves a live connection alone when the named host is unknown (D8)",
+        "does not dial twice when connect() is re-entered (D8 interleaving)"
+      ]
+    },
+    "tests/unit/hostStoreAuth.test.ts": {
+      "suite": "SavedHost auth",
+      "tests": [
+        "loads a v1 record with no auth as a key host",
+        "round-trips a password host under the same storage key",
+        "still requires a key for a key host",
+        "keeps piSessionsDir and piCommand through a save",
+        "refuses to dial a password host until Plan 4 wires the secret"
+      ]
+    },
+    "tests/unit/phoneShellSingleEntry.test.ts": {
+      "suite": "single shell",
+      "tests": [
+        "main.ts mounts the phone app unconditionally",
+        "capacitor starts on the phone app, not a shell query"
+      ]
+    },
+    "tests/unit/phoneTokens.test.ts": {
+      "suite": "phone token layer",
+      "tests": [
+        "declares every WeChat role the phone UI needs",
+        "declares them from existing tokens, not raw hex"
+      ]
+    },
+    "tests/unit/piCommands.test.ts": {
+      "suite": "pi commands",
+      "tests": [
+        "encodePiCwd: matches the observed dir names",
+        "quoteShell: single-quotes and escapes embedded quotes",
+        "commands: lists session dirs under the root",
+        "commands: reads the first header line of any session file in a dir",
+        "commands: lists session files newest first with mtime",
+        "commands: tails a session file with a byte cap"
+      ]
+    },
+    "tests/unit/piParseSession.test.ts": {
+      "suite": "parsePiSession",
+      "tests": [
+        "reads the header and session name",
+        "keeps user text and assistant text, and groups a turn",
+        "drops a thinking/tool-only assistant turn",
+        "accepts a plain-string content",
+        "ignores a truncated trailing line",
+        "returns an empty result for empty input",
+        "previews the last assistant turn",
+        "separates assistant text fragments across tool round-trips with a newline"
+      ]
+    },
+    "tests/unit/piRepository.test.ts": {
+      "suite": "pi repository",
+      "tests": [
+        "listProjects: reads cwd from each dir header and de-duplicates",
+        "listProjects: returns [] when the root has no dirs",
+        "listProjects: throws a typed error when the listing command fails",
+        "listSessions: maps find output to session metadata, newest first",
+        "readSession: prefers SFTP and falls back to tail on failure"
+      ]
+    },
+    "tests/unit/piResolveSessionRoot.test.ts": {
+      "suite": "resolveSessionRoot",
+      "tests": [
+        "returns the override when it exists as a directory",
+        "falls through to the next candidate when one is missing",
+        "does not accept a file in place of a directory",
+        "returns null when nothing exists"
+      ]
+    },
+    "tests/unit/piSessionRoot.test.ts": {
+      "suite": "candidateSessionRoots",
+      "tests": [
+        "puts the per-host override first",
+        "uses the env var second",
+        "falls back to the two home-relative defaults in order",
+        "ignores a blank override"
+      ]
+    },
+    "tests/unit/piTransport.test.ts": {
+      "suite": "createPiTransport",
+      "tests": [
+        "forwards exec verbatim",
+        "decodes an sftpRead base64 payload as UTF-8 text",
+        "decodes multi-byte UTF-8 across the base64 boundary"
+      ]
+    },
+    "tests/unit/projectsStore.test.ts": {
+      "suite": "projects store",
+      "tests": [
+        "loads the discovered projects",
+        "reports no-root when the probe finds nothing",
+        "reports error, not an empty list, when discovery fails",
+        "filters by path and name case-insensitively",
+        "lists an added project before it has any session",
+        "lists the projects against the resolved root, not a fixed one",
+        "merges the added projects behind the discovered ones, de-duped by path",
+        "lists the added projects even when the probe finds no root",
+        "degrades to an empty added list when the added load fails",
+        "reports the missing seam as an error, not a throw",
+        "persists the added list after a successful load",
+        "never persists after a rejected added load, so a fresh list cannot erase the stored one",
+        "does not discover twice when discover() is re-entered",
+        "resolves a suppressed discover() with false only after the in-flight run finishes",
+        "selects a project for the sessions tab",
+        "opens the directory browser at $HOME",
+        "enters a directory and moves up one, clamped at the browser root",
+        "records a browse listing failure as browse.error, not a throw",
+        "adds the browsed directory and closes the browser"
+      ]
+    },
+    "tests/unit/sessionsStore.test.ts": {
+      "suite": "sessions store",
+      "tests": [
+        "loads a project session list",
+        "opens a session into turns",
+        "reports error instead of an empty list when the read fails",
+        "closeChat clears the open session and its path",
+        "refresh re-reads the open session by its path",
+        "refresh does nothing without a project and no open chat",
+        "does not start a second load while one is in flight",
+        "keeps the previous chat intact when a re-read fails",
+        "host switch: drops a load result that resolves after the host changed",
+        "host switch: drops an open-session result that resolves after the host changed",
+        "host switch: starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim",
+        "host switch: joins a same-host same-project double load when a hostId dep is wired",
+        "host switch: does not re-join a run invalidated by a host switch, even when the host returns"
+      ]
+    },
+    "tests/unit/terminalScreenWiring.test.ts": {
+      "suite": "terminal screen",
+      "tests": [
+        "reuses TerminalViewport rather than a new emulator",
+        "attaches through the core host-CLI session command",
+        "drives the PTY through the shell-owned seam, not a controller"
+      ]
+    },
+    "tests/unit/terminalUtf8.test.ts": {
+      "suite": "phone terminal UTF-8 stream",
+      "tests": [
+        "reassembles a three-byte codepoint split across two PTY chunks",
+        "reassembles a four-byte codepoint split 2+2 across PTY chunks",
+        "keeps a multibyte character intact between ASCII chunks",
+        "drops a half-decoded codepoint when the stream resets for a new session"
+      ]
     }
   }
 }

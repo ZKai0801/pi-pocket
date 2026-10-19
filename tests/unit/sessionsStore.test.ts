@@ -5,7 +5,17 @@ import { createSessionsStore } from '../../src/stores/sessions';
 
 const session: ParsedPiSession = { version: 3, id: 'a', cwd: '/home/kai', name: null, turns: [{ role: 'user', text: 'hi', timestampMs: 1 }] };
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('sessions store', () => {
+  const meta = (id: string, updatedAtMs: number): PiSessionMeta => ({ path: `/r/${id}.jsonl`, id, name: id, updatedAtMs, preview: 'p', turnCount: 1 });
+
   it('loads a project session list', async () => {
     const store = createSessionsStore({ listSessions: vi.fn(async () => [{ path: '/r/a.jsonl', id: 'a', name: 'n', updatedAtMs: 1, preview: 'p', turnCount: 2 }]), readSession: vi.fn() } as never);
     await store.load({ path: '/home/kai', name: 'kai' });
@@ -93,20 +103,8 @@ describe('sessions store', () => {
     expect(store.open?.turns).toHaveLength(1);
     expect(store.openPath).toBe('/r/a.jsonl');
   });
-});
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-describe('sessions store — D8 host-switch races', () => {
-  const meta = (id: string, updatedAtMs: number): PiSessionMeta => ({ path: `/r/${id}.jsonl`, id, name: id, updatedAtMs, preview: 'p', turnCount: 1 });
-
-  it('drops a load result that resolves after the host changed', async () => {
+  it('host switch: drops a load result that resolves after the host changed', async () => {
     const list = deferred<PiSessionMeta[]>();
     const listSessions = vi.fn(() => list.promise);
     let host = 'A';
@@ -121,7 +119,7 @@ describe('sessions store — D8 host-switch races', () => {
     expect(store.lastProject).toBeNull();
   });
 
-  it('drops an open-session result that resolves after the host changed', async () => {
+  it('host switch: drops an open-session result that resolves after the host changed', async () => {
     const read = deferred<ParsedPiSession>();
     const readSession = vi.fn(() => read.promise);
     let host = 'A';
@@ -136,7 +134,7 @@ describe('sessions store — D8 host-switch races', () => {
     expect(store.state).not.toBe('ready');
   });
 
-  it('starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim', async () => {
+  it('host switch: starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim', async () => {
     const pendA = deferred<PiSessionMeta[]>();
     const pendB = deferred<PiSessionMeta[]>();
     const listSessions = vi.fn((project: PiProject) => (project.path === '/p/a' ? pendA.promise : pendB.promise));
@@ -161,7 +159,7 @@ describe('sessions store — D8 host-switch races', () => {
     expect(listSessions).toHaveBeenCalledTimes(2);
   });
 
-  it('joins a same-host same-project double load when a hostId dep is wired', async () => {
+  it('host switch: joins a same-host same-project double load when a hostId dep is wired', async () => {
     const pend = deferred<PiSessionMeta[]>();
     const listSessions = vi.fn(() => pend.promise);
     const store = createSessionsStore({ listSessions, readSession: vi.fn(), hostId: () => 'A' } as never);
@@ -175,7 +173,7 @@ describe('sessions store — D8 host-switch races', () => {
     expect(listSessions).toHaveBeenCalledTimes(1);
   });
 
-  it('does not re-join a run invalidated by a host switch, even when the host returns', async () => {
+  it('host switch: does not re-join a run invalidated by a host switch, even when the host returns', async () => {
     const pendStale = deferred<PiSessionMeta[]>();
     const pendFresh = deferred<PiSessionMeta[]>();
     let calls = 0;
