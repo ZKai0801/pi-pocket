@@ -189,6 +189,30 @@ completion and the new-conversation adoption are **unverifiable on this box** an
 belong to Plan 5's packaged acceptance. Tasks 1–4 are pure (unit tests over
 fakes); Tasks 5–6 are store/component tests.
 
+### R19 — Task 3 fix round (authoritative, resolved 2026-10-19)
+Task 3's `test -x` does **not** meet its own Review Focus 4: POSIX `test -x` is an
+`access(X_OK)` check, so it is true for a searchable **directory** and for a
+**zero-byte** file carrying the x bit. R18.4 "Task 3" is amended: every probe
+guards with `test -f <p> && test -x <p> && test -s <p>` (still never `test -d`).
+Test hardening the review proved is missing (each of these mutations currently
+leaves 13/13 green):
+(a) the resolver tests must give each probe a **distinct** response and assert
+`calls[0]` is the override probe — deleting the override probe push keeps the
+suite green today, so override preference is unproven;
+(b) a probe that exits nonzero **with non-empty stdout** must count as a miss
+(removing `result.exitCode === 0` survives today) — plus an
+invalid-override-then-PATH-hit case;
+(c) the whitespace error is pinned by its own copy (`空格`/`参数`), not the generic
+regex;
+(d) the pinned builder strings in `piCommands.test.ts` follow the new guard.
+Deferred-unchanged spec behaviour (ledger): an override miss falls through to
+PATH/glob, so "empty = auto" and "set but invalid" are indistinguishable (unify in
+Task 5); a **relative** override is accepted even though Task 4 later runs `exec`
+after `cd '<project>'` (Task 5 normalises or rejects); the
+`ls -1 … | head -n1` glob pipeline is exposed to a remote `nullglob` (edge;
+spec-prescribed). Plan Step 4's "6 + 6" is stale — `piCommands.test.ts` was already
+6 before this task.
+
 ---
 
 ## Review Focus
