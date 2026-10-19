@@ -1445,6 +1445,49 @@ exactly **one flat top-level `describe`** (R14.5) and is registered in
 `scripts/check-js-unit-results.py` reports no "unexpected files" / "test set
 differs".
 
+**R17 — the tests must pin the wiring, not just the lemmas.** The Task 11 review
+confirmed all eight implementations by neutralise/restore, but found that several
+tests only exercise an extracted module: mutating the **call sites** in
+`src/phone/PhoneApp.vue` and `src/components/**` left the suite green, so the very
+regressions the whole-branch review caught could return undetected. Therefore:
+
+- The `@capacitor/app` registration must be driven through a seam that takes an
+  injectable plugin/listener source (extend `src/phone/backNavigation.ts`, as
+  `src/phone/appStateLifecycle.ts` already does), so a test supplies a **fake
+  listener** and asserts: a Back press pops the active tab only; at root it does
+  not exit; an `appStateChange(false)` enters grace with
+  `sharedSettings.backgroundGraceMs`, and `appStateChange(true)` calls
+  `returnToForeground({ reconnect: sharedSettings.reconnectOnReturn })`.
+- The shell's controller→store forwarding is pinned by a test on the binding plus
+  a source assertion that `PhoneApp.vue` calls it and that the 连接 dot and the
+  `ProjectsList` guard read the reconciled status.
+- Items 4, 5, 7 and 8 must assert observable results through the component/store
+  path (the resulting host list, the re-probe, the editor preload, the refused
+  switch leaving the connection intact), not `.vue?raw` string presence or direct
+  module calls alone. A source assertion is acceptable **in addition to** the
+  behavioural test, never instead of it.
+
+**R17 code fixes (found by the review):**
+- Race: if `PhoneApp` unmounts before the `backButton` `addListener` promise
+  resolves, the listener leaks and `backNavigation()` then throws — handle it as
+  `installAppStateLifecycle` already does.
+- `handleHomeBack` treats `snapshot !== null` as "has a connection"
+  (`PhoneApp.vue:81`), so a failed dial (`phase: 'error'`) makes Back a no-op;
+  gate on the live phase/status instead.
+- Back must first close the topmost overlay/sheet (the Projects directory sheet
+  `ProjectsList.vue:223`, the terminal overlay `PhoneApp.vue:551`), then pop the
+  tab stack, then the home behaviour.
+- The switch confirm gates on `state.activeName !== null`
+  (`connections.ts:145-148`) while a `lost` snapshot leaves `activeName` set, so
+  after a dropped connection tapping another host warns about closing nothing —
+  gate on a live connection status/phase and reconcile `activeName` on `lost`.
+  Tapping a dropped-but-tracked host should reconnect, not `disconnect()`
+  (`ConnectionsList.vue:65`).
+- Bump `openToken` on a project switch so an in-flight `openSession()` from the
+  previous project cannot write `open` afterwards (`sessions.ts:140-145,214-222`)
+  — the same guard `hostChanged()` uses.
+- Fix the inaccurate comment at `src/pi/lastSessionRoot.ts:62`.
+
 **Not verifiable here (Plan 5):** hardware Back on a device, real background
 grace, and the packaged/browser lanes; the required `web-and-android` job must be
 re-checked on CI.
