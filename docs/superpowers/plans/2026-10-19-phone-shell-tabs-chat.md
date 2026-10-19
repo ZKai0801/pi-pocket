@@ -1186,39 +1186,104 @@ git commit -m "feat(terminal): retain the terminal as a secondary screen"
 
 ---
 
-### Task 10: Delete the unused screens and reconcile the test gate
+### Task 10a: Reconcile the unit-test gate (no deletions)
 
-**Files:**
-- Delete: `src/App.vue` (superseded by `src/phone/PhoneApp.vue`), the 19 unused
-  `src/components/*` files listed in spec §6.3, `src/vault/*`, `src/sync/*`,
-  `src/platform/android/{sync,googleSync,gatewayPairing}.ts`,
-  `src/native/{documentContent,googleSync,gatewayPairing,speechRecognition,vaultNative}.ts`,
-  `src/session/{dictation*,inlineDictation,documentTransfers,files}.ts`,
-  `src/stores/{hostSnippets,composerDrafts,appSettings}.ts`, `src/diagnostics.ts`,
-  plus every `tests/unit/*.test.ts` that imports one of them.
-- **`src/migration/*` is NOT wholesale-deletable (found in Task 5 verification).**
-  `src/platform/android/hostStore.ts` (live, Task 1) and `.../hosts.ts` import
-  `@/migration/legacySshTarget` + `installedDataMigration`, and
-  `src/platform/androidDiagnostics.ts:10` (reached from `src/main.ts` via
-  `androidPlatformServices`) imports `../migration/installedDataMigration`.
-  Delete only the migration modules with no live importer, and re-verify with a
-  repo-wide grep before removing the directory.
-- **Task 5 review nits to fold in here (non-blocking, all pre-agreed):** drop the
-  now-unused `DevToolbarApi.seedHosts` field and its `install.ts` pass-through
-  (the legacy toolbar `Host` button went with Task 5); register
-  `tests/unit/terminalUtf8.test.ts`, `tests/unit/phoneShellSingleEntry.test.ts`
-  and the other new Task 5–9 tests in the manifest; fix
-  `docs/browser-dev-mode.md`'s "no session-list screen yet" wording
-  (`SessionList.vue` does render, just empty without project discovery).
-- **Moved here from Task 5 (Ruling R13.1):** `src/sharedApp/**`,
-  `src/shellSelection.ts`, `src/legacyMain.ts`,
-  `src/platform/android/androidApi.ts`, `src/platform/android/connectionHub.ts`,
-  plus every `tests/unit/*.test.ts` that imports one of them
-  (`androidAccountPicker`, `androidAccountHostAdversarial`, `androidGatewayMarker`,
-  `androidHostKeys`, `sharedAppShell`, `releaseChrome`, `androidVaultConnect`,
-  `androidSync`, `androidSharedSyncSafety`, `androidPlatform`, `androidGatewayDial`,
-  `multiPtyHub`, `sharedRecoveryOwner` — the exact set is settled by preflight).
-- Modify: `scripts/js-unit-test-manifest.json`
+**Files:** Modify `scripts/js-unit-test-manifest.json` only.
+
+> **Ruling R14 (preflight) — Task 10 is split.**
+>
+> **R14.1 — Why.** The original Task 10 delete list names files that are LIVE and
+> misses files that must move with them; executing it as written breaks
+> `vue-tsc` (see R14.2). Reconciling the gate is a smaller, safe job that
+> unblocks the required check by itself, so it runs first and deletes nothing.
+>
+> **R14.2 — The corrected delete set (settled by the Task 10 import-graph
+> inventory; use it for Task 10b).**
+> - **Deletable (unreachable from `src/main.ts`'s live closure and unused by
+>   surviving dev-mode/scripts/fixtures):** `src/sharedApp/**`, `src/App.vue`,
+>   `src/legacyMain.ts`, `src/shellSelection.ts`,
+>   `src/platform/android/{androidApi,connectionHub,sync}.ts`,
+>   `src/native/{documentContent,googleSync,gatewayPairing,speechRecognition,vaultNative}.ts`,
+>   `src/vault/*`, `src/sync/androidSync.ts` (**NOT** `syncCrypto.ts`),
+>   `src/session/{dictationController,dictationNoSpeech,inlineDictation,documentTransfers,files}.ts`,
+>   `src/stores/{hostSnippets,composerDrafts}.ts`, the 19 non-live
+>   `src/components/*` files (spec §6.3),
+>   `src/platform/android/gatewayTarget.ts`.
+> - **NOT deletable — LIVE, the plan was wrong:** all of `src/migration/*`
+>   (`platform/android/hostStore.ts:16`, `hosts.ts:9-10`,
+>   `platform/androidDiagnostics.ts:10`), `src/stores/appSettings.ts`
+>   (`migration/installedDataMigration.ts:4`), `src/diagnostics.ts`
+>   (`native/durableStorage.ts:2`), `src/sync/syncCrypto.ts`
+>   (`src/dev/browser/googleSyncPlugin.ts` — browser dev mode, which the Task 5
+>   smoke needs — and `scripts/vault-journey-fixture/entry.ts`).
+> - **Companions that must move WITH the set** (they import delete targets;
+>   keeping them breaks typecheck): `src/session/platformInput.ts`,
+>   `src/sync/androidSync.ts`, `src/platform/android/gatewayTarget.ts`.
+> - **Survivor tests that hard-code deleted paths and must be edited:**
+>   `tests/unit/designTokens.test.ts:77`, `tests/unit/sharedControllersSource.test.ts:51`,
+>   `tests/unit/releaseChrome.test.ts:24` (+ its `App.vue` reads); retire
+>   `tests/scripts/js-first-rewrite-hotkeys-gate-test.sh` (wired at
+>   `.github/workflows/js-first-rewrite.yml:146` and `js-full-suite.yml:153`).
+> - **Out of scope here:** `src/destinationInventory.ts` is a stale 0.5.x→shared-app
+>   route map (`newRoute: 'settings'/'usage'/'ports'/'files'/'keys'`) for routes the
+>   phone shell does not have; its disposition belongs to Plan 5.
+> - Task 5 review nits folded in: drop the now-unused `DevToolbarApi.seedHosts`
+>   field + its `install.ts` pass-through; fix `docs/browser-dev-mode.md`'s
+>   "no session-list screen yet" wording (`SessionList.vue` does render, empty
+>   without project discovery).
+>
+> **R14.3 — Why the gate is red today.** `scripts/run-js-unit-gate.sh` runs the
+> whole configured Vitest suite and `scripts/check-js-unit-results.py` enforces
+> **exact set equality** between the report and the manifest ("unexpected files");
+> 15 on-disk tests are unregistered (all of Plan 1's and Plan 2's new tests), so
+> the gate has been red since Plan 1. Task 10a fixes exactly that.
+>
+> **R14.4 — Registration is the trigger, so titles must be exact.** The checker
+> also enforces per-file title-set and count equality, and rejects skipped or
+> failing tests. Register the real `it()` titles (take them from a vitest JSON
+> report, do not hand-type), and collapse any file with several top-level
+> `describe`s under one, or the schema must be widened (collapsing is smaller).
+
+- [ ] **Step 1: Register every on-disk test the manifest is missing**
+
+The 15 unregistered survivors are Plan 1's (`piParseSession`, `piSessionRoot`,
+`piCommands`, `piRepository`) and Plan 2's (`hostStoreAuth`, `piResolveSessionRoot`,
+`piTransport`, `phoneTokens`, `phoneShellSingleEntry`, `connectionsStore`,
+`projectsStore`, `sessionsStore`, `chatMarkdown`, `terminalScreenWiring`,
+`terminalUtf8`). Add each as `testFiles["tests/unit/<name>.test.ts"] = { suite,
+tests: [<exact it() titles>] }`, matching the existing entry shape. Delete nothing:
+the manifest still has no entry for a file that exists.
+
+- [ ] **Step 2: Verify with a real local gate run**
+
+```bash
+npx vitest run --reporter=json --outputFile.json=build/test-results/js-unit/vitest-results.json
+python scripts/check-js-unit-results.py --report build/test-results/js-unit/vitest-results.json
+```
+
+Expected: the checker's errors contain **no "unexpected file"** complaint; its only
+remaining complaint may be the two known pre-existing red files
+(`devBrowserServer`, `sshKeySetup`), which are not this task's to fix. If a newly
+registered test fails or is skipped, stop and report it — do not delete the test
+to make the gate pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scripts/js-unit-test-manifest.json
+git commit -m "test(gate): register the plan 1 and plan 2 unit tests"
+```
+
+---
+
+### Task 10b: Delete the unused screens
+
+**Files (R14.2):**
+- Delete the deletable set + the companions above, plus every `tests/unit/*.test.ts`
+  that imports one of them (39 of the manifest's 72 entries become invalid).
+- Edit `tests/unit/designTokens.test.ts`, `tests/unit/sharedControllersSource.test.ts`,
+  `tests/unit/releaseChrome.test.ts`; retire `tests/scripts/js-first-rewrite-hotkeys-gate-test.sh`.
+- Modify `scripts/js-unit-test-manifest.json` (remove the entries whose file is gone).
 
 - [ ] **Step 1: Write the failing test**
 
