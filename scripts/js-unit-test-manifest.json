@@ -1028,6 +1028,17 @@
         "decodes multi-byte UTF-8 across the base64 boundary"
       ]
     },
+    "tests/unit/piTurnCommand.test.ts": {
+      "suite": "pi turn command",
+      "tests": [
+        "opens pi in the project directory on the session file",
+        "opens a new conversation when no session file is given",
+        "quotes a project path containing a space as one shell argument",
+        "keeps quotes, dollars and backticks in the path and command as data",
+        "rejects a pi command containing a newline",
+        "collapses a multi-line message into one line"
+      ]
+    },
     "tests/unit/projectsStore.test.ts": {
       "suite": "projects store",
       "tests": [
