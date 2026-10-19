@@ -976,7 +976,8 @@
         "commands: lists session dirs under the root",
         "commands: reads the first header line of any session file in a dir",
         "commands: lists session files newest first with mtime",
-        "commands: tails a session file with a byte cap"
+        "commands: tails a session file with a byte cap",
+        "commands: probes the override, PATH and node glob for an executable"
       ]
     },
     "tests/unit/piParseSession.test.ts": {
@@ -1000,6 +1001,17 @@
         "listProjects: throws a typed error when the listing command fails",
         "listSessions: maps find output to session metadata, newest first",
         "readSession: prefers SFTP and falls back to tail on failure"
+      ]
+    },
+    "tests/unit/piResolveCommand.test.ts": {
+      "suite": "resolvePiCommand",
+      "tests": [
+        "prefers a working per-host override",
+        "accepts an override only when it is executable",
+        "falls back to command -v pi",
+        "falls back to the node bin glob when pi is not on PATH",
+        "fails with an actionable error when nothing is found",
+        "rejects an override containing whitespace without probing"
       ]
     },
     "tests/unit/piResolveSessionRoot.test.ts": {

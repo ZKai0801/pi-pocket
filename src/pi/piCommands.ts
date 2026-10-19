@@ -26,3 +26,16 @@ export function readSessionTailCommand(path: string, maxBytes: number): string {
 export function resolveSessionRootCommand(root: string): string {
   return `test -d ${quoteShell(root)} && echo yes`;
 }
+
+export function piOverrideProbeCommand(override: string): string {
+  const command = quoteShell(override);
+  return `test -x ${command} && printf '%s\\n' ${command}`;
+}
+
+export function piPathProbeCommand(): string {
+  return `p=$(command -v pi) && test -x "$p" && printf '%s\\n' "$p"`;
+}
+
+export function piNodeGlobProbeCommand(): string {
+  return `p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -x "$p" && printf '%s\\n' "$p"`;
+}

@@ -3,6 +3,9 @@ import {
   encodePiCwd,
   listSessionDirsCommand,
   listSessionFilesCommand,
+  piNodeGlobProbeCommand,
+  piOverrideProbeCommand,
+  piPathProbeCommand,
   quoteShell,
   readProjectCwdCommand,
   readSessionTailCommand,
@@ -33,5 +36,14 @@ describe('pi commands', () => {
   });
   it('commands: tails a session file with a byte cap', () => {
     expect(readSessionTailCommand('/r/a.jsonl', 4096)).toBe("tail -c 4096 -- '/r/a.jsonl' 2>/dev/null");
+  });
+
+  it('commands: probes the override, PATH and node glob for an executable', () => {
+    expect(piOverrideProbeCommand('/opt/bin/pi'))
+      .toBe("test -x '/opt/bin/pi' && printf '%s\\n' '/opt/bin/pi'");
+    expect(piPathProbeCommand())
+      .toBe("p=$(command -v pi) && test -x \"$p\" && printf '%s\\n' \"$p\"");
+    expect(piNodeGlobProbeCommand())
+      .toBe("p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -x \"$p\" && printf '%s\\n' \"$p\"");
   });
 });
