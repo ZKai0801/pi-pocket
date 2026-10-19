@@ -1278,6 +1278,29 @@ git commit -m "test(gate): register the plan 1 and plan 2 unit tests"
 
 ### Task 10b: Delete the unused screens
 
+> **DEFERRED (R15, user decision 2026-10-19).** Not executed in this run. The
+> verified inventory is frozen in
+> `.superpowers/sdd/2026-10-19-phone-shell-tabs-chat/task-10b-preflight.md`
+> (53-file delete set, 40 manifest entries to remove → 47, 6 survivor-test edits,
+> hotkeys-gate retirement, and the KEEP list: `src/env.d.ts`,
+> `src/destinationInventory.ts`, `src/pi/index.ts`,
+> `src/credentials/authorizedKeys.ts` — plus `src/session/appLifecycle.ts` and
+> `src/session/homeSurface.ts`, which the preflight mis-filed as orphans but the
+> spec keeps for background grace (§6.2, spec:112) and root Back behaviour
+> (§8.1, spec:221); Task 11 wires both, so neither is ever deletable). It was
+> deferred because the deletions
+> break the required `web-and-android` job: that job runs
+> `scripts/ci-js-first-packaged-lanes.sh` and fails closed unless all ten
+> packaged lanes report, and every lane drives a screen this task deletes.
+> Retiring/rewiring those lanes is its own task and belongs with Plan 5's
+> Android-acceptance scope, so the tree keeps the dead screens until then.
+> Two corrections to the text below, from the preflight: `src/migration/**` and
+> `src/sync/syncCrypto.ts` are LIVE and must NOT be deleted (`src/sync/androidSync.ts`
+> only), and the manifest figure is 40 of 87 (not 39 of 72). If this task is
+> revived, follow the preflight report over the sample code below. Note also that
+> a wrapper `describe` does not satisfy the manifest — a unit-test file needs
+> exactly one FLAT top-level describe (R14.5).
+
 **Files (R14.2):**
 - Delete the deletable set + the companions above, plus every `tests/unit/*.test.ts`
   that imports one of them (39 of the manifest's 72 entries become invalid).
@@ -1342,6 +1365,89 @@ Expected: exit 0 — manifest and results agree.
 git add -A
 git commit -m "chore(cleanup): delete the unused screens and reconcile the unit gate"
 ```
+
+---
+
+### Task 11: Close the Plan 2 spec gaps (R16)
+
+The Plan 2 whole-branch review (`d5519a7..19fbf3e`) came back **CHANGES
+REQUESTED**: 1 Blocker + 4 IMPORTANT + 3 Minor gaps in spec coverage that the
+per-task reviews missed because each task was reviewed narrowly. All eight are
+Plan 2 acceptance (§6.2, §8.1, §8.2, §9.1) and are fixed here. Tasks 1–10a are
+already landed at `19fbf3e`; do not re-open them.
+
+**Acceptance list (exact; each needs a unit test unless marked otherwise):**
+
+1. **[Blocker] Android Back and per-tab stacks — §8.1 (spec:217-221).** The live
+   shell has no Back wiring: `@capacitor/app`'s `backButton` listener exists only
+   in the dead `src/App.vue:1457` and `src/sharedApp/main.ts:52`, and the spec
+   keeps `src/session/homeSurface.ts` *for* the root Back behaviour (spec:221) yet
+   nothing imports it. Also `src/phone/PhoneApp.vue:443-448` swaps tabs with
+   `v-if`, so switching tabs discards each tab's local state — the spec says tabs
+   are peer roots that each keep their own nav stack.
+   Do: add a testable seam (e.g. `src/phone/backNavigation.ts`, shaped like the
+   existing `terminalPty`/`connectionPort` seams: an installable handler +
+   `installBackNavigation(handler|null)` that throws when uninstalled) driven from
+   `PhoneApp.vue` via `@capacitor/app`; pop the **active tab's** stack on Back and,
+   at root, apply the kept `homeSurface.ts` behaviour (do not kill the app, do not
+   exit on home); give each tab a keep-alive stack so Back can pop it and so
+   switching tabs preserves state. Tests: fake listener + fake stack → Back pops
+   the active tab, Back at root calls the home behaviour, and a tab switch keeps
+   the other tab's pushed state.
+2. **[IMPORTANT] Background grace / reconnect — §6.2 (spec:112).**
+   `src/session/appLifecycle.ts` (`createAppLifecycleHandler`,
+   `enterBackground`/`returnToForeground`) is kept by the spec but has no live
+   importer (`src/App.vue:55,1447-1451,1502-1508` were the only ones). Wire
+   `appStateChange` from `PhoneApp.vue` into `createAppLifecycleHandler` so
+   backgrounding enters grace and returning reconnects. Test with a fake
+   `appStateChange`.
+3. **[IMPORTANT] Connection status from controller snapshots — §8.2
+   (spec:231).** `src/stores/connections.ts:149-150` sets `status = 'connected'`
+   once the dial promise resolves, and `PhoneApp.vue:109-111` keeps the controller
+   snapshot locally without syncing the store — so a dropped or reconnecting
+   connection leaves a stale green dot and a stale `ProjectsList` connected guard.
+   Drive the store's per-host status from the controller snapshot subscription.
+   Test: a snapshot going non-connected flips the status and the guard.
+4. **[IMPORTANT] Confirm before switching hosts — §8.2 (spec:233).**
+   `src/components/connections/ConnectionsList.vue:57-60` calls
+   `store.connect()` directly and `src/stores/connections.ts:113-114` closes the
+   current connection immediately. Add the confirm (house style: an in-app
+   confirm surface, not `window.confirm`) before closing a live connection.
+   Test: refusing the confirm leaves the current connection intact.
+5. **[IMPORTANT] Actionable no-root state — §9.1 / Review Focus 3
+   (plan:62-63).** `src/components/projects/ProjectsList.vue:151-153` only tells
+   the user to go run an agent; the only place to set the Pi sessions directory is
+   `ConnectionEditor.vue:139-142` on the Connections tab. Make the state
+   actionable from the Projects tab (set/edit the per-host Pi sessions directory,
+   probing when blank). Test: the no-root state exposes the directory action and
+   persists the override.
+6. **[Minor] Clear the open chat on a project switch.**
+   `src/stores/sessions.ts:312-317` loads the new project without clearing `open`,
+   while `ChatScreen.vue:22` derives `terminalPath` from `lastProject` — leaving
+   project A's chat open with project B's terminal path. Test: switching projects
+   clears the open session.
+7. **[Minor] Renaming the live host must move `activeName`.**
+   `src/stores/connections.ts:68-70` saves a renamed host without updating
+   `activeName`, so `src/platform/android/hostStore.ts:142-147` keeps the new name
+   alongside the old record and the active row loses its connected state. Test:
+   renaming the active host keeps it active and drops the old row.
+8. **[Minor] Default the Pi sessions directory from the last successful connect —
+   §9.1 (spec:310-311).** `ConnectionEditor.vue:25` preloads only a saved
+   `piSessionsDir`; a blank value must offer the root probed on the host's last
+   successful connect. Test: after a successful connect that probed a root, the
+   editor preloads that root when nothing is saved.
+
+**Verify:** the eight new/edited tests pass; the full suite still shows only the
+two pre-existing Windows-environmental reds (`devBrowserServer` `.bin/vite`
+ENOENT, `sshKeySetup` ×3); `npx vue-tsc --noEmit` exit 0; any new test file has
+exactly **one flat top-level `describe`** (R14.5) and is registered in
+`scripts/js-unit-test-manifest.json` with titles taken from a fresh JSON report;
+`scripts/check-js-unit-results.py` reports no "unexpected files" / "test set
+differs".
+
+**Not verifiable here (Plan 5):** hardware Back on a device, real background
+grace, and the packaged/browser lanes; the required `web-and-android` job must be
+re-checked on CI.
 
 ---
 
