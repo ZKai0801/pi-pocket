@@ -1,0 +1,625 @@
+<script setup lang="ts">
+/**
+ * Projects (tab 2, spec §8.5): the Pi projects discovered on the live host.
+ * A search box filters by name or path, pull-to-refresh re-runs discovery,
+ * the + opens the directory browser for a project the agent has not touched
+ * yet (spec §9.1), and tapping a row selects it for the 会话 tab. With no
+ * live connection the list is a connect-first hint, not an empty list
+ * (spec §8.4).
+ */
+import { computed, onMounted, ref } from 'vue';
+import AppIcon from '@ui/components/AppIcon.vue';
+import { useConnectionsStore } from '../../stores/connections';
+import { useProjectsStore } from '../../stores/projects';
+
+const store = useProjectsStore();
+const connections = useConnectionsStore();
+
+const connected = computed(() => connections.status === 'connected');
+
+onMounted(() => { void store.discover(); });
+
+// Pull-to-refresh on the project list: a resisted stretch from the top edge
+// that re-runs discovery past half the cap.
+const scroller = ref<HTMLElement | null>(null);
+const pullDistance = ref(0);
+const refreshing = ref(false);
+let touchStartY = 0;
+let startedAtTop = false;
+let touching = false;
+
+const PULL_MAX_PX = 72;
+
+const showPull = computed(() => pullDistance.value > 0 || refreshing.value);
+const pullHeight = computed(() => (refreshing.value ? 24 : pullDistance.value));
+
+function onPullStart(event: TouchEvent): void {
+  const element = scroller.value;
+  const y = event.touches[0]?.clientY;
+  if (!element || y === undefined || refreshing.value) return;
+  touchStartY = y;
+  startedAtTop = element.scrollTop <= 0;
+  touching = true;
+}
+
+function onPullMove(event: TouchEvent): void {
+  if (!touching || !startedAtTop) return;
+  const y = event.touches[0]?.clientY;
+  if (y === undefined) return;
+  const delta = y - touchStartY;
+  // Half the finger travel, capped: the list resists being dragged down.
+  pullDistance.value = delta > 0 ? Math.min(PULL_MAX_PX, delta * 0.5) : 0;
+}
+
+function onPullEnd(): void {
+  if (!touching) return;
+  touching = false;
+  const release = pullDistance.value >= PULL_MAX_PX / 2;
+  pullDistance.value = 0;
+  if (release) void refresh();
+}
+
+async function refresh(): Promise<void> {
+  if (refreshing.value || !connected.value) return;
+  refreshing.value = true;
+  try {
+    await store.discover();
+  } finally {
+    refreshing.value = false;
+  }
+}
+
+function selectProject(path: string): void {
+  store.select(path);
+}
+
+function enterDirectory(path: string): void {
+  void store.browseEnter(path);
+}
+
+function addCurrentDirectory(): void {
+  const cwd = store.browse.cwd;
+  if (cwd !== null) store.addProject(cwd);
+}
+</script>
+
+<template>
+  <section class="projects">
+    <header class="projects__bar">
+      <h1 class="projects__title">项目</h1>
+      <button type="button" class="projects__add" aria-label="新增项目" @click="void store.openBrowse()">
+        <AppIcon name="plus" />
+      </button>
+    </header>
+
+    <div class="projects__search">
+      <AppIcon name="search" class="projects__search-icon" />
+      <input
+        v-model="store.query"
+        type="search"
+        class="projects__search-input"
+        placeholder="搜索项目"
+        aria-label="搜索项目"
+      />
+    </div>
+
+    <div
+      class="projects__scroller"
+      ref="scroller"
+      @touchstart.passive="onPullStart"
+      @touchmove.passive="onPullMove"
+      @touchend="onPullEnd"
+    >
+      <div v-if="showPull" class="projects__pull" :style="{ height: `${pullHeight}px` }">
+        <AppIcon
+          :name="refreshing ? 'refresh' : 'chevron-down'"
+          class="projects__pull-icon"
+          :class="{ 'projects__pull-icon--spinning': refreshing }"
+        />
+      </div>
+
+      <p v-if="store.state === 'loading'" class="projects__status">正在发现项目…</p>
+
+      <p v-else-if="!connected" class="projects__status" role="alert">
+        先连接一台主机，项目列表才会出现。
+      </p>
+
+      <p v-else-if="store.state === 'error'" class="projects__error" role="alert">{{ store.error }}</p>
+
+      <p v-else-if="store.state === 'no-root'" class="projects__status">
+        这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来。
+      </p>
+
+      <ul v-else-if="store.filtered.length > 0" class="projects__list">
+        <li
+          v-for="project in store.filtered"
+          :key="project.path"
+          class="projects__row"
+          :class="{ 'projects__row--selected': store.selected === project.path }"
+        >
+          <button
+            type="button"
+            class="projects__item"
+            :aria-pressed="store.selected === project.path"
+            @click="selectProject(project.path)"
+          >
+            <AppIcon name="folder" class="projects__folder" />
+            <span class="projects__text">
+              <span class="projects__name">{{ project.name }}</span>
+              <span class="projects__path">{{ project.path }}</span>
+            </span>
+          </button>
+        </li>
+      </ul>
+
+      <div v-else class="projects__empty">
+        <p class="projects__empty-text">{{ store.query ? '没有匹配的项目' : '还没有项目' }}</p>
+        <button v-if="store.query === ''" type="button" class="projects__empty-button" @click="void store.openBrowse()">
+          新增项目
+        </button>
+      </div>
+    </div>
+
+    <div v-if="store.browse.open" class="projects__sheet-scrim" @click.self="store.closeBrowse()">
+      <div class="projects__sheet" role="dialog" aria-label="新增项目">
+        <header class="projects__sheet-bar">
+          <h2 class="projects__sheet-title">新增项目</h2>
+          <button type="button" class="projects__sheet-close" aria-label="关闭" @click="store.closeBrowse()">
+            <AppIcon name="close" />
+          </button>
+        </header>
+
+        <p v-if="store.browse.cwd !== null" class="projects__sheet-cwd">{{ store.browse.cwd }}</p>
+
+        <p v-if="store.browse.busy" class="projects__sheet-status">正在加载…</p>
+
+        <p v-else-if="store.browse.error" class="projects__sheet-error" role="alert">{{ store.browse.error }}</p>
+
+        <ul v-else class="projects__sheet-list">
+          <li v-for="dir in store.browse.dirs ?? []" :key="dir.path" class="projects__sheet-row">
+            <button type="button" class="projects__sheet-item" @click="enterDirectory(dir.path)">
+              <AppIcon name="folder" class="projects__sheet-folder" />
+              <span class="projects__sheet-name">{{ dir.name }}</span>
+              <AppIcon name="chevron-right" class="projects__sheet-chevron" />
+            </button>
+          </li>
+          <li v-if="(store.browse.dirs ?? []).length === 0" class="projects__sheet-row">
+            <p class="projects__sheet-empty-text">这个目录没有子目录</p>
+          </li>
+        </ul>
+
+        <footer class="projects__sheet-footer">
+          <button
+            type="button"
+            class="projects__sheet-up"
+            :disabled="store.browse.cwd === null || store.browse.cwd === store.browse.root || store.browse.busy"
+            @click="void store.browseUp()"
+          >
+            <AppIcon name="arrow-up" /> 上级目录
+          </button>
+          <button
+            type="button"
+            class="projects__sheet-add"
+            :disabled="store.browse.cwd === null || store.browse.busy"
+            @click="addCurrentDirectory"
+          >
+            添加此目录
+          </button>
+        </footer>
+      </div>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.projects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  box-sizing: border-box;
+  height: 100%;
+  padding: var(--sp-3);
+}
+
+.projects__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.projects__title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-500);
+  font-weight: var(--fw-semibold);
+}
+
+.projects__add {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--accent);
+}
+
+.projects__add:focus-visible,
+.projects__item:focus-visible,
+.projects__empty-button:focus-visible,
+.projects__sheet-close:focus-visible,
+.projects__sheet-item:focus-visible,
+.projects__sheet-up:focus-visible,
+.projects__sheet-add:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.projects__search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 0 var(--sp-2);
+}
+
+.projects__search:focus-within {
+  border-color: var(--accent);
+}
+
+.projects__search-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+}
+
+.projects__search-input {
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: var(--fs-300) var(--font-ui);
+  outline: none;
+}
+
+.projects__search-input::placeholder {
+  color: var(--fg-muted);
+}
+
+.projects__scroller {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.projects__pull {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.projects__pull-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--fg-secondary);
+}
+
+.projects__pull-icon--spinning {
+  animation: projects-spin var(--dur-normal) linear infinite;
+}
+
+@keyframes projects-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.projects__status {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--fs-300);
+  line-height: 1.45;
+}
+
+.projects__error {
+  margin: 0;
+  border: 1px solid var(--error);
+  border-radius: var(--r-md);
+  background: var(--error-soft);
+  padding: var(--sp-2);
+  color: var(--error);
+  font-size: var(--fs-200);
+  line-height: 1.45;
+}
+
+.projects__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.projects__row {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.projects__row:last-child {
+  border-bottom: 0;
+}
+
+.projects__row--selected {
+  background: var(--accent-soft);
+}
+
+.projects__item {
+  display: flex;
+  width: 100%;
+  min-height: 56px;
+  align-items: center;
+  gap: var(--sp-3);
+  border: 0;
+  background: transparent;
+  padding: 0 var(--sp-3);
+  text-align: left;
+}
+
+.projects__item:active {
+  background: var(--state-hover);
+}
+
+.projects__folder {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.projects__text {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.projects__name {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: var(--fs-400);
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projects__path {
+  overflow: hidden;
+  color: var(--fg-secondary);
+  font: var(--fs-200) var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projects__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  padding: var(--sp-6) var(--sp-4);
+}
+
+.projects__empty-text {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--fs-300);
+}
+
+.projects__empty-button {
+  display: inline-flex;
+  min-width: 48px;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent);
+  padding: 0 var(--sp-5);
+  color: var(--on-accent);
+  font: var(--fw-semibold) var(--fs-300) / 1 var(--font-ui);
+}
+
+.projects__sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--scrim);
+}
+
+.projects__sheet {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  display: flex;
+  box-sizing: border-box;
+  max-height: 70vh;
+  flex-direction: column;
+  gap: var(--sp-2);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: var(--sp-3);
+  padding-bottom: calc(var(--android-shell-safe-bottom, var(--safe-area-inset-bottom, 0px)) + var(--sp-3));
+}
+
+.projects__sheet-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.projects__sheet-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-400);
+  font-weight: var(--fw-semibold);
+}
+
+.projects__sheet-close {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.projects__sheet-close:active {
+  background: var(--state-hover);
+}
+
+.projects__sheet-cwd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg-secondary);
+  font: var(--fs-200) var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projects__sheet-status {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--fs-200);
+}
+
+.projects__sheet-error {
+  margin: 0;
+  border: 1px solid var(--error);
+  border-radius: var(--r-md);
+  background: var(--error-soft);
+  padding: var(--sp-2);
+  color: var(--error);
+  font-size: var(--fs-200);
+  line-height: 1.45;
+}
+
+.projects__sheet-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.projects__sheet-item {
+  display: flex;
+  width: 100%;
+  min-height: 52px;
+  align-items: center;
+  gap: var(--sp-3);
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+  padding: 0 var(--sp-2);
+  text-align: left;
+}
+
+.projects__sheet-item:active {
+  background: var(--state-hover);
+}
+
+.projects__sheet-folder {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.projects__sheet-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--fg);
+  font-size: var(--fs-300);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projects__sheet-chevron {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+}
+
+.projects__sheet-empty-text {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--fs-300);
+  padding: var(--sp-4) var(--sp-2);
+}
+
+.projects__sheet-footer {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.projects__sheet-up {
+  display: inline-flex;
+  min-height: 48px;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--fg);
+  font: var(--fw-medium) var(--fs-300) var(--font-ui);
+}
+
+.projects__sheet-up:disabled {
+  opacity: var(--disabled-opacity);
+}
+
+.projects__sheet-add {
+  display: inline-flex;
+  min-height: 48px;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--on-accent);
+  font: var(--fw-semibold) var(--fs-300) var(--font-ui);
+}
+
+.projects__sheet-add:disabled {
+  opacity: var(--disabled-opacity);
+}
+</style>
