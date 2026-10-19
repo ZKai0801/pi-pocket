@@ -74,7 +74,7 @@ function vueFiles(dir: string): string[] {
 }
 
 function phoneStyleSources(): string[] {
-  return ['src/styles.css', 'src/App.vue', ...vueFiles('src/components')];
+  return ['src/styles.css', 'src/App.vue', ...vueFiles('src/components'), ...vueFiles('src/phone')];
 }
 
 /** Named colours used as a value of a colour-bearing declaration. */

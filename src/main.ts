@@ -1,13 +1,21 @@
-import { recordShellBoot, selectShell } from './shellSelection';
+import { createApp } from 'vue';
+import { createPinia } from 'pinia';
 import { bridgeWarmUp } from './native/bridgeReady';
 import { durableStorageOpenCalls, installAndroidDurableStorage, recordDurableStorageStatus } from './native/durableStorage';
+import { applySharedUiDefaults } from './sharedUiDefaults';
+import { installAndroidPlatformServices } from './platform/androidPlatformServices';
+import '@ui/styles.css';
+import '@xterm/xterm/css/xterm.css';
+import './styles.css';
 
 /**
- * The Android entry: bridge warm-up (#3000), then the bounded durable-storage
- * hydrate (#2993), then the shell choice (#2936) and its mount. The pre-#2936
- * phone screens are the default; the shared PocketShell app (core
- * packages/ui) is opt-in until parity (#2941). Each shell is a lazy chunk,
- * so neither's global CSS reaches the other and both read hydrated storage.
+ * The Android entry: bridge warm-up (#3000), the bounded durable-storage
+ * hydrate (#2993), then the one phone shell (#2936, D42).
+ *
+ * `PhoneApp.vue` (and the stores it imports) is a lazy chunk loaded only AFTER
+ * the install: those stores read saved data from `localStorage` at import
+ * time, so they must see the durable, hydrated storage rather than the raw
+ * WebView one.
  */
 async function boot(): Promise<void> {
   // The page's first native call must be the sacrificial bridge ping: after a
@@ -21,15 +29,13 @@ async function boot(): Promise<void> {
   // leaving a blank screen.
   recordDurableStorageStatus(document.documentElement, await installAndroidDurableStorage());
   document.documentElement.dataset.durableStorageOpenCalls = String(durableStorageOpenCalls());
-  const shell = selectShell(window.location.search, window.sessionStorage);
-  recordShellBoot(shell, window.sessionStorage);
-  if (shell === 'shared') {
-    const { mountSharedApp } = await import('./sharedApp/main');
-    mountSharedApp('#app');
-    return;
-  }
-  const { mountLegacyApp } = await import('./legacyMain');
-  mountLegacyApp('#app');
+
+  const { default: PhoneApp } = await import('./phone/PhoneApp.vue');
+  applySharedUiDefaults(document.documentElement);
+  const app = createApp(PhoneApp);
+  // Settings → Diagnostics/About/Update services and launch-time error capture (#2861).
+  installAndroidPlatformServices(app, window);
+  app.use(createPinia()).mount('#app');
 }
 
 void boot();

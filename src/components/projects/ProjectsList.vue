@@ -12,10 +12,13 @@ import AppIcon from '@ui/components/AppIcon.vue';
 import { useConnectionsStore } from '../../stores/connections';
 import { useProjectsStore } from '../../stores/projects';
 
+const emit = defineEmits<{ 'open-terminal': [path: string] }>();
+
 const store = useProjectsStore();
 const connections = useConnectionsStore();
 
 const connected = computed(() => connections.status === 'connected');
+const terminalPath = computed(() => store.selected);
 
 onMounted(() => { void store.discover(); });
 
@@ -81,15 +84,33 @@ function addCurrentDirectory(): void {
   const cwd = store.browse.cwd;
   if (cwd !== null) store.addProject(cwd);
 }
+
+function openTerminal(): void {
+  const path = terminalPath.value;
+  if (path !== null) emit('open-terminal', path);
+}
 </script>
 
 <template>
   <section class="projects">
     <header class="projects__bar">
       <h1 class="projects__title">项目</h1>
-      <button type="button" class="projects__add" aria-label="新增项目" @click="void store.openBrowse()">
-        <AppIcon name="plus" />
-      </button>
+      <div class="projects__actions">
+        <button
+          type="button"
+          class="projects__terminal"
+          aria-label="打开终端"
+          data-testid="projects-open-terminal"
+          :disabled="terminalPath === null"
+          @click="openTerminal"
+        >
+          <AppIcon name="terminal" />
+          <span class="projects__terminal-label">打开终端</span>
+        </button>
+        <button type="button" class="projects__add" aria-label="新增项目" @click="void store.openBrowse()">
+          <AppIcon name="plus" />
+        </button>
+      </div>
     </header>
 
     <div class="projects__search">
@@ -235,6 +256,38 @@ function addCurrentDirectory(): void {
   color: var(--fg);
   font-size: var(--fs-500);
   font-weight: var(--fw-semibold);
+}
+
+.projects__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.projects__terminal {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 0 var(--sp-3);
+  color: var(--accent);
+  font: var(--fw-medium) var(--fs-300) var(--font-ui);
+}
+
+.projects__terminal:disabled {
+  opacity: var(--disabled-opacity);
+}
+
+.projects__terminal-label {
+  white-space: nowrap;
+}
+
+.projects__terminal:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .projects__add {

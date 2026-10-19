@@ -261,17 +261,15 @@ describe('Android durable storage seam', () => {
   it('boots the app only after durable storage is installed, because stores read saved data at import time', () => {
     const main = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
     expect(main).not.toMatch(/^import\s[^;]*['"]\.\/App\.vue['"]/m);
-    // Both shells (#2936) are lazy chunks imported only after the install;
-    // neither may be imported statically, and the legacy chunk owns App.vue.
+    // One shell (#2936): the phone app is a lazy chunk imported only after the
+    // install, and neither removed tree may be reached from the entry again.
     expect(main).not.toMatch(/^import\s[^;]*['"]\.\/(legacyMain|sharedApp\/main)['"]/m);
+    expect(main).not.toContain('legacyMain');
+    expect(main).not.toContain('sharedApp');
     const install = main.indexOf('await installAndroidDurableStorage()');
-    const legacy = main.indexOf("await import('./legacyMain')");
-    const shared = main.indexOf("await import('./sharedApp/main')");
+    const phoneApp = main.indexOf("await import('./phone/PhoneApp.vue')");
     expect(install).toBeGreaterThan(-1);
-    expect(legacy).toBeGreaterThan(install);
-    expect(shared).toBeGreaterThan(install);
-    const legacyMain = readFileSync(new URL('../../src/legacyMain.ts', import.meta.url), 'utf8');
-    expect(legacyMain).toMatch(/^import App from '\.\/App\.vue';/m);
+    expect(phoneApp).toBeGreaterThan(install);
   });
 
   it('finds no property-style localStorage writes that would bypass the durable path in this app or the shared core/ui', () => {

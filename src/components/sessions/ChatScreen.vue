@@ -14,7 +14,17 @@ import ChatBubble from './ChatBubble.vue';
 
 const store = useSessionsStore();
 
+const emit = defineEmits<{ 'open-terminal': [path: string] }>();
+
 const title = computed(() => store.open?.name ?? store.open?.id ?? '会话');
+
+/** The chat's own project: the folder whose terminal the header opens. */
+const terminalPath = computed(() => store.lastProject?.path ?? null);
+
+function openTerminal(): void {
+  const path = terminalPath.value;
+  if (path !== null) emit('open-terminal', path);
+}
 
 interface ChatRow {
   key: string;
@@ -126,6 +136,16 @@ function goBack(): void {
         <AppIcon name="arrow-left" />
       </button>
       <h1 class="chat__title">{{ title }}</h1>
+      <button
+        type="button"
+        class="chat__terminal"
+        aria-label="打开终端"
+        data-testid="chat-open-terminal"
+        :disabled="terminalPath === null"
+        @click="openTerminal"
+      >
+        <AppIcon name="terminal" />
+      </button>
     </header>
 
     <div
@@ -220,9 +240,31 @@ function goBack(): void {
 
 .chat__back:focus-visible,
 .chat__retry:focus-visible,
-.chat__send:focus-visible {
+.chat__send:focus-visible,
+.chat__terminal:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
+}
+
+.chat__terminal {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--accent);
+}
+
+.chat__terminal:active {
+  background: var(--state-hover);
+}
+
+.chat__terminal:disabled {
+  opacity: var(--disabled-opacity);
 }
 
 .chat__title {
