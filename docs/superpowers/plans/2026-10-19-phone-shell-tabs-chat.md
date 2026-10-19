@@ -801,6 +801,79 @@ git commit -m "feat(projects): discover, filter and add Pi projects"
 - Produces:
   - `useSessionsStore()` with `{ sessions: PiSessionMeta[]; open: ParsedPiSession | null; state: 'idle' | 'loading' | 'ready' | 'error'; error: string | null }`, actions `load(project)`, `openSession(path)`, `refresh()`.
   - `renderChatMarkdown(src: string): string` in `src/chat/markdown.ts`.
+- **Deviations from this plan's earlier text (ruling R11):** the interface above
+  holds for the factory; the wrapper and the views carry the rest.
+  1. Landed contracts (Plan 1): `PiSessionMeta` is exactly
+     `{ path; id; name: string | null; updatedAtMs; preview: string | null; turnCount }`
+     (`src/pi/piRepository.ts:24`), and `PiRepository.readSession(path)` already
+     returns `Promise<ParsedPiSession>` (sftpRead with an exec-tail fallback,
+     parsed in-repo; `piRepository.ts:126`). The wrapper's `readSession`
+     binding is therefore `repo.readSession(path)` with no further parsing.
+     Both bindings need a `PiRepository` constructed with the **resolved root**,
+     so the wrapper resolves the root per call, exactly like the Task 7 wrapper
+     (`src/stores/projects.ts:356-369`): `piLive().remoteContext()` + the active
+     host's `piSessionsDir` override + `resolveSessionRoot`; a `null` root or an
+     uninstalled seam surfaces as `state: 'error'`, never a throw. Re-probing the
+     root per call is acceptable for v1 (with the per-host override it is one
+     `test -d` exec).
+  2. Additions to the store state/actions (the Step 1 tests pin the core;
+     house-style additions get tests too): `openPath: string | null` (the open
+     session's file path — `ParsedPiSession` carries no path, and the chat's
+     pull-to-refresh re-reads it), `lastProject: PiProject | null`, a
+     `closeChat()` action (back navigation: clears `open`/`openPath`), and
+     `refresh()` semantics: re-read `openSession(openPath)` when a chat is open,
+     else `load(lastProject)`, else no-op. `load`/`openSession` are
+     re-entrancy-guarded; an `openSession` failure sets `state: 'error'` and
+     leaves the previous `open` intact.
+  3. Host switching (D8): the wrapper watches
+     `useConnectionsStore().activeName` and clears `sessions`, `open`,
+     `openPath`, `lastProject`, `error`, `state → 'idle'` — a stale host's list
+     or chat must never render. It also watches `useProjectsStore().selected`:
+     a non-null value `load`s `{ path: selected, name: basename(selected) }`
+     (the basename matches `PiRepository`'s `projectNameFromPath`); the Task 7
+     watch already clears `selected` on host switch.
+  4. Title (R4: the landed contract wins): the row title is `meta.name` (the Pi
+     `session_info` name) when non-null, else `meta.id`. The spec §8.5/§9.2
+     "first user text" title/fallback is not available on `PiSessionMeta` —
+     Plan 1's `listSessions` parses only a 64 KiB tail and its tests pin
+     `name` to the `session_info` value only — so it is recorded as a Plan 1
+     spec deviation, not a Task 8 defect. The chat screen title is
+     `open.name ?? open.id`. `meta.preview` already is the last assistant text
+     (120 chars, `sessionPreview`).
+  5. Navigation is store-driven: the chat screen shows while
+     `store.open !== null`; back calls `closeChat()`. The views are
+     self-contained for the Task 5 tab embed; the legacy `useNavigationStore`
+     route stack is not involved.
+  6. Markdown: `marked` is already a dependency (`^18.0.14`) — verify the
+     installed version's renderer/token API before overriding the `html` token
+     (emit nothing) and the `link` token (emit the anchor text as plain text,
+     no `<a>`, no href — spec §8.6 "links render as text", and Review Focus 5's
+     `javascript:` case cannot reach the output because no URL is emitted).
+     `DOMPurify.sanitize` allow-list: `p, br, strong, em, del, code, pre, ul,
+     ol, li, blockquote` (no `a`, no `img`). Fenced code comes out as
+     `<pre><code>` escaped by marked. Both bubble kinds render through
+     `renderChatMarkdown` (sanitized) so pasted code in user messages gets mono
+     blocks.
+  7. DOMPurify needs a DOM; the root app's vitest environment is `node`
+     (`vitest.config.ts:24`) with no jsdom installed. Extend the R3 install:
+     `npx pnpm@12.5.1 add dompurify` (dependencies), `npx pnpm@12.5.1 add -D
+     jsdom` (devDependencies; the vendor UI kit's per-file convention is a
+     `// @vitest-environment jsdom` comment on the test's first line),
+     `@types/dompurify` (devDependencies) only if `vue-tsc` reports the package
+     untyped. Commit `package.json` + `pnpm-lock.yaml` with the task.
+  8. Views: token-only, Chinese labels, 48 px tap targets, `AppIcon.vue`
+     glyphs only. `SessionList.vue`: no selected project → empty state
+     "先选择一个项目" (spec §8.5); selected project with zero sessions → an
+     empty state naming the project; row = title, one/two-line truncated
+     preview, relative time (a small pure `relativeTime` helper: 刚刚 / N 分钟 /
+     N 小时 / N 天 / date); the `+` control is present but inert (stubbed until
+     Plan 3). `ChatScreen.vue`: header (back `arrow-left`, title), scrolling
+     bubbles, timestamps as subtle separators, touch pull-to-refresh that
+     re-reads the open session (the Task 7 pattern), and the composer bar
+     present but disabled with a Chinese hint (placeholder
+     "消息发送将在后续版本提供") — no send path. `ChatBubble.vue`: user right on
+     `--accent`/`--on-accent`, assistant left on `--surface`/`--fg`, code in
+     `--font-mono`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -874,7 +947,7 @@ renderer's `html` token to emit nothing) and pass the result through
 `DOMPurify.sanitize` with an explicit allow-list; links render as text or are
 opened only on an explicit tap (Review Focus 5). Then `sessions.ts`
 (dependencies injected as with the other stores) and the three views:
-`SessionList.vue` (title from `name` else the first user turn, preview from
+`SessionList.vue` (title from `name` else `id` per R11.4, preview from
 `sessionPreview`, relative time, `+` to start a conversation — stubbed until
 Plan 3), `ChatScreen.vue` (scrolling bubble list, timestamps as subtle
 separators, pull-to-refresh re-reads), `ChatBubble.vue` (self right/green, other
@@ -884,7 +957,10 @@ with "sending arrives in the next plan" — Plan 3 enables it.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm exec vitest run tests/unit/sessionsStore.test.ts tests/unit/chatMarkdown.test.ts`
-Expected: PASS (7 tests).
+Expected: PASS (the 7 plan tests plus the R11 additions: `closeChat`,
+`refresh` re-reading the open session, `refresh` no-op without a project, the
+`load` re-entrancy guard, and an `openSession` failure keeping the previous
+chat). Still exactly one top-level `describe` per file.
 
 - [ ] **Step 5: Commit**
 
