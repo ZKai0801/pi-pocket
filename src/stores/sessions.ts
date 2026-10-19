@@ -10,9 +10,12 @@
  * `resolveSessionRoot`. An uninstalled seam or a `null` root rejects through
  * the dep and lands in `state: 'error'` — the store never throws.
  *
- * Host switching (D8): the wrapper watches the active connection and clears
- * everything, so a stale host's list or chat never renders. It also loads the
- * session list when the projects tab selects a project.
+ * Host switching (D8): every in-flight run is keyed to the host it was
+ * claimed on, and the host is re-read at write time — a run whose host
+ * changes under it (or that a newer claim supersedes) drops its writes, so a
+ * stale host's list or chat never renders. The wrapper's host-switch watch
+ * invalidates the in-flight runs (`hostChanged()`) and clears the state; it
+ * also loads the session list when the projects tab selects a project.
  *
  * Navigation is store-driven (R11.5): the chat shows while `open !== null`,
  * back calls `closeChat()`. The legacy navigation store is not involved.
@@ -41,19 +44,32 @@ export interface SessionsStoreState {
 }
 
 export interface SessionsStore extends SessionsStoreState {
-  /** Lists `project`'s sessions. Re-entrancy-guarded: a second call while one is in flight joins it. */
+  /** Lists `project`'s sessions. Joins the in-flight run only for the same host and project; otherwise claims fresh. */
   load(project: PiProject): Promise<void>;
-  /** Reads `path` into `open`. Re-entrancy-guarded; a failure leaves the previous `open` intact. */
+  /** Reads `path` into `open`. Joins the in-flight run only for the same host and path; a failure leaves the previous `open` intact. */
   openSession(path: string): Promise<void>;
   /** Re-reads the open session, or reloads the last project, or does nothing. */
   refresh(): Promise<void>;
   /** Back navigation: clears the open session and its path. */
   closeChat(): void;
+  /**
+   * Invalidates every in-flight run (D8): their results settle into dropped
+   * writes, and nothing may join them any more. The wrapper's host-switch
+   * watch calls this in addition to its state clear.
+   */
+  hostChanged(): void;
 }
 
 export interface SessionsStoreDeps {
   listSessions(project: PiProject): Promise<PiSessionMeta[]>;
   readSession(path: string): Promise<ParsedPiSession>;
+  /**
+   * The active host's name, read at claim time and again at write time (D8):
+   * a run captured on one host must not write under another. Defaults to
+   * `() => null`, which keeps host-agnostic callers (and the host-less tests)
+   * behaving exactly as before.
+   */
+  hostId?: () => string | null;
 }
 
 function errorMessage(error: unknown): string {
@@ -93,54 +109,100 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     error: null,
   });
 
-  let loadInFlight: Promise<void> | null = null;
-  let openInFlight: Promise<void> | null = null;
+  // The active host, re-read at write time (D8): a run captured on one host
+  // must not write its result under another.
+  const hostId = deps.hostId ?? (() => null);
 
-  // Re-entrancy guard (R11.2): a second `load` while one is in flight joins
-  // the in-flight run instead of starting a second `listSessions`. Claimed
-  // synchronously; released on every exit path.
+  // Host-keyed re-entrancy (D8, the sessions-side twin of the R10 contract in
+  // `projects.ts`): each in-flight run is a claim carrying a monotonically
+  // increasing token, the host it was claimed on, and its target. A caller
+  // joins the in-flight run only when the context matches (same host, same
+  // target); otherwise it claims fresh, and the superseded run's writes are
+  // dropped at settlement. One token counter per op family.
+  let loadToken = 0;
+  let openToken = 0;
+  let loadInFlight: { token: number; host: string | null; project: PiProject; promise: Promise<void> } | null = null;
+  let openInFlight: { token: number; host: string | null; path: string; promise: Promise<void> } | null = null;
+
+  // Claimed synchronously; the in-flight slot holds only the newest claim —
+  // `hostChanged` bumps the tokens AND clears the slots, so a run invalidated
+  // this way can never be joined (even if its context matches again).
   function load(project: PiProject): Promise<void> {
-    if (loadInFlight) return loadInFlight;
-    state.lastProject = project;
-    loadInFlight = (async () => {
-      state.state = 'loading';
-      state.error = null;
-      try {
-        state.sessions = await deps.listSessions(project);
-        state.state = 'ready';
-      } catch (error) {
-        // A failed list is an error, never an empty list masquerading as
-        // "no sessions".
-        state.sessions = [];
-        state.state = 'error';
-        state.error = errorMessage(error);
-      } finally {
-        loadInFlight = null;
-      }
-    })();
-    return loadInFlight;
+    const host = hostId();
+    if (
+      loadInFlight !== null &&
+      loadInFlight.host === host &&
+      loadInFlight.project.path === project.path
+    ) {
+      return loadInFlight.promise;
+    }
+    const token = ++loadToken;
+    loadInFlight = {
+      token,
+      host,
+      project,
+      promise: (async () => {
+        state.state = 'loading';
+        state.error = null;
+        try {
+          const sessions = await deps.listSessions(project);
+          // A newer claim or a host switch made this run stale: drop the
+          // write instead of painting a foreign host's or project's list.
+          if (loadToken !== token || hostId() !== host) return;
+          state.lastProject = project;
+          state.sessions = sessions;
+          state.state = 'ready';
+        } catch (error) {
+          if (loadToken !== token || hostId() !== host) return;
+          // A failed list is an error, never an empty list masquerading as
+          // "no sessions". `lastProject` is written here too, so the list's
+          // 重试 button can reload the very project that failed.
+          state.lastProject = project;
+          state.sessions = [];
+          state.state = 'error';
+          state.error = errorMessage(error);
+        } finally {
+          // Only the newest claim may clear the slot: a stale run settling
+          // after a fresh claim must not wipe the fresh claim's slot.
+          if (loadToken === token) loadInFlight = null;
+        }
+      })(),
+    };
+    return loadInFlight.promise;
   }
 
-  // Same guard for reads; a failed open keeps the previous chat and path
-  // intact (R11.2) — only the state says the re-read failed.
+  // Same treatment for reads, keyed on { host, path }; a failed open keeps
+  // the previous chat and path intact (R11.2) — only the state says the
+  // re-read failed.
   function openSession(path: string): Promise<void> {
-    if (openInFlight) return openInFlight;
-    openInFlight = (async () => {
-      state.state = 'loading';
-      state.error = null;
-      try {
-        const session = await deps.readSession(path);
-        state.open = session;
-        state.openPath = path;
-        state.state = 'ready';
-      } catch (error) {
-        state.state = 'error';
-        state.error = errorMessage(error);
-      } finally {
-        openInFlight = null;
-      }
-    })();
-    return openInFlight;
+    const host = hostId();
+    if (openInFlight !== null && openInFlight.host === host && openInFlight.path === path) {
+      return openInFlight.promise;
+    }
+    const token = ++openToken;
+    openInFlight = {
+      token,
+      host,
+      path,
+      promise: (async () => {
+        state.state = 'loading';
+        state.error = null;
+        try {
+          const session = await deps.readSession(path);
+          if (openToken !== token || hostId() !== host) return;
+          state.open = session;
+          state.openPath = path;
+          state.state = 'ready';
+        } catch (error) {
+          if (openToken !== token || hostId() !== host) return;
+          state.state = 'error';
+          state.error = errorMessage(error);
+        } finally {
+          if (openToken === token) openInFlight = null;
+        }
+      })(),
+    };
+    return openInFlight.promise;
   }
 
   async function refresh(): Promise<void> {
@@ -156,6 +218,16 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   function closeChat(): void {
     state.open = null;
     state.openPath = null;
+  }
+
+  // D8: called by the wrapper's host-switch watch. Bumping the tokens makes
+  // every in-flight run's writes drop at settlement; clearing the slots
+  // forces the next claim to be fresh, so an invalidated run is never joined.
+  function hostChanged(): void {
+    loadToken += 1;
+    openToken += 1;
+    loadInFlight = null;
+    openInFlight = null;
   }
 
   return reactive({
@@ -175,6 +247,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     openSession,
     refresh,
     closeChat,
+    hostChanged,
   });
 }
 
@@ -210,14 +283,20 @@ export const useSessionsStore = defineStore('sessions', () => {
       const root = await resolveActiveSessionRoot();
       return new PiRepository(piLive().transport(), root).readSession(path);
     },
+    // D8: claims are keyed to the active host and re-checked at write time,
+    // so a run captured on one host cannot write under another.
+    hostId: () => useConnectionsStore().activeName,
   });
 
   // Host switch (D8): the previous host's list and chat are stale the moment
-  // the connection changes — clear them, never render them.
+  // the connection changes. Invalidate the in-flight runs first — their
+  // results must settle into dropped writes — then clear the state, which is
+  // what makes the UI immediately honest.
   const connections = useConnectionsStore();
   watch(
     () => connections.activeName,
     () => {
+      store.hostChanged();
       store.sessions = [];
       store.open = null;
       store.openPath = null;

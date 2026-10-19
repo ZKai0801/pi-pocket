@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { PiSessionMeta } from '../../src/pi/piRepository';
+import type { PiProject, PiSessionMeta } from '../../src/pi/piRepository';
+import type { ParsedPiSession } from '../../src/pi/types';
 import { createSessionsStore } from '../../src/stores/sessions';
 
-const session = { version: 3, id: 'a', cwd: '/home/kai', name: null, turns: [{ role: 'user', text: 'hi', timestampMs: 1 }] };
+const session: ParsedPiSession = { version: 3, id: 'a', cwd: '/home/kai', name: null, turns: [{ role: 'user', text: 'hi', timestampMs: 1 }] };
 
 describe('sessions store', () => {
   it('loads a project session list', async () => {
@@ -91,5 +92,112 @@ describe('sessions store', () => {
     expect(store.error).toContain('sftp failed');
     expect(store.open?.turns).toHaveLength(1);
     expect(store.openPath).toBe('/r/a.jsonl');
+  });
+});
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe('sessions store — D8 host-switch races', () => {
+  const meta = (id: string, updatedAtMs: number): PiSessionMeta => ({ path: `/r/${id}.jsonl`, id, name: id, updatedAtMs, preview: 'p', turnCount: 1 });
+
+  it('drops a load result that resolves after the host changed', async () => {
+    const list = deferred<PiSessionMeta[]>();
+    const listSessions = vi.fn(() => list.promise);
+    let host = 'A';
+    const store = createSessionsStore({ listSessions, readSession: vi.fn(), hostId: () => host } as never);
+    const first = store.load({ path: '/p/a', name: 'a' });
+    host = 'B';
+    store.hostChanged();
+    list.resolve([meta('a', 1)]);
+    await first;
+    expect(store.sessions).toHaveLength(0);
+    expect(store.state).not.toBe('ready');
+    expect(store.lastProject).toBeNull();
+  });
+
+  it('drops an open-session result that resolves after the host changed', async () => {
+    const read = deferred<ParsedPiSession>();
+    const readSession = vi.fn(() => read.promise);
+    let host = 'A';
+    const store = createSessionsStore({ listSessions: vi.fn(), readSession, hostId: () => host } as never);
+    const first = store.openSession('/r/a.jsonl');
+    host = 'B';
+    store.hostChanged();
+    read.resolve(session);
+    await first;
+    expect(store.open).toBeNull();
+    expect(store.openPath).toBeNull();
+    expect(store.state).not.toBe('ready');
+  });
+
+  it('starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim', async () => {
+    const pendA = deferred<PiSessionMeta[]>();
+    const pendB = deferred<PiSessionMeta[]>();
+    const listSessions = vi.fn((project: PiProject) => (project.path === '/p/a' ? pendA.promise : pendB.promise));
+    const store = createSessionsStore({ listSessions, readSession: vi.fn(), hostId: () => 'A' } as never);
+    const first = store.load({ path: '/p/a', name: 'a' });
+    const second = store.load({ path: '/p/b', name: 'b' });
+    // Not swallowed: P_B got its own listSessions.
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    // While P_B's run is still in flight, a third load of P_B joins it.
+    const third = store.load({ path: '/p/b', name: 'b' });
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    pendA.resolve([meta('a', 1)]);
+    await first;
+    // A's stale result is dropped; P_B's claim is still in flight.
+    expect(store.sessions).toHaveLength(0);
+    pendB.resolve([meta('b1', 2), meta('b2', 3)]);
+    await second;
+    await third;
+    expect(store.sessions).toHaveLength(2);
+    expect(store.lastProject?.path).toBe('/p/b');
+    expect(store.state).toBe('ready');
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('joins a same-host same-project double load when a hostId dep is wired', async () => {
+    const pend = deferred<PiSessionMeta[]>();
+    const listSessions = vi.fn(() => pend.promise);
+    const store = createSessionsStore({ listSessions, readSession: vi.fn(), hostId: () => 'A' } as never);
+    const first = store.load({ path: '/p/a', name: 'a' });
+    const second = store.load({ path: '/p/a', name: 'a' });
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    pend.resolve([]);
+    await first;
+    await second;
+    expect(store.state).toBe('ready');
+    expect(listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-join a run invalidated by a host switch, even when the host returns', async () => {
+    const pendStale = deferred<PiSessionMeta[]>();
+    const pendFresh = deferred<PiSessionMeta[]>();
+    let calls = 0;
+    const listSessions = vi.fn(() => {
+      calls += 1;
+      return calls === 1 ? pendStale.promise : pendFresh.promise;
+    });
+    let host = 'A';
+    const store = createSessionsStore({ listSessions, readSession: vi.fn(), hostId: () => host } as never);
+    const first = store.load({ path: '/p/a', name: 'a' });
+    host = 'B';
+    store.hostChanged();
+    host = 'A';
+    const second = store.load({ path: '/p/a', name: 'a' });
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    pendStale.resolve([meta('stale', 1)]);
+    await first;
+    expect(store.sessions).toHaveLength(0);
+    pendFresh.resolve([meta('fresh', 2)]);
+    await second;
+    expect(store.sessions).toHaveLength(1);
+    expect(store.sessions[0]?.id).toBe('fresh');
+    expect(store.state).toBe('ready');
   });
 });
