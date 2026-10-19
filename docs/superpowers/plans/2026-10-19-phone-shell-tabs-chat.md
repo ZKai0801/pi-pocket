@@ -1194,8 +1194,22 @@ git commit -m "feat(terminal): retain the terminal as a secondary screen"
   `src/platform/android/{sync,googleSync,gatewayPairing}.ts`,
   `src/native/{documentContent,googleSync,gatewayPairing,speechRecognition,vaultNative}.ts`,
   `src/session/{dictation*,inlineDictation,documentTransfers,files}.ts`,
-  `src/stores/{hostSnippets,composerDrafts,appSettings}.ts`, `src/migration/*`,
-  `src/diagnostics.ts`, plus every `tests/unit/*.test.ts` that imports one of them.
+  `src/stores/{hostSnippets,composerDrafts,appSettings}.ts`, `src/diagnostics.ts`,
+  plus every `tests/unit/*.test.ts` that imports one of them.
+- **`src/migration/*` is NOT wholesale-deletable (found in Task 5 verification).**
+  `src/platform/android/hostStore.ts` (live, Task 1) and `.../hosts.ts` import
+  `@/migration/legacySshTarget` + `installedDataMigration`, and
+  `src/platform/androidDiagnostics.ts:10` (reached from `src/main.ts` via
+  `androidPlatformServices`) imports `../migration/installedDataMigration`.
+  Delete only the migration modules with no live importer, and re-verify with a
+  repo-wide grep before removing the directory.
+- **Task 5 review nits to fold in here (non-blocking, all pre-agreed):** drop the
+  now-unused `DevToolbarApi.seedHosts` field and its `install.ts` pass-through
+  (the legacy toolbar `Host` button went with Task 5); register
+  `tests/unit/terminalUtf8.test.ts`, `tests/unit/phoneShellSingleEntry.test.ts`
+  and the other new Task 5–9 tests in the manifest; fix
+  `docs/browser-dev-mode.md`'s "no session-list screen yet" wording
+  (`SessionList.vue` does render, just empty without project discovery).
 - **Moved here from Task 5 (Ruling R13.1):** `src/sharedApp/**`,
   `src/shellSelection.ts`, `src/legacyMain.ts`,
   `src/platform/android/androidApi.ts`, `src/platform/android/connectionHub.ts`,
