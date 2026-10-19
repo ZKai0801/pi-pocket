@@ -29,13 +29,13 @@ export function resolveSessionRootCommand(root: string): string {
 
 export function piOverrideProbeCommand(override: string): string {
   const command = quoteShell(override);
-  return `test -x ${command} && printf '%s\\n' ${command}`;
+  return `test -f ${command} && test -x ${command} && test -s ${command} && printf '%s\\n' ${command}`;
 }
 
 export function piPathProbeCommand(): string {
-  return `p=$(command -v pi) && test -x "$p" && printf '%s\\n' "$p"`;
+  return `p=$(command -v pi) && test -f "$p" && test -x "$p" && test -s "$p" && printf '%s\\n' "$p"`;
 }
 
 export function piNodeGlobProbeCommand(): string {
-  return `p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -x "$p" && printf '%s\\n' "$p"`;
+  return `p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -f "$p" && test -x "$p" && test -s "$p" && printf '%s\\n' "$p"`;
 }

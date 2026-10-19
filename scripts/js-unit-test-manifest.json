@@ -1007,7 +1007,8 @@
       "suite": "resolvePiCommand",
       "tests": [
         "prefers a working per-host override",
-        "accepts an override only when it is executable",
+        "falls through a set-but-invalid override to a PATH hit",
+        "treats a nonzero exit with non-empty stdout as a miss",
         "falls back to command -v pi",
         "falls back to the node bin glob when pi is not on PATH",
         "fails with an actionable error when nothing is found",

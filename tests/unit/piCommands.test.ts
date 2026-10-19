@@ -40,10 +40,10 @@ describe('pi commands', () => {
 
   it('commands: probes the override, PATH and node glob for an executable', () => {
     expect(piOverrideProbeCommand('/opt/bin/pi'))
-      .toBe("test -x '/opt/bin/pi' && printf '%s\\n' '/opt/bin/pi'");
+      .toBe("test -f '/opt/bin/pi' && test -x '/opt/bin/pi' && test -s '/opt/bin/pi' && printf '%s\\n' '/opt/bin/pi'");
     expect(piPathProbeCommand())
-      .toBe("p=$(command -v pi) && test -x \"$p\" && printf '%s\\n' \"$p\"");
+      .toBe("p=$(command -v pi) && test -f \"$p\" && test -x \"$p\" && test -s \"$p\" && printf '%s\\n' \"$p\"");
     expect(piNodeGlobProbeCommand())
-      .toBe("p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -x \"$p\" && printf '%s\\n' \"$p\"");
+      .toBe("p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -f \"$p\" && test -x \"$p\" && test -s \"$p\" && printf '%s\\n' \"$p\"");
   });
 });
