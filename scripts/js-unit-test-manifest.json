@@ -1039,6 +1039,17 @@
         "collapses a multi-line message into one line"
       ]
     },
+    "tests/unit/turnReadiness.test.ts": {
+      "suite": "pi turn readiness",
+      "tests": [
+        "counts prompt markers in console text",
+        "is ready only after a prompt appears",
+        "collapses a redrawn prompt to a single prompt",
+        "tracks chunks across partial output",
+        "detects a prompt wrapped in SGR colour",
+        "bounds the retained text and keeps the tail"
+      ]
+    },
     "tests/unit/projectsStore.test.ts": {
       "suite": "projects store",
       "tests": [
