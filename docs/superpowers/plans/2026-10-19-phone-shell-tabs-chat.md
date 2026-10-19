@@ -412,17 +412,100 @@ git commit -m "feat(ui): phone token layer and the three-tab bottom bar"
 
 ---
 
-### Task 5: Collapse the two shells into one
+### Task 5: Mount the single phone shell
 
 **Files:**
 - Create: `src/phone/PhoneApp.vue`
-- Modify: `src/main.ts`, `capacitor.config.ts`, `android/app/src/main/java/com/pocketshell/app/MainActivity.java`
-- Delete: `src/sharedApp/**`, `src/shellSelection.ts`, `src/platform/android/androidApi.ts`, `src/platform/android/connectionHub.ts`
+- Modify: `src/main.ts`, `capacitor.config.ts`, `tests/unit/durableStorage.test.ts`,
+  `tests/unit/designTokens.test.ts`
+- Test: `tests/unit/phoneShellSingleEntry.test.ts`
+- **No deletions** — see Ruling R13.1.
 
 **Interfaces:**
-- Consumes: `AppTabBar.vue` (Task 4), the stores from Tasks 6–8.
+- Consumes: `AppTabBar.vue` (Task 4), the stores from Tasks 6–8, the seams
+  `installConnectionPort` (Task 6), `installPiLive` (Task 7), `installTerminalPty`
+  (Task 9), and `TerminalScreen.vue` (Task 9).
 - Produces: one root mounted by `src/main.ts`; `PhoneApp.vue` owns the active
-  tab and lays out the tab bar above the active tab's view.
+  tab, lays out the tab bar above the active tab's view, owns the live
+  connection, and hosts the terminal overlay.
+
+> **Ruling R13 (preflight):** the earlier text of this task said "collapse the two
+> shells into one" and deleted `src/sharedApp/**`, `src/shellSelection.ts`,
+> `src/platform/android/androidApi.ts` and `src/platform/android/connectionHub.ts`.
+> That is wrong for this task; it is split as follows.
+>
+> **R13.1 — Scope split with Task 10.** `tsconfig.json` includes `tests/**/*.ts`,
+> so `vue-tsc` typechecks tests: deleting a module breaks `pnpm typecheck` until
+> every test that imports it is deleted too. `src/sharedApp/**` (6 test files),
+> `androidApi.ts` (~9) and `connectionHub.ts` (3) account for ~15 dependent test
+> files between them. Doing that here would make this task unreviewable and would
+> duplicate Task 10's stated job (reconcile `scripts/js-unit-test-manifest.json`).
+> So **Task 5 deletes nothing** and Task 10's delete list grows by
+> `src/sharedApp/**`, `src/shellSelection.ts`, `src/legacyMain.ts`,
+> `src/platform/android/androidApi.ts`, `src/platform/android/connectionHub.ts`.
+> Task 5's job is the opposite: make the new shell the only *mount path*, leaving
+> the old trees on disk but unreferenced until Task 10 removes them.
+>
+> **R13.2 — Entry contract (`src/main.ts`).** Must keep the three static CSS
+> imports (`@ui/styles.css`, `@xterm/xterm/css/xterm.css`, `./styles.css` — the
+> sole definition site of `.app-shell` and the WeChat token layer), keep the
+> `bridgeWarmUp()` → `installAndroidDurableStorage()` order, and import+mount the
+> phone app **dynamically after** that install (the stores read `localStorage` at
+> import time; the old `legacyMain`/`sharedApp` dynamic import existed for exactly
+> this). It must still call `applySharedUiDefaults(document.documentElement)`,
+> create pinia, and call `installAndroidPlatformServices(app, window)` minus
+> whatever only served `androidApi`. No `selectShell`; no static `App.vue` or
+> `PhoneApp` import.
+>
+> **R13.3 — `capacitor.config.ts`.** Drop `appStartPath: '/?shell=shared'` so the
+> WebView loads `/`.
+>
+> **R13.4 — `MainActivity.java`: leave untouched.** There is no Java toolchain in
+> this environment (no JDK/ANDROID_HOME ⇒ unverifiable), and the stale
+> `?shell=shared` query is inert once `main.ts` ignores it. Removing `EXTRA_SHELL`
+> / the start-path override and the `SharedAppDockerJourney*` journeys is a
+> **Plan 5 carry-forward**.
+>
+> **R13.5 — `PhoneApp.vue` responsibilities.** This is where R12's carry-forwards
+> land:
+> - tab state + `AppTabBar` + the three tab views (`ConnectionsList`,
+>   `ProjectsList`, `SessionList`/`ChatScreen`);
+> - **owns the live connection**: constructs the repo-local
+>   `ConnectionController` (from `src/session/connectionController.ts`, bound to
+>   `sshCapability`) with a trust store built from the legacy
+>   `readStoredPin`/`pinStoreKey` helpers, then installs the three seams
+>   (`installConnectionPort`, `installPiLive`, `installTerminalPty`) and releases
+>   them on disconnect/unmount;
+> - **host-key trust prompt** (Task 6 gap: `ConnectionsList.vue` has none — the
+>   flow exists only in `App.vue` and `connectionHub.ts`): subscribe to
+>   `controller.getSnapshot()`, render the core `HostKeyTrustPrompt` when the
+>   phase is `awaiting-trust`, driven by `hostKeyCard(trustDecision, draft)`
+>   (`App.vue:343-345`), with handlers calling
+>   `controller.acceptPresentedHostKey({ passphrase, persist })`
+>   (`App.vue:946-996`); after an accept, re-dial through the connections store
+>   (the pin is now recorded). Port the bookkeeping from `App.vue`, do not
+>   reinvent it;
+> - **terminal overlay** (R12.1): mount `TerminalScreen.vue` over the shell and
+>   add the 打开终端 trigger to the project/session header — `ProjectsList.vue`
+>   and `ChatScreen.vue` emit `open-terminal` with the workspace path; `PhoneApp`
+>   maps that path to an aplexer session name by basename (v1; flagged for
+>   dogfood sign-off);
+> - the `.app-shell` root attributes and the safe-area /
+>   `--safe-area-inset-bottom` writers (`App.vue:1409-1419`) that the tab bar's
+>   `--android-shell-safe-bottom` fallback needs.
+>
+> **R13.6 — Test changes.** `phoneShellSingleEntry.test.ts` keeps tests 1–2 but
+> **drops test 3** ("the two removed shells are gone from disk") — deletions are
+> Task 10's, and asserting them here would fail while `src/sharedApp` still
+> exists. `tests/unit/durableStorage.test.ts:261-275` is rewritten from the
+> two-shell shape to the single-shell shape (dynamic `./phone/PhoneApp.vue`
+> imported after the durable-storage install). `tests/unit/designTokens.test.ts`
+> extends `phoneStyleSources()` to scan `src/phone/*.vue` so the new shell is
+> token-gated.
+>
+> **R13.7 — Carry-forwards:** Task 9's `resizeFailure`
+> no-feedback-loop minor; the seam-internal detach/attach race; and the
+> double-dial after a host-key accept (acceptable in v1, recorded for dogfood).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -443,10 +526,6 @@ describe('single shell', () => {
   it('capacitor starts on the phone app, not a shell query', () => {
     expect(read('../../capacitor.config.ts')).not.toContain('shell=shared');
   });
-  it('the two removed shells are gone from disk', () => {
-    expect(() => read('../../src/sharedApp/main.ts')).toThrow();
-    expect(() => read('../../src/platform/android/androidApi.ts')).toThrow();
-  });
 });
 ```
 
@@ -455,30 +534,30 @@ describe('single shell', () => {
 Run: `pnpm exec vitest run tests/unit/phoneShellSingleEntry.test.ts`
 Expected: FAIL — `main.ts` still branches on `selectShell`.
 
-- [ ] **Step 3: Implement the collapse**
+- [ ] **Step 3: Implement the mount**
 
-Delete the two shared-shell trees and `shellSelection.ts`. Rewrite `src/main.ts`
-to `bridgeWarmUp()` → `installAndroidDurableStorage()` → `createApp(PhoneApp)`
-with `createPinia()` and the existing platform-services install (keep
-`applySharedUiDefaults` and the `@ui/styles.css` + `xterm.css` + `./styles.css`
-imports). Remove the `server.appStartPath` shell query from
-`capacitor.config.ts`. In `MainActivity.java` drop the `EXTRA_SHELL` constants
-and the start-path override so the WebView loads `/`. Keep `installAndroidPlatformServices`
-minus the parts that only served `androidApi`.
+Rewrite `src/main.ts` per R13.2 to `bridgeWarmUp()` →
+`installAndroidDurableStorage()` → dynamic `import('./phone/PhoneApp.vue')` →
+`createApp` with `createPinia()`, `applySharedUiDefaults`, and the existing
+platform-services install (keep the three CSS imports; keep
+`installAndroidPlatformServices` minus the `androidApi`-only parts). Remove the
+`server.appStartPath` shell query from `capacitor.config.ts` (R13.3). Create
+`src/phone/PhoneApp.vue` per R13.5. **Do not delete any file** (R13.1);
+`MainActivity.java` is untouched (R13.4).
 
 - [ ] **Step 4: Run the test and the typecheck**
 
 Run: `pnpm exec vitest run tests/unit/phoneShellSingleEntry.test.ts`
-Expected: PASS (3 tests).
+Expected: PASS (2 tests).
 Run: `pnpm typecheck`
-Expected: exit 0 — every dangling import of a deleted module is resolved by the
-deletions in Tasks 5–9; do not paper over a failure by re-adding a module.
+Expected: exit 0 — the new shell imports only live modules; the old trees remain
+on disk but must now be unreferenced by `main.ts`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -A
-git commit -m "refactor(shell): one phone shell, shared-shell path removed"
+git commit -m "refactor(shell): mount the single phone shell"
 ```
 
 ---
@@ -1117,6 +1196,14 @@ git commit -m "feat(terminal): retain the terminal as a secondary screen"
   `src/session/{dictation*,inlineDictation,documentTransfers,files}.ts`,
   `src/stores/{hostSnippets,composerDrafts,appSettings}.ts`, `src/migration/*`,
   `src/diagnostics.ts`, plus every `tests/unit/*.test.ts` that imports one of them.
+- **Moved here from Task 5 (Ruling R13.1):** `src/sharedApp/**`,
+  `src/shellSelection.ts`, `src/legacyMain.ts`,
+  `src/platform/android/androidApi.ts`, `src/platform/android/connectionHub.ts`,
+  plus every `tests/unit/*.test.ts` that imports one of them
+  (`androidAccountPicker`, `androidAccountHostAdversarial`, `androidGatewayMarker`,
+  `androidHostKeys`, `sharedAppShell`, `releaseChrome`, `androidVaultConnect`,
+  `androidSync`, `androidSharedSyncSafety`, `androidPlatform`, `androidGatewayDial`,
+  `multiPtyHub`, `sharedRecoveryOwner` — the exact set is settled by preflight).
 - Modify: `scripts/js-unit-test-manifest.json`
 
 - [ ] **Step 1: Write the failing test**
@@ -1125,7 +1212,9 @@ git commit -m "feat(terminal): retain the terminal as a secondary screen"
 // tests/unit/shellCleanup.test.ts
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-const gone = ['src/sharedApp', 'src/vault', 'src/sync', 'src/migration',
+const gone = ['src/sharedApp', 'src/shellSelection.ts', 'src/legacyMain.ts',
+  'src/platform/android/androidApi.ts', 'src/platform/android/connectionHub.ts',
+  'src/vault', 'src/sync', 'src/migration',
   'src/components/MobileHotkeys.vue', 'src/components/FileWorkspaceScreen.vue'];
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
 
