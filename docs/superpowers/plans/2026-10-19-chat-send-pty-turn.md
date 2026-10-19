@@ -24,11 +24,13 @@ Node over a fake PTY and a fake filesystem. `resolvePiCommand` fixes the
 
 - **Pi is the only writer of the session file.** The app never appends a turn
   itself; it sends input and re-reads (spec §4, §9.4).
-- **No streaming and no polling loop in v1** (Q3/D6). The file is re-read once
-  the turn completes and on an explicit user refresh. Do not add `setInterval`.
-- **Never interpolate a raw message into a shell string.** The message is quoted
-  with Plan 1's `quoteShell`; a message containing `'`, `"`, `$(…)`, backticks or
-  newlines must survive verbatim (spec §9.4).
+- **No streaming in v1** (D6). The file is re-read once the turn completes and on
+  an explicit user refresh. Completion uses the bounded re-read poll of R18.2
+  step 4; do not add `setInterval` (recursive `setTimeout` only).
+- **The message is never interpolated into a shell string** (R18.2 step 3): it is
+  written to Pi's PTY as one line of terminal input, so nothing about its content
+  can be parsed by a shell. Only the `piCommand` *path* and the project directory
+  in the open command are shell-quoted, with `quoteShell`.
 - **`pi` is not on the non-interactive SSH `PATH`** on the target host. Resolve
   it explicitly — per-host `piCommand` → `command -v pi` → the NVM-style
   `/home/projects/softwares/node-*/bin/pi` glob → fail with an actionable error
@@ -38,6 +40,156 @@ Node over a fake PTY and a fake filesystem. `resolvePiCommand` fixes the
   silently queued (D8).
 - **A failed send must never lose the typed text** (spec §7.4).
 - **No new dependency.** This plan leans only on what Plan 2 added.
+
+## R18 — preflight corrections (authoritative, resolved 2026-10-19)
+
+A preflight against `ab05c07` found this plan names several symbols that do not
+exist and, more importantly, omits the production PTY a turn needs. **Where this
+section and the task text below disagree, this section wins.** The task bodies are
+still the checklist; R18 rewrites their *content*.
+
+### R18.1 Facts the plan got wrong
+- The host record is **`SavedHost`**, not `SavedHostV2`
+  (`src/platform/android/hostStore.ts:25-42`), and it **already has** `piCommand`
+  and `piSessionsDir` (`hostStore.ts:38-41`), persisted (`:139-140`), validated
+  (`:99-101`), edited (`src/components/connections/ConnectionEditor.vue:141-149`)
+  and pinned by `tests/unit/hostStoreAuth.test.ts:38-45`. Consume the field; do
+  not add it.
+- There is **no free `readSession`**. Only `PiRepository.readSession(path)`
+  (`src/pi/piRepository.ts:126-138`). Inject `(path) => Promise<ParsedPiSession>`.
+- `PiTransport` is a type in `src/pi/piRepository.ts:11-17`:
+  `exec(command, timeoutMs) → { stdout; stderr; exitCode: number | null }` and
+  `sftpRead(path, maxBytes) → string`.
+- `quoteShell` (`src/pi/piCommands.ts:1-3`) escapes **only** `'`; it does not
+  touch newlines, `$`, backticks or `"`. Task 1's original tests are therefore
+  unsatisfiable as written.
+- `src/pi/index.ts` is a **dead barrel** (no importer anywhere in `src/` or
+  `tests/`). Drop the "re-export from `src/pi/index.ts`" steps; import leaves
+  directly, as the rest of the tree does.
+- **§9.5 does not exist.** The new-conversation requirements are §8.5
+  (`spec:258-259`) plus §9.4's "Known risks" (`spec:403-407`).
+- Citations: the non-streaming rule is **D6** (`spec:450`) — `Q3` is password
+  auth (`spec:480`); one-turn-at-a-time is **D10** / §9.4:401 (`spec:454-456`) —
+  `D8` is the single live connection (`spec:452`).
+- Step-4 test counts are wrong: `piResolveCommand.test.ts` has 5 `it`s and
+  `sessionsStore.test.ts` has 13.
+
+### R18.2 The turn model — follow §9.4, not the task text
+§9.4 (`spec:367-401`) prescribes, and this plan now implements:
+1. Open **one** PTY per open chat, in the project `cwd`, running an
+   **interactive** `pi --session <path>` — one channel of the 8 (D10). **No
+   `exec` for a turn**: the Android exec path caps at 30 s/120 s
+   (`spec:382-386`), which is exactly why the spec rejects it.
+2. Wait for Pi to be **ready** (its first prompt) before writing anything.
+3. Write the message as **one line of terminal input** (reuse
+   `src/session/composerDelivery.ts`) — insert, then submit. Because this is PTY
+   input to `pi` and never a shell string, the message content cannot be
+   interpolated or injected; the only shell boundary is the `piCommand` path and
+   the directory in the open command (R18.3).
+4. Detect completion by **re-reading the session file** until a **new assistant
+   turn** appears, bounded by a timeout (spec §9.4 step 3). The `.jsonl` on disk
+   is the single source of truth (D10). A bounded completion poll is the spec's
+   mechanism and is not streaming.
+5. Keep the PTY for the next message in the same chat; close it on leave, and
+   tear it down on host switch/reconnect — an in-flight turn is **abandoned**, the
+   file keeps whatever Pi already wrote (D10).
+
+This replaces the plan's per-turn `pi --session <f> '<msg>'` argv command, its
+prompt-count-as-completion test, and `PI_PROMPT_MARKER`-based completion.
+
+### R18.3 The missing production PTY (the plan's biggest gap)
+`TurnPty` exists only as a test double — nothing in the tree can construct one.
+`TerminalPty` (`src/session/terminalPty.ts:12-23`) cannot host a turn: it attaches
+by aplexer session name, has a **single** `onData` slot shared with the terminal
+screen, and cannot run an arbitrary command. Add a phone-layer seam in the same
+style as `terminalPty.ts`:
+
+```ts
+// src/session/turnPty.ts
+export interface TurnPtyHandle {
+  onData(cb: (chunk: string) => void): () => void;      // returns unsubscribe
+  write(data: string): Promise<void>;
+  close(): Promise<void>;
+}
+export interface TurnPtyOpener {
+  open(command: string, geometry: { cols: number; rows: number }): Promise<TurnPtyHandle>;
+}
+export function installTurnPtyOpener(opener: TurnPtyOpener | null): void;
+export function turnPtyOpener(): TurnPtyOpener;   // throws when nothing installed
+```
+
+Implemented in `src/phone/PhoneApp.vue` over `sshCapability.openPty({ connectionId,
+generationId, requestId, command, cols, rows, term })` plus a `readPty` pump,
+`writePty` and `closePty` (`src/native/sshCapability.ts:161-164`,
+`vendor/pocketshell-core/src/sshCapability.ts:154-160,277-281`), reusing the
+existing `liveConnectionRef()` (`PhoneApp.vue:268-274`). `openPty` has **no cwd**,
+so the command must be `cd '<projectPath>' && exec <piCommand>` with both the path
+and the command quoted via `quoteShell`. Install it with the other seams on mount
+and release it on unmount; the runner closes its own handle on leave / host
+switch / reconnect.
+
+`src/session/composerDelivery.ts` is currently an orphan (its only caller is the
+legacy `PromptComposer.vue`). Reusing it here makes it live — so remove it from
+Task 10b's orphan list, alongside `appLifecycle.ts` and `homeSurface.ts`.
+
+### R18.4 Corrected per-task specs
+- **Task 1** → `src/pi/piTurn.ts` exports `buildPiOpenCommand(piCommand,
+  projectPath, sessionFile?)` (shell-safe: `quoteShell` the path and the command;
+  reject a `piCommand` containing a newline) and `toTurnLine(message)` (collapse
+  `\r`/`\n` runs to single spaces, trim — a multi-line message is delivered as one
+  line, document that). Tests: the *path* and *command* survive `'`, space, `$`,
+  backticks as data; a newline in `piCommand` is rejected; `toTurnLine` collapsing.
+  **Drop the message-quoting tests** — the message is never a shell string.
+- **Task 2** → rename to `src/pi/turnReadiness.ts`: the console tracker plus
+  `isPiReady(tracker)` (the first `›` after opening), keeping the ANSI/`\r`
+  cleaning, the bounded buffer, and the banner-counts-once rule (old RF2).
+  Completion is **not** here (R18.2 step 4).
+- **Task 3** → same intent (resolve the `pi` binary: per-host `piCommand` →
+  `command -v pi` → the node-glob, each an executable `test -x` check), but
+  `piCommand` already lives on `SavedHost`, the new builders go in
+  `piCommands.ts`, and the counts are 5 new tests (`piCommands.test.ts` grows).
+- **Task 4** → `PiTurnRunner` over `TurnPtyHandle` (R18.3) with an injected
+  `readSession(path)`: `send(sessionFile, message)` ensures a ready PTY for this
+  chat (opening it if needed), writes `toTurnLine(message)` through
+  `composerDelivery` framing, then polls `readSession` for a new assistant turn and
+  returns the parsed session (or a typed error); plus `isBusy()` and `dispose()`.
+  Every exit path clears busy and unsubscribes. Tests: write → poll → re-read,
+  busy refusal, write failure (text kept), timeout, poll that never completes,
+  dispose teardown.
+- **Task 5** → add `send`/`sending`/`sendError` to `SessionsStoreState`,
+  `SessionsStoreDeps` and the `useSessionsStore` re-export
+  (`src/stores/sessions.ts:334-345`), composing with the host-keyed D8 guards;
+  `send` refuses when no session is open. Create
+  `src/components/sessions/ChatComposer.vue` — the inline input at
+  `ChatScreen.vue:192-203` is a **disabled placeholder**, not a composer, so
+  replace it: multi-line text, send on tap, disabled while `sending`, spinner,
+  inline error, **text cleared only on `'sent'`** (spec §7.4). The existing
+  打开终端 emit (`ChatScreen.vue:21-27`) is the escape hatch. Count: 3 + 13.
+- **Task 6** → new conversation per §8.5/§9.4: open the turn PTY **interactively
+  with no `--session`** in the project dir, send the first message, then **adopt**
+  the created file by re-listing the project's session dir
+  (`listSessionFilesCommand`) and opening the newest — bounded wait, actionable
+  error if no new file appears. Undisable `SessionList.vue:44-46`'s `+` when a
+  project is selected. **Every Pi-CLI assumption here is UNVERIFIED until a
+  device run (Plan 5).**
+
+### R18.5 Gate obligations (all six new test files)
+`tsconfig.json:26` typechecks `tests/**`, and `scripts/check-js-unit-results.py`
+fails closed on "unexpected files" (`:132-140`) and on any file without exactly
+one flat top-level `describe` (`:52-60,118-130,149`). So each new test file must
+(1) have exactly one flat top-level `describe`, and (2) be registered in
+`scripts/js-unit-test-manifest.json` with titles taken from a fresh
+`vitest run --reporter=json` report, never hand-typed. `pnpm exec vitest run <file>`
+does **not** check this; only `scripts/run-js-unit-gate.sh` +
+`scripts/check-js-unit-results.py` do.
+
+### R18.6 Verification limits
+No device here: the real PTY round-trip, Pi's readiness prompt, the file-poll
+completion and the new-conversation adoption are **unverifiable on this box** and
+belong to Plan 5's packaged acceptance. Tasks 1–4 are pure (unit tests over
+fakes); Tasks 5–6 are store/component tests.
+
+---
 
 ## Review Focus
 
@@ -524,19 +676,55 @@ git commit -m "feat(chat): start a new conversation from a project"
 
 ---
 
+### Task 7: Register the Plan 3 tests and run the real gate
+
+**Files:**
+- Modify: `scripts/js-unit-test-manifest.json`
+- Verification only (no new test)
+
+- [ ] **Step 1: Register every new test file** (R18.5)
+
+For each file created by Tasks 1–6, add one manifest entry with exactly that
+file's single flat top-level `describe` as `suite` and its exact leaf `it` titles
+as `tests`, taken from a fresh
+`npx vitest run --reporter=json --outputFile.json=build/test-results/js-unit/vitest-results.json`
+report — never hand-typed.
+
+- [ ] **Step 2: Run the checker**
+
+`& C:\Python314\python.exe scripts/check-js-unit-results.py --report build/test-results/js-unit/vitest-results.json`
+Expected: no "unexpected files" and no "test set differs". The only permitted
+complaint is the pre-existing Windows-environmental red (`devBrowserServer`
+`.bin/vite` ENOENT / `sshKeySetup` ×3), which cannot run on this box.
+
+- [ ] **Step 3: Report**
+
+Report the manifest entry count before/after, the checker output, the full-suite
+counts, and `npx vue-tsc --noEmit` exit 0.
+
+---
+
 ## Self-Review
 
-- **Spec coverage:** §9.4 → Tasks 1, 3, 4; §9.5 → Task 6; §7.4 → Task 5; Q3/D6
-  (no streaming/polling) → Global Constraints and Task 4's timeout; D8 → Task 4's
-  busy guard.
-- **Review Focus:** RF1 → Task 1; RF2 → Task 2; RF3 → Task 5; RF4 → Task 3.
+- **Spec coverage:** §9.4 → Tasks 1, 3, 4 (and R18.2/R18.3 for the turn model and
+  the PTY); §8.5 + §9.4 "Known risks" → Task 6; §7.4 → Task 5; **D6** (no
+  streaming; in-chat pull-to-refresh only) → Global Constraints + Task 4's
+  completion poll; **D10** (phone-owned turn PTY, abandoned not resumed) →
+  R18.3 + Task 4; R18.5 → Task 7.
+- **Review Focus:** RF1 → Task 1 (now the *path/command* injection boundary, not
+  the message); RF2 → Task 2 (readiness counts the banner prompt once); RF3 →
+  Task 5 (a failed send keeps the typed text); RF4 → Task 3 (`test -x`, not
+  `test -d`).
 - **Interface consistency:** `PiTurnRunner` consumes Plan 2's `PiTransport` and
-  Plan 1's `readSession`/`ParsedPiSession`; `resolvePiCommand` reads the
-  `piCommand` field Task 1 of Plan 2 added to `SavedHostV2`.
+  **`PiRepository.readSession(path)`** (there is no free `readSession`) plus
+  `ParsedPiSession`; `resolvePiCommand` reads the `piCommand` field that already
+  exists on **`SavedHost`**.
 - **Deliberately out of scope:** streaming partial replies, a send queue, and
-  multi-session concurrency — all deferred by Q3/D8.
-- **Not verifiable here:** the actual PTY round-trip needs a device (Plan 5);
-  Tasks 1–4 are pure and Task 5/6 are covered by store tests.
+  multi-session concurrency — deferred by D6/D10.
+- **Not verifiable here:** the PTY round-trip, Pi's readiness prompt, the
+  completion poll against a real Pi, and the new-conversation adoption all need a
+  device (Plan 5). Tasks 1–4 are pure and unit-tested over fakes; Tasks 5–6 are
+  covered by store/component tests.
 
 ## Follow-on plans
 
