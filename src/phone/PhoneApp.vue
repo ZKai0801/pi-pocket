@@ -9,8 +9,10 @@
  * the terminal screen consume (`installConnectionPort`, `installPiLive`,
  * `installTerminalPty`) and takes them back on disconnect/unmount.
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
+import { useSettingsStore } from '@ui/app/stores/settings';
 import {
   type ConnectionSnapshot,
   type HostKeyTrustChoice,
@@ -26,6 +28,9 @@ import ChatScreen from '../components/sessions/ChatScreen.vue';
 import TerminalScreen from '../components/terminal/TerminalScreen.vue';
 import { ConnectionController } from '../session/connectionController';
 import { hostKeyAnswer, hostKeyCard, hostKeyRefusalMessage } from '../session/hostKeyCard';
+import { resolveAndroidBackDestination, type HomeSurface } from '../session/homeSurface';
+import { backNavigation, createBackStack, installBackNavigation, type BackNavigationOwner } from './backNavigation';
+import { installAppStateLifecycle } from './appStateLifecycle';
 import { installConnectionPort, type ConnectionPort } from '../session/connectionPort';
 import {
   installPiLive,
@@ -51,8 +56,64 @@ const nativePlatform = Capacitor.getPlatform();
 const activeTab = ref<PhoneTab>('connections');
 const sessions = useSessionsStore();
 const connections = useConnectionsStore();
+const sharedSettings = useSettingsStore();
 
 const snapshot = ref<ConnectionSnapshot | null>(null);
+
+/* ----------------------------------------------------------- back stack */
+
+const TAB_HOME_SURFACE: Record<PhoneTab, HomeSurface> = {
+  connections: 'connection',
+  projects: 'sessions',
+  sessions: 'sessions',
+};
+
+const backStack = createBackStack({
+  getActiveTab: () => activeTab.value,
+  onHomeBack: handleHomeBack,
+});
+
+/** Root Back keeps the home-surface verdict: background, never exit (spec §8.1). */
+function handleHomeBack(): void {
+  const destination = resolveAndroidBackDestination(
+    false,
+    TAB_HOME_SURFACE[activeTab.value],
+    snapshot.value !== null,
+  );
+  // Peer tab roots have no workspace step to walk back to; only minimize applies.
+  if (destination !== 'minimize') return;
+  void CapacitorApp.minimizeApp().catch((error: unknown) => {
+    console.error('Could not minimize the app from Android Back.', error);
+  });
+}
+
+const backNavigationOwner: BackNavigationOwner = {
+  handleBack(): boolean {
+    const tab = activeTab.value;
+    const handled = backStack.handleBack();
+    if (handled && tab === 'sessions' && backStack.current('sessions') === null) {
+      sessions.closeChat();
+    }
+    return handled;
+  },
+};
+
+function setEditorOpen(open: boolean): void {
+  if (open) backStack.push('connections', 'editor');
+  else backStack.pop('connections');
+}
+
+// A chat is a pushed view of the 会话 tab, so Back can pop it (spec §8.1).
+watch(
+  () => sessions.open,
+  (open) => {
+    if (open !== null) {
+      if (backStack.current('sessions') !== 'chat') backStack.push('sessions', 'chat');
+    } else if (backStack.current('sessions') === 'chat') {
+      backStack.pop('sessions');
+    }
+  },
+);
 const keyboardVisible = ref(false);
 const connectionMessage = ref('');
 const terminalTarget = ref<{ name: string; title: string } | null>(null);
@@ -61,6 +122,8 @@ let controller: ConnectionController | null = null;
 let dialedTarget: SshHostTarget | null = null;
 let removeControllerSnapshot: (() => void) | undefined;
 let removeTerminalOutput: (() => void) | undefined;
+let removeBackButton: (() => void) | undefined;
+let disposeAppStateLifecycle: (() => void) | undefined;
 let terminalDataHandler: ((data: string) => void) | null = null;
 /** Output that landed between `attach()` and the screen's `onData()` registration. */
 let pendingTerminalOutput = '';
@@ -108,6 +171,7 @@ function bindController(next: ConnectionController): void {
   controller = next;
   removeControllerSnapshot = next.subscribe((value) => {
     snapshot.value = value;
+    connections.applyConnectionSnapshot(value.phase);
   });
   removeTerminalOutput = next.subscribeTerminalOutput((session, bytes) => {
     // The terminal screen shows one PTY: only the attached session's bytes.
@@ -392,6 +456,24 @@ function applyKeyboardInsets(state: KeyboardInsetsState): void {
 
 onMounted(() => {
   installConnectionPort(connectionPort);
+  installBackNavigation(backNavigationOwner);
+  void CapacitorApp.addListener('backButton', () => {
+    backNavigation().handleBack();
+  }).then((listener) => {
+    removeBackButton = () => { void listener.remove(); };
+  }).catch((error: unknown) => {
+    console.error('Could not register the Android Back handler.', error);
+  });
+  disposeAppStateLifecycle = installAppStateLifecycle({
+    app: CapacitorApp,
+    getController: () => controller,
+    // Grace and reconnect-on-return are owned by the shared settings store (D42, #2861).
+    getBackgroundGraceMs: () => sharedSettings.backgroundGraceMs,
+    getReconnectOnReturn: () => sharedSettings.reconnectOnReturn,
+    onError: (error) => {
+      connectionMessage.value = error instanceof Error ? error.message : String(error);
+    },
+  });
   keyboardInsetsStateSync = createKeyboardInsetsStateSync(
     () => keyboardInsets.getState(),
     applyKeyboardInsets,
@@ -422,6 +504,9 @@ onBeforeUnmount(() => {
   removeKeyboardViewportListeners?.();
   keyboardInsetsStateSync?.dispose();
   removeKeyboardInsetsListener?.();
+  removeBackButton?.();
+  disposeAppStateLifecycle?.();
+  installBackNavigation(null);
   void closeController();
 });
 </script>
@@ -440,12 +525,17 @@ onBeforeUnmount(() => {
     </p>
 
     <div class="phone-shell__content">
-      <ConnectionsList v-if="activeTab === 'connections'" />
-      <ProjectsList v-else-if="activeTab === 'projects'" @open-terminal="openTerminal" />
-      <template v-else>
-        <ChatScreen v-if="sessions.open !== null" @open-terminal="openTerminal" />
-        <SessionList v-else />
-      </template>
+      <ConnectionsList
+        v-show="activeTab === 'connections'"
+        :editor-open="backStack.current('connections') === 'editor'"
+        @update:editor-open="setEditorOpen"
+      />
+      <ProjectsList v-show="activeTab === 'projects'" @open-terminal="openTerminal" />
+      <ChatScreen
+        v-show="activeTab === 'sessions' && sessions.open !== null"
+        @open-terminal="openTerminal"
+      />
+      <SessionList v-show="activeTab === 'sessions' && sessions.open === null" />
     </div>
 
     <AppTabBar v-model="activeTab" />

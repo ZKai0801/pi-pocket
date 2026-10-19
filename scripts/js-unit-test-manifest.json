@@ -1086,6 +1086,68 @@
         "keeps a multibyte character intact between ASCII chunks",
         "drops a half-decoded codepoint when the stream resets for a new session"
       ]
+    },
+    "tests/unit/backNavigation.test.ts": {
+      "suite": "phone back navigation",
+      "tests": [
+        "throws until a back-navigation owner is installed, then hands it back",
+        "pops the active tab stack and leaves the other tab pushed",
+        "keeps each tab stack through a tab switch",
+        "calls the home behaviour at a tab root instead of consuming the press"
+      ]
+    },
+    "tests/unit/phoneAppStateLifecycle.test.ts": {
+      "suite": "phone background grace",
+      "tests": [
+        "drives the app lifecycle handler from appStateChange and removes the listener"
+      ]
+    },
+    "tests/unit/connectionsStatus.test.ts": {
+      "suite": "connections store live status",
+      "tests": [
+        "flips the active host off when a controller snapshot leaves the connected phase",
+        "reports a lost connection as error, not connected",
+        "ignores a snapshot when no host is active"
+      ]
+    },
+    "tests/unit/connectionsSwitchConfirm.test.ts": {
+      "suite": "connections store host switch confirmation",
+      "tests": [
+        "keeps the live connection when the switch confirm is refused",
+        "closes the current host only after the switch is confirmed",
+        "connects directly when nothing is live or the host is already active"
+      ]
+    },
+    "tests/unit/connectionsPiDir.test.ts": {
+      "suite": "projects no-root Pi sessions directory action",
+      "tests": [
+        "persists a per-host Pi sessions directory override",
+        "clears the override when the field is left blank",
+        "exposes the no-root directory action and re-probes after saving"
+      ]
+    },
+    "tests/unit/connectionsRename.test.ts": {
+      "suite": "connections store host rename",
+      "tests": [
+        "keeps the renamed active host active and drops the old row",
+        "renames an idle host without moving the active one"
+      ]
+    },
+    "tests/unit/sessionsProjectSwitch.test.ts": {
+      "suite": "sessions store project switch",
+      "tests": [
+        "clears the open chat when a different project is loaded",
+        "keeps the open chat when the same project is reloaded"
+      ]
+    },
+    "tests/unit/piSessionRootMemory.test.ts": {
+      "suite": "last successful Pi session root",
+      "tests": [
+        "remembers the root probed on the host's last successful connect",
+        "prefers a saved per-host directory over the remembered root",
+        "returns blank when the host has neither a saved directory nor a remembered root",
+        "ignores a blank host name or a blank root"
+      ]
     }
   }
 }

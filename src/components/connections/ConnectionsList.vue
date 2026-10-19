@@ -13,12 +13,15 @@ import ConnectionEditor from './ConnectionEditor.vue';
 import { useConnectionsStore } from '../../stores/connections';
 import type { SavedHost } from '../../platform/android/hostStore';
 
+const props = defineProps<{ editorOpen?: boolean }>();
+const emit = defineEmits<{ 'update:editorOpen': [open: boolean] }>();
+
 const store = useConnectionsStore();
 
-const editorOpen = ref(false);
 const editing = ref<SavedHost | null>(null);
 const menuFor = ref<string | null>(null);
 
+const editorOpen = computed(() => props.editorOpen === true);
 const connecting = computed(() => store.status === 'connecting');
 
 onMounted(() => store.load());
@@ -27,25 +30,29 @@ function isKeyHost(host: SavedHost): boolean {
   return host.auth?.kind !== 'password' && Boolean(host.keyHandleId);
 }
 
+function setEditorOpen(open: boolean): void {
+  emit('update:editorOpen', open);
+}
+
 function openNew(): void {
   editing.value = null;
   menuFor.value = null;
-  editorOpen.value = true;
+  setEditorOpen(true);
 }
 
 function openEdit(host: SavedHost): void {
   editing.value = { ...host };
   menuFor.value = null;
-  editorOpen.value = true;
+  setEditorOpen(true);
 }
 
 function closeEditor(): void {
-  editorOpen.value = false;
+  setEditorOpen(false);
   editing.value = null;
 }
 
 function saveHost(host: SavedHost): void {
-  store.save(host);
+  store.save(host, editing.value?.name ?? null);
   closeEditor();
 }
 
@@ -56,7 +63,7 @@ function removeHost(name: string): void {
 
 function toggleConnect(host: SavedHost): void {
   if (store.activeName === host.name) void store.disconnect();
-  else void store.connect(host.name);
+  else void store.requestConnect(host.name);
 }
 </script>
 
@@ -79,6 +86,34 @@ function toggleConnect(host: SavedHost): void {
 
       <p v-if="connecting" class="connections__status">正在连接…</p>
       <p v-if="store.lastError" class="connections__error" role="alert">{{ store.lastError }}</p>
+
+      <div
+        v-if="store.pendingSwitch"
+        class="connections__confirm"
+        role="alertdialog"
+        aria-label="切换到其他主机"
+        data-testid="connections-switch-confirm"
+      >
+        <p class="connections__confirm-text">切换到「{{ store.pendingSwitch }}」会断开当前连接。</p>
+        <div class="connections__confirm-actions">
+          <button
+            type="button"
+            class="connections__confirm-cancel"
+            data-testid="connections-switch-cancel"
+            @click="store.cancelSwitch()"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="connections__confirm-ok"
+            data-testid="connections-switch-confirm-ok"
+            @click="void store.confirmSwitch()"
+          >
+            切换
+          </button>
+        </div>
+      </div>
 
       <ul v-if="store.hosts.length > 0" class="connections__list">
         <li v-for="host in store.hosts" :key="host.name" class="connections__row">
@@ -187,6 +222,58 @@ function toggleConnect(host: SavedHost): void {
   color: var(--error);
   font-size: var(--fs-200);
   line-height: 1.45;
+}
+
+.connections__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  padding: var(--sp-3);
+}
+
+.connections__confirm-text {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-300);
+  line-height: 1.45;
+}
+
+.connections__confirm-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.connections__confirm-cancel,
+.connections__confirm-ok {
+  display: inline-flex;
+  min-width: 48px;
+  min-height: 48px;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  font: var(--fw-semibold) var(--fs-300) / 1 var(--font-ui);
+}
+
+.connections__confirm-cancel {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.connections__confirm-ok {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.connections__confirm-cancel:focus-visible,
+.connections__confirm-ok:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .connections__list {

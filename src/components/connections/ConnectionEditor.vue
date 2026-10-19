@@ -10,6 +10,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import KeyIcon from '../KeyIcon.vue';
 import { listSshKeys, type SshKeyMetadata } from '../../native/sshKeyVault';
+import { defaultPiSessionsDir } from '../../pi/lastSessionRoot';
 import { validateSavedHost, type SavedHost } from '../../platform/android/hostStore';
 
 const props = defineProps<{ host?: SavedHost | null }>();
@@ -22,7 +23,7 @@ const form = reactive({
   user: props.host?.user ?? '',
   authKind: props.host?.auth?.kind === 'password' ? 'password' : 'key',
   keyHandleId: props.host?.keyHandleId ?? '',
-  piSessionsDir: props.host?.piSessionsDir ?? '',
+  piSessionsDir: defaultPiSessionsDir(props.host?.piSessionsDir, props.host?.name),
   piCommand: props.host?.piCommand ?? '',
 });
 

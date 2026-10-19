@@ -7,7 +7,7 @@
  * live connection the list is a connect-first hint, not an empty list
  * (spec §8.4).
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import { useConnectionsStore } from '../../stores/connections';
 import { useProjectsStore } from '../../stores/projects';
@@ -21,6 +21,21 @@ const connected = computed(() => connections.status === 'connected');
 const terminalPath = computed(() => store.selected);
 
 onMounted(() => { void store.discover(); });
+
+const piDir = ref('');
+const activePiDir = computed(() => {
+  const name = connections.activeName;
+  if (name === null) return '';
+  return connections.hosts.find((host) => host.name === name)?.piSessionsDir ?? '';
+});
+watch(activePiDir, (value) => { piDir.value = value; }, { immediate: true });
+
+function savePiDir(): void {
+  const name = connections.activeName;
+  if (name === null) return;
+  connections.setPiSessionsDir(name, piDir.value);
+  void store.discover();
+}
 
 // Pull-to-refresh on the project list: a resisted stretch from the top edge
 // that re-runs discovery past half the cap.
@@ -148,9 +163,31 @@ function openTerminal(): void {
       <p v-else-if="store.state === 'error'" class="projects__error" role="alert">{{ store.error }}</p>
 
       <template v-else>
-        <p v-if="store.state === 'no-root'" class="projects__status">
-          这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来。
-        </p>
+        <div v-if="store.state === 'no-root'" class="projects__no-root" data-testid="projects-no-root">
+          <p class="projects__status">
+            这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来，或在这里指定它的位置。
+          </p>
+          <label class="projects__no-root-field">
+            <span class="projects__no-root-label">Pi 会话目录</span>
+            <input
+              v-model="piDir"
+              type="text"
+              class="projects__no-root-input"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="留空则自动探测"
+              data-testid="projects-pi-dir-input"
+            />
+          </label>
+          <button
+            type="button"
+            class="projects__no-root-save"
+            data-testid="projects-pi-dir-save"
+            @click="savePiDir"
+          >
+            保存并重新探测
+          </button>
+        </div>
 
         <ul v-if="(store.state === 'ready' || store.state === 'no-root') && store.filtered.length > 0" class="projects__list">
           <li
@@ -385,6 +422,62 @@ function openTerminal(): void {
   color: var(--fg-secondary);
   font-size: var(--fs-300);
   line-height: 1.45;
+}
+
+.projects__no-root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  padding: var(--sp-3);
+}
+
+.projects__no-root-field {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.projects__no-root-label {
+  color: var(--fg-secondary);
+  font-size: var(--fs-100);
+  font-weight: var(--fw-medium);
+}
+
+.projects__no-root-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  padding: 0 var(--sp-2);
+  color: var(--fg);
+  font: var(--fs-300) var(--font-ui);
+  outline: none;
+}
+
+.projects__no-root-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.projects__no-root-save {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--on-accent);
+  font: var(--fw-semibold) var(--fs-300) / 1 var(--font-ui);
+}
+
+.projects__no-root-save:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .projects__error {

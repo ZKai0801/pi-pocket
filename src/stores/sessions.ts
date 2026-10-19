@@ -26,6 +26,7 @@ import { PiRepository, type PiProject, type PiSessionMeta } from '../pi/piReposi
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession } from '../pi/types';
 import { piLive } from '../session/piLive';
+import { rememberSessionRoot } from '../pi/lastSessionRoot';
 import { useConnectionsStore } from './connections';
 import { useProjectsStore } from './projects';
 
@@ -135,6 +136,12 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       loadInFlight.project.path === project.path
     ) {
       return loadInFlight.promise;
+    }
+    // A different project's sessions replace the last project's: the open chat
+    // belongs to the old project and its terminal path, so close it here.
+    if (state.lastProject?.path !== project.path) {
+      state.open = null;
+      state.openPath = null;
     }
     const token = ++loadToken;
     loadInFlight = {
@@ -268,6 +275,7 @@ async function resolveActiveSessionRoot(): Promise<string> {
   if (root === null) {
     throw new Error('No Pi session root was found on this host.');
   }
+  rememberSessionRoot(active?.name, root);
   return root;
 }
 

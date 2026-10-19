@@ -23,6 +23,7 @@ import { computed, reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { PiRepository, type PiProject } from '../pi/piRepository';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
+import { rememberSessionRoot } from '../pi/lastSessionRoot';
 import { piLive, type PiDirectoryEntry } from '../session/piLive';
 import { useConnectionsStore } from './connections';
 
@@ -365,7 +366,9 @@ export const useProjectsStore = defineStore('projects', () => {
       const active = connections.activeName !== null
         ? connections.hosts.find((host) => host.name === connections.activeName)
         : undefined;
-      return resolveSessionRoot(live.transport(), context.home, context.env, active?.piSessionsDir);
+      const root = await resolveSessionRoot(live.transport(), context.home, context.env, active?.piSessionsDir);
+      if (root !== null) rememberSessionRoot(active?.name, root);
+      return root;
     },
     listProjects: (root) => new PiRepository(piLive().transport(), root).listProjects(),
     added: {

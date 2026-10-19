@@ -30,17 +30,29 @@ export interface ConnectionsStoreState {
   activeName: string | null;
   status: ConnectionStatus;
   lastError: string | null;
+  /** The host a switch is waiting to confirm before closing the live one (spec §8.2). */
+  pendingSwitch: string | null;
 }
 
 export interface ConnectionsStore extends ConnectionsStoreState {
   load(): void;
-  save(host: SavedHost): void;
+  save(host: SavedHost, previousName?: string | null): void;
   /** Removes the host and, if it is the live one, closes it first (D8). */
   remove(name: string): Promise<void>;
   connect(name: string): Promise<void>;
+  /** Connect, or ask to switch when another host is already live (spec §8.2). */
+  requestConnect(name: string): Promise<void>;
+  /** Proceed with the switch the user agreed to. */
+  confirmSwitch(): Promise<void>;
+  /** Leave the live connection untouched and drop the pending switch. */
+  cancelSwitch(): void;
   disconnect(): Promise<void>;
   /** `connected` only for the active host; every other host is `idle` (D8). */
   statusFor(name: string): 'connected' | 'idle';
+  /** Reconcile the active host's status with a `ConnectionController` phase (spec §8.2). */
+  applyConnectionSnapshot(phase: string): void;
+  /** Set or clear the active host's per-host Pi sessions directory override (spec §9.1). */
+  setPiSessionsDir(name: string, dir: string): void;
 }
 
 export interface ConnectionsStoreDeps {
@@ -59,14 +71,35 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     activeName: null,
     status: 'idle',
     lastError: null,
+    pendingSwitch: null,
   });
 
   function load(): void {
     state.hosts = deps.hosts.savedHosts();
   }
 
-  function save(host: SavedHost): void {
+  function save(host: SavedHost, previousName?: string | null): void {
+    // A rename replaces the old record rather than sitting beside it, and the
+    // active row follows the new name so it keeps its connected state.
+    const renamed = Boolean(previousName) && previousName !== host.name;
+    if (renamed) {
+      deps.hosts.remove(previousName as string);
+      if (state.activeName === previousName) state.activeName = host.name;
+      if (state.pendingSwitch === previousName) state.pendingSwitch = host.name;
+    }
     deps.hosts.save(host);
+    load();
+  }
+
+  function setPiSessionsDir(name: string, dir: string): void {
+    const host = state.hosts.find((candidate) => candidate.name === name)
+      ?? deps.hosts.savedHosts().find((candidate) => candidate.name === name);
+    if (!host) return;
+    const next: SavedHost = { ...host };
+    const trimmed = dir.trim();
+    if (trimmed.length > 0) next.piSessionsDir = trimmed;
+    else delete next.piSessionsDir;
+    deps.hosts.save(next);
     load();
   }
 
@@ -77,8 +110,20 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     load();
   }
 
+  const CONNECTED_PHASES = new Set(['connected', 'listing', 'attaching', 'live']);
+
   function statusFor(name: string): 'connected' | 'idle' {
     return state.activeName === name && state.status === 'connected' ? 'connected' : 'idle';
+  }
+
+  function applyConnectionSnapshot(phase: string): void {
+    // No live host means no per-host status to speak for; leave the dial's own
+    // error/connecting state alone.
+    if (state.activeName === null) return;
+    if (CONNECTED_PHASES.has(phase)) state.status = 'connected';
+    else if (phase === 'error' || phase === 'lost') state.status = 'error';
+    else if (phase === 'idle') state.status = 'idle';
+    else state.status = 'connecting';
   }
 
   async function disconnect(): Promise<void> {
@@ -90,6 +135,28 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     state.activeName = null;
     state.status = 'idle';
     state.lastError = null;
+    state.pendingSwitch = null;
+  }
+
+  async function requestConnect(name: string): Promise<void> {
+    // D8: only one live connection, so switching hosts must close the current
+    // one — but never before the user agrees (spec §8.2). Re-requesting the
+    // already-live host changes nothing.
+    if (state.activeName !== null) {
+      if (state.activeName !== name) state.pendingSwitch = name;
+      return;
+    }
+    await connect(name);
+  }
+
+  async function confirmSwitch(): Promise<void> {
+    const name = state.pendingSwitch;
+    state.pendingSwitch = null;
+    if (name !== null) await connect(name);
+  }
+
+  function cancelSwitch(): void {
+    state.pendingSwitch = null;
   }
 
   // D8 under interleaving: a second `connect()` while one is dialling must not
@@ -115,6 +182,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       state.status = 'connecting';
       state.activeName = null;
       state.lastError = null;
+      state.pendingSwitch = null;
 
       let target: SshHostTarget;
       try {
@@ -162,12 +230,19 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     set status(value: ConnectionStatus) { state.status = value; },
     get lastError() { return state.lastError; },
     set lastError(value: string | null) { state.lastError = value; },
+    get pendingSwitch() { return state.pendingSwitch; },
+    set pendingSwitch(value: string | null) { state.pendingSwitch = value; },
     load,
     save,
     remove,
     connect,
+    requestConnect,
+    confirmSwitch,
+    cancelSwitch,
     disconnect,
     statusFor,
+    applyConnectionSnapshot,
+    setPiSessionsDir,
   });
 }
 
@@ -214,11 +289,17 @@ export const useConnectionsStore = defineStore('connections', () => {
     activeName: toRef(store, 'activeName'),
     status: toRef(store, 'status'),
     lastError: toRef(store, 'lastError'),
+    pendingSwitch: toRef(store, 'pendingSwitch'),
     load: store.load,
     save: store.save,
     remove: store.remove,
     connect: store.connect,
+    requestConnect: store.requestConnect,
+    confirmSwitch: store.confirmSwitch,
+    cancelSwitch: store.cancelSwitch,
     disconnect: store.disconnect,
     statusFor: store.statusFor,
+    applyConnectionSnapshot: store.applyConnectionSnapshot,
+    setPiSessionsDir: store.setPiSessionsDir,
   };
 });
