@@ -1093,29 +1093,11 @@
         "throws until a back-navigation owner is installed, then hands it back",
         "pops the active tab stack and leaves the other tab pushed",
         "keeps each tab stack through a tab switch",
-        "calls the home behaviour at a tab root instead of consuming the press"
-      ]
-    },
-    "tests/unit/phoneAppStateLifecycle.test.ts": {
-      "suite": "phone background grace",
-      "tests": [
-        "drives the app lifecycle handler from appStateChange and removes the listener"
-      ]
-    },
-    "tests/unit/connectionsStatus.test.ts": {
-      "suite": "connections store live status",
-      "tests": [
-        "flips the active host off when a controller snapshot leaves the connected phase",
-        "reports a lost connection as error, not connected",
-        "ignores a snapshot when no host is active"
-      ]
-    },
-    "tests/unit/connectionsSwitchConfirm.test.ts": {
-      "suite": "connections store host switch confirmation",
-      "tests": [
-        "keeps the live connection when the switch confirm is refused",
-        "closes the current host only after the switch is confirmed",
-        "connects directly when nothing is live or the host is already active"
+        "calls the home behaviour at a tab root instead of consuming the press",
+        "drives the active tab stack from an installed plugin listener",
+        "closes the topmost overlay before popping the tab stack",
+        "removes a listener that resolves after disposal and ignores a late press",
+        "minimizes at a tab root when the dial has no live connection"
       ]
     },
     "tests/unit/connectionsPiDir.test.ts": {
@@ -1123,7 +1105,7 @@
       "tests": [
         "persists a per-host Pi sessions directory override",
         "clears the override when the field is left blank",
-        "exposes the no-root directory action and re-probes after saving"
+        "saves the no-root directory and re-probes through the projects store"
       ]
     },
     "tests/unit/connectionsRename.test.ts": {
@@ -1133,11 +1115,38 @@
         "renames an idle host without moving the active one"
       ]
     },
-    "tests/unit/sessionsProjectSwitch.test.ts": {
-      "suite": "sessions store project switch",
+    "tests/unit/connectionsStatus.test.ts": {
+      "suite": "connections store live status",
       "tests": [
-        "clears the open chat when a different project is loaded",
-        "keeps the open chat when the same project is reloaded"
+        "flips the active host off when a controller snapshot leaves the connected phase",
+        "reports a lost connection as error, not connected",
+        "forwards a controller snapshot to the local copy and the store",
+        "ignores a snapshot when no host is active"
+      ]
+    },
+    "tests/unit/connectionsSwitchConfirm.test.ts": {
+      "suite": "connections store host switch confirmation",
+      "tests": [
+        "keeps the live connection when the switch confirm is refused",
+        "closes the current host only after the switch is confirmed",
+        "connects directly when nothing is live or the host is already active",
+        "reconnects a dropped host without asking to switch",
+        "does not ask to switch after the live connection is lost"
+      ]
+    },
+    "tests/unit/phoneAppStateLifecycle.test.ts": {
+      "suite": "phone background grace",
+      "tests": [
+        "drives the app lifecycle handler from appStateChange and removes the listener",
+        "reconnects on return with the shared reconnect flag"
+      ]
+    },
+    "tests/unit/phoneShellWiring.test.ts": {
+      "suite": "phone shell wiring",
+      "tests": [
+        "installs the Back listener, snapshot sync, and app-state lifecycle in the shell",
+        "routes host actions through the store seams",
+        "remembers the probed root and preloads the editor from it"
       ]
     },
     "tests/unit/piSessionRootMemory.test.ts": {
@@ -1146,7 +1155,17 @@
         "remembers the root probed on the host's last successful connect",
         "prefers a saved per-host directory over the remembered root",
         "returns blank when the host has neither a saved directory nor a remembered root",
-        "ignores a blank host name or a blank root"
+        "ignores a blank host name or a blank root",
+        "remembers a resolved root and offers it to the editor default",
+        "does not remember a null root"
+      ]
+    },
+    "tests/unit/sessionsProjectSwitch.test.ts": {
+      "suite": "sessions store project switch",
+      "tests": [
+        "clears the open chat when a different project is loaded",
+        "keeps the open chat when the same project is reloaded",
+        "drops an open from the previous project that resolves after the switch"
       ]
     }
   }

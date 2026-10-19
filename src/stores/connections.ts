@@ -120,10 +120,25 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     // No live host means no per-host status to speak for; leave the dial's own
     // error/connecting state alone.
     if (state.activeName === null) return;
-    if (CONNECTED_PHASES.has(phase)) state.status = 'connected';
-    else if (phase === 'error' || phase === 'lost') state.status = 'error';
-    else if (phase === 'idle') state.status = 'idle';
-    else state.status = 'connecting';
+    if (CONNECTED_PHASES.has(phase)) {
+      state.status = 'connected';
+      return;
+    }
+    if (phase === 'idle' || phase === 'error' || phase === 'lost') {
+      // The controller has no connection any more: stop tracking the host so
+      // the switch gate and the row's tap say what is actually true.
+      state.status = phase === 'idle' ? 'idle' : 'error';
+      state.activeName = null;
+      state.pendingSwitch = null;
+      return;
+    }
+    state.status = 'connecting';
+  }
+
+  /** A tracked host that is connected or still reconnecting. */
+  function hasLiveConnection(): boolean {
+    return state.activeName !== null
+      && (state.status === 'connected' || state.status === 'connecting');
   }
 
   async function disconnect(): Promise<void> {
@@ -142,7 +157,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     // D8: only one live connection, so switching hosts must close the current
     // one — but never before the user agrees (spec §8.2). Re-requesting the
     // already-live host changes nothing.
-    if (state.activeName !== null) {
+    if (hasLiveConnection()) {
       if (state.activeName !== name) state.pendingSwitch = name;
       return;
     }

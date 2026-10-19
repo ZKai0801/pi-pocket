@@ -38,4 +38,24 @@ describe('sessions store project switch', () => {
     expect(store.open).not.toBeNull();
     expect(store.openPath).toBe('/r/a.jsonl');
   });
+
+  it('drops an open from the previous project that resolves after the switch', async () => {
+    let resolveRead: ((session: ParsedPiSession) => void) | undefined;
+    const read = new Promise<ParsedPiSession>((resolve) => { resolveRead = resolve; });
+    const d = {
+      listSessions: vi.fn(async () => []),
+      readSession: vi.fn(() => read),
+    };
+    const store = createSessionsStore(d as never);
+    await store.load({ path: '/p/a', name: 'a' });
+
+    const pending = store.openSession('/r/a.jsonl');
+    await store.load({ path: '/p/b', name: 'b' });
+    resolveRead?.(session);
+    await pending;
+
+    expect(store.open).toBeNull();
+    expect(store.openPath).toBeNull();
+    expect(store.lastProject?.path).toBe('/p/b');
+  });
 });

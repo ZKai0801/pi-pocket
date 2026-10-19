@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createConnectionsStore } from '../../src/stores/connections';
-import projectsListSource from '../../src/components/projects/ProjectsList.vue?raw';
+import { createProjectsStore } from '../../src/stores/projects';
 
 const kai = { name: 'kai', hostname: '192.168.1.3', port: 22, user: 'kai', keyHandleId: 'h-1' };
 const pi = { name: 'pi', hostname: '10.0.0.9', port: 22, user: 'kai', keyHandleId: 'h-2', piSessionsDir: '/old' };
@@ -37,9 +37,26 @@ describe('projects no-root Pi sessions directory action', () => {
     expect('piSessionsDir' in saved).toBe(false);
   });
 
-  it('exposes the no-root directory action and re-probes after saving', () => {
-    expect(projectsListSource).toContain('setPiSessionsDir');
-    expect(projectsListSource).toContain('data-testid="projects-pi-dir-save"');
-    expect(projectsListSource).toContain('store.discover');
+  it('saves the no-root directory and re-probes through the projects store', async () => {
+    const setPiSessionsDir = vi.fn();
+    const listProjects = vi.fn(async () => [{ path: '/p/a', name: 'a' }]);
+    const store = createProjectsStore({
+      resolveRoot: async () => '/root',
+      listProjects,
+      setPiSessionsDir,
+    });
+
+    await store.discover();
+    expect(listProjects).toHaveBeenCalledTimes(1);
+
+    await store.savePiSessionsDir('kai', '  /home/projects/.pi-agent/sessions  ');
+
+    expect(setPiSessionsDir).toHaveBeenCalledWith(
+      'kai',
+      '  /home/projects/.pi-agent/sessions  ',
+    );
+    expect(listProjects).toHaveBeenCalledTimes(2);
+    expect(store.state).toBe('ready');
+    expect(store.projects).toEqual([{ path: '/p/a', name: 'a' }]);
   });
 });

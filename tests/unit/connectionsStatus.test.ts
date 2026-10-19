@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createConnectionSnapshotSync } from '../../src/phone/connectionSnapshot';
 import { createConnectionsStore } from '../../src/stores/connections';
 
 const kai = { name: 'kai', hostname: '192.168.1.3', port: 22, user: 'kai', keyHandleId: 'h-1' };
@@ -38,6 +39,23 @@ describe('connections store live status', () => {
     store.applyConnectionSnapshot('lost');
     expect(store.status).toBe('error');
     expect(store.statusFor('kai')).toBe('idle');
+    expect(store.activeName).toBeNull();
+  });
+
+  it('forwards a controller snapshot to the local copy and the store', async () => {
+    const store = createConnectionsStore(deps() as never);
+    await store.connect('kai');
+    const onSnapshot = vi.fn();
+    const forward = createConnectionSnapshotSync({
+      onSnapshot,
+      apply: store.applyConnectionSnapshot,
+    });
+
+    forward({ phase: 'lost' });
+
+    expect(onSnapshot).toHaveBeenCalledWith({ phase: 'lost' });
+    expect(store.status).toBe('error');
+    expect(store.activeName).toBeNull();
   });
 
   it('ignores a snapshot when no host is active', () => {

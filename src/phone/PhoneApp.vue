@@ -28,9 +28,16 @@ import ChatScreen from '../components/sessions/ChatScreen.vue';
 import TerminalScreen from '../components/terminal/TerminalScreen.vue';
 import { ConnectionController } from '../session/connectionController';
 import { hostKeyAnswer, hostKeyCard, hostKeyRefusalMessage } from '../session/hostKeyCard';
-import { resolveAndroidBackDestination, type HomeSurface } from '../session/homeSurface';
-import { backNavigation, createBackStack, installBackNavigation, type BackNavigationOwner } from './backNavigation';
+import { type HomeSurface } from '../session/homeSurface';
+import {
+  createBackStack,
+  createShellBackNavigation,
+  installBackButton,
+  installBackNavigation,
+  runHomeBack,
+} from './backNavigation';
 import { installAppStateLifecycle } from './appStateLifecycle';
+import { createConnectionSnapshotSync } from './connectionSnapshot';
 import { installConnectionPort, type ConnectionPort } from '../session/connectionPort';
 import {
   installPiLive,
@@ -43,6 +50,7 @@ import { createPiTransport } from '../pi/piTransport';
 import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
 import { projectBasename, useSessionsStore } from '../stores/sessions';
 import { useConnectionsStore } from '../stores/connections';
+import { useProjectsStore } from '../stores/projects';
 import { sshCapability } from '../native/sshCapability';
 import { keyboardInsets, type KeyboardInsetsState } from '../native/keyboardInsets';
 import { createKeyboardInsetsStateSync } from '../native/keyboardInsetsState';
@@ -56,9 +64,14 @@ const nativePlatform = Capacitor.getPlatform();
 const activeTab = ref<PhoneTab>('connections');
 const sessions = useSessionsStore();
 const connections = useConnectionsStore();
+const projects = useProjectsStore();
 const sharedSettings = useSettingsStore();
 
 const snapshot = ref<ConnectionSnapshot | null>(null);
+const forwardSnapshot = createConnectionSnapshotSync<ConnectionSnapshot>({
+  onSnapshot: (value) => { snapshot.value = value; },
+  apply: (phase) => connections.applyConnectionSnapshot(phase),
+});
 
 /* ----------------------------------------------------------- back stack */
 
@@ -68,35 +81,39 @@ const TAB_HOME_SURFACE: Record<PhoneTab, HomeSurface> = {
   sessions: 'sessions',
 };
 
-const backStack = createBackStack({
-  getActiveTab: () => activeTab.value,
-  onHomeBack: handleHomeBack,
-});
-
-/** Root Back keeps the home-surface verdict: background, never exit (spec §8.1). */
-function handleHomeBack(): void {
-  const destination = resolveAndroidBackDestination(
-    false,
-    TAB_HOME_SURFACE[activeTab.value],
-    snapshot.value !== null,
-  );
-  // Peer tab roots have no workspace step to walk back to; only minimize applies.
-  if (destination !== 'minimize') return;
-  void CapacitorApp.minimizeApp().catch((error: unknown) => {
-    console.error('Could not minimize the app from Android Back.', error);
-  });
+/** Topmost overlay/sheet wins: the terminal, then the Projects directory sheet. */
+function closeTopmostOverlay(): boolean {
+  if (terminalTarget.value !== null) {
+    terminalTarget.value = null;
+    return true;
+  }
+  if (projects.browse.open) {
+    projects.closeBrowse();
+    return true;
+  }
+  return false;
 }
 
-const backNavigationOwner: BackNavigationOwner = {
-  handleBack(): boolean {
-    const tab = activeTab.value;
-    const handled = backStack.handleBack();
-    if (handled && tab === 'sessions' && backStack.current('sessions') === null) {
-      sessions.closeChat();
-    }
-    return handled;
+const backStack = createBackStack({
+  getActiveTab: () => activeTab.value,
+  onHomeBack: () => runHomeBack({
+    getSurface: () => TAB_HOME_SURFACE[activeTab.value],
+    hasLiveConnection: () => connections.status === 'connected',
+    minimize: () => CapacitorApp.minimizeApp(),
+    onError: (error) => {
+      console.error('Could not minimize the app from Android Back.', error);
+    },
+  }),
+});
+
+const backNavigationOwner = createShellBackNavigation({
+  stack: backStack,
+  getActiveTab: () => activeTab.value,
+  closeOverlay: closeTopmostOverlay,
+  onPopped: (tab) => {
+    if (tab === 'sessions' && backStack.current('sessions') === null) sessions.closeChat();
   },
-};
+});
 
 function setEditorOpen(open: boolean): void {
   if (open) backStack.push('connections', 'editor');
@@ -169,10 +186,7 @@ function bindController(next: ConnectionController): void {
   removeControllerSnapshot?.();
   removeTerminalOutput?.();
   controller = next;
-  removeControllerSnapshot = next.subscribe((value) => {
-    snapshot.value = value;
-    connections.applyConnectionSnapshot(value.phase);
-  });
+  removeControllerSnapshot = next.subscribe(forwardSnapshot);
   removeTerminalOutput = next.subscribeTerminalOutput((session, bytes) => {
     // The terminal screen shows one PTY: only the attached session's bytes.
     if (!attachedSession || !sameSessionRow(attachedSession, session)) return;
@@ -457,12 +471,11 @@ function applyKeyboardInsets(state: KeyboardInsetsState): void {
 onMounted(() => {
   installConnectionPort(connectionPort);
   installBackNavigation(backNavigationOwner);
-  void CapacitorApp.addListener('backButton', () => {
-    backNavigation().handleBack();
-  }).then((listener) => {
-    removeBackButton = () => { void listener.remove(); };
-  }).catch((error: unknown) => {
-    console.error('Could not register the Android Back handler.', error);
+  removeBackButton = installBackButton({
+    app: CapacitorApp,
+    onError: (error) => {
+      console.error('Could not register the Android Back handler.', error);
+    },
   });
   disposeAppStateLifecycle = installAppStateLifecycle({
     app: CapacitorApp,

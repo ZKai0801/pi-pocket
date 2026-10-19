@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   defaultPiSessionsDir,
   installSessionRootStorage,
+  piSessionsDirFor,
   rememberedSessionRoot,
   rememberSessionRoot,
+  resolveAndRememberRoot,
   type SessionRootStorage,
 } from '../../src/pi/lastSessionRoot';
 
@@ -37,6 +39,19 @@ describe('last successful Pi session root', () => {
     rememberSessionRoot(null, '/probed');
     rememberSessionRoot('kai', '');
     expect(rememberedSessionRoot(null)).toBeNull();
+    expect(rememberedSessionRoot('kai')).toBeNull();
+  });
+
+  it('remembers a resolved root and offers it to the editor default', async () => {
+    const root = await resolveAndRememberRoot('kai', async () => '/probed');
+
+    expect(root).toBe('/probed');
+    expect(rememberedSessionRoot('kai')).toBe('/probed');
+    expect(piSessionsDirFor({ name: 'kai' })).toBe('/probed');
+  });
+
+  it('does not remember a null root', async () => {
+    expect(await resolveAndRememberRoot('kai', async () => null)).toBeNull();
     expect(rememberedSessionRoot('kai')).toBeNull();
   });
 });

@@ -7,6 +7,11 @@
  * hands off to the kept home-surface behaviour instead of exiting the app.
  */
 import { reactive } from 'vue';
+import {
+  resolveAndroidBackDestination,
+  type AndroidBackDestination,
+  type HomeSurface,
+} from '../session/homeSurface';
 
 export interface BackNavigationOwner {
   /** Consume one Back press; `true` when a tab stack popped, `false` at root. */
@@ -24,6 +29,41 @@ export function installBackNavigation(owner: BackNavigationOwner | null): void {
 export function backNavigation(): BackNavigationOwner {
   if (!installed) throw new Error('No back-navigation owner is installed yet.');
   return installed;
+}
+
+export interface BackButtonSource {
+  addListener(
+    event: 'backButton',
+    listener: () => void,
+  ): Promise<{ remove(): void }>;
+}
+
+export interface BackButtonOptions {
+  app: BackButtonSource;
+  onError?: (error: unknown) => void;
+}
+
+/**
+ * Register the plugin's Back listener and hand each press to the installed
+ * owner. The disposer removes a listener whose `addListener` promise is still
+ * pending, and a press that arrives after disposal is ignored.
+ */
+export function installBackButton(options: BackButtonOptions): () => void {
+  let disposed = false;
+  let remove: (() => void) | undefined;
+  void options.app
+    .addListener('backButton', () => {
+      if (!disposed) installed?.handleBack();
+    })
+    .then((listener) => {
+      if (disposed) void listener.remove();
+      else remove = () => { void listener.remove(); };
+    })
+    .catch(options.onError);
+  return () => {
+    disposed = true;
+    remove?.();
+  };
 }
 
 export interface BackStackOptions {
@@ -73,4 +113,54 @@ export function createBackStack(options: BackStackOptions): BackStack {
       return false;
     },
   };
+}
+
+export interface ShellBackNavigationOptions {
+  stack: BackStack;
+  getActiveTab(): string;
+  /** Close the topmost overlay/sheet; `true` when one was open. */
+  closeOverlay(): boolean;
+  /** Runs after the active tab's stack popped, e.g. to close the chat. */
+  onPopped?(tab: string): void;
+}
+
+/**
+ * The shell's Back order: topmost overlay/sheet first, then the active tab's
+ * stack, then the tab root's home behaviour.
+ */
+export function createShellBackNavigation(
+  options: ShellBackNavigationOptions,
+): BackNavigationOwner {
+  return {
+    handleBack(): boolean {
+      if (options.closeOverlay()) return true;
+      const tab = options.getActiveTab();
+      const handled = options.stack.handleBack();
+      if (handled) options.onPopped?.(tab);
+      return handled;
+    },
+  };
+}
+
+export interface HomeBackOptions {
+  getSurface(): HomeSurface;
+  /** Only a reconciled live connection counts; a failed dial must minimize. */
+  hasLiveConnection(): boolean;
+  minimize(): void | Promise<void>;
+  onError?: (error: unknown) => void;
+}
+
+/** Apply the kept home-surface verdict: background at a tab root, never exit. */
+export function runHomeBack(options: HomeBackOptions): void {
+  const destination: AndroidBackDestination = resolveAndroidBackDestination(
+    false,
+    options.getSurface(),
+    options.hasLiveConnection(),
+  );
+  if (destination !== 'minimize') return;
+  try {
+    void Promise.resolve(options.minimize()).catch(options.onError);
+  } catch (error) {
+    options.onError?.(error);
+  }
 }

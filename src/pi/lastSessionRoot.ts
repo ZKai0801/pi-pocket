@@ -58,7 +58,7 @@ export function rememberSessionRoot(hostName: string | null | undefined, root: s
   try {
     storage()?.setItem(LAST_SESSION_ROOT_STORAGE_KEY, JSON.stringify(record));
   } catch {
-    // Storage can be unavailable or full; the in-memory write still stands.
+    // Storage can be unavailable or full; remembering is best-effort.
   }
 }
 
@@ -74,4 +74,24 @@ export function defaultPiSessionsDir(
 ): string {
   if (savedDir && savedDir.trim().length > 0) return savedDir.trim();
   return rememberedSessionRoot(hostName) ?? '';
+}
+
+export interface SessionRootHost {
+  name?: string | null;
+  piSessionsDir?: string | null;
+}
+
+/** The host's editor preload, keeping the saved-vs-remembered rule in one place. */
+export function piSessionsDirFor(host: SessionRootHost | null | undefined): string {
+  return defaultPiSessionsDir(host?.piSessionsDir, host?.name);
+}
+
+/** Resolve a root and remember the non-null result for the host that probed it. */
+export async function resolveAndRememberRoot(
+  hostName: string | null | undefined,
+  resolve: () => Promise<string | null>,
+): Promise<string | null> {
+  const root = await resolve();
+  if (root !== null) rememberSessionRoot(hostName, root);
+  return root;
 }

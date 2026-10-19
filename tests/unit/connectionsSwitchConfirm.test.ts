@@ -58,4 +58,30 @@ describe('connections store host switch confirmation', () => {
     expect(store.pendingSwitch).toBeNull();
     expect(d.port.connect).toHaveBeenCalledTimes(1);
   });
+
+  it('reconnects a dropped host without asking to switch', async () => {
+    const d = deps();
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    store.applyConnectionSnapshot('lost');
+    expect(store.activeName).toBeNull();
+
+    await store.requestConnect('kai');
+    expect(store.pendingSwitch).toBeNull();
+    expect(d.port.disconnect).not.toHaveBeenCalled();
+    expect(d.port.connect).toHaveBeenCalledTimes(2);
+    expect(store.statusFor('kai')).toBe('connected');
+  });
+
+  it('does not ask to switch after the live connection is lost', async () => {
+    const d = deps();
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    store.applyConnectionSnapshot('lost');
+
+    await store.requestConnect('other');
+    expect(store.pendingSwitch).toBeNull();
+    expect(store.activeName).toBe('other');
+    expect(d.port.connect).toHaveBeenCalledTimes(2);
+  });
 });

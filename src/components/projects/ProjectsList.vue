@@ -33,8 +33,7 @@ watch(activePiDir, (value) => { piDir.value = value; }, { immediate: true });
 function savePiDir(): void {
   const name = connections.activeName;
   if (name === null) return;
-  connections.setPiSessionsDir(name, piDir.value);
-  void store.discover();
+  void store.savePiSessionsDir(name, piDir.value);
 }
 
 // Pull-to-refresh on the project list: a resisted stretch from the top edge

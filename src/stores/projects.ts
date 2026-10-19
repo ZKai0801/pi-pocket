@@ -23,7 +23,7 @@ import { computed, reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { PiRepository, type PiProject } from '../pi/piRepository';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
-import { rememberSessionRoot } from '../pi/lastSessionRoot';
+import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { piLive, type PiDirectoryEntry } from '../session/piLive';
 import { useConnectionsStore } from './connections';
 
@@ -73,6 +73,8 @@ export interface ProjectsStore extends ProjectsStoreState {
   setQuery(query: string): void;
   addProject(path: string): void;
   select(path: string): void;
+  /** Save a host's Pi directory override and re-probe in place. */
+  savePiSessionsDir(name: string, dir: string): Promise<boolean>;
   openBrowse(): Promise<void>;
   browseEnter(path: string): Promise<void>;
   browseUp(): Promise<void>;
@@ -83,6 +85,8 @@ export interface ProjectsStoreDeps {
   resolveRoot(): Promise<string | null>;
   /** Root-bound (R9): `PiRepository` is constructed against the resolved root. */
   listProjects(root: string): Promise<PiProject[]>;
+  /** Persists the per-host override the no-root action edits (spec §9.1). */
+  setPiSessionsDir?(name: string, dir: string): void;
   added?: ProjectsAddedDep;
   browse?: ProjectsBrowseDep;
 }
@@ -200,6 +204,12 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
     state.selected = path;
   }
 
+  async function savePiSessionsDir(name: string, dir: string): Promise<boolean> {
+    if (!deps.setPiSessionsDir) return false;
+    deps.setPiSessionsDir(name, dir);
+    return discover();
+  }
+
   function addProject(path: string): void {
     const target = path.replace(/\/+$/, '');
     if (target === '') return;
@@ -286,6 +296,7 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
     setQuery,
     addProject,
     select,
+    savePiSessionsDir,
     openBrowse,
     browseEnter,
     browseUp,
@@ -366,11 +377,13 @@ export const useProjectsStore = defineStore('projects', () => {
       const active = connections.activeName !== null
         ? connections.hosts.find((host) => host.name === connections.activeName)
         : undefined;
-      const root = await resolveSessionRoot(live.transport(), context.home, context.env, active?.piSessionsDir);
-      if (root !== null) rememberSessionRoot(active?.name, root);
-      return root;
+      return resolveAndRememberRoot(
+        active?.name,
+        () => resolveSessionRoot(live.transport(), context.home, context.env, active?.piSessionsDir),
+      );
     },
     listProjects: (root) => new PiRepository(piLive().transport(), root).listProjects(),
+    setPiSessionsDir: (name, dir) => useConnectionsStore().setPiSessionsDir(name, dir),
     added: {
       load: async () => {
         const connections = useConnectionsStore();
@@ -423,6 +436,7 @@ export const useProjectsStore = defineStore('projects', () => {
     setQuery: store.setQuery,
     addProject: store.addProject,
     select: store.select,
+    savePiSessionsDir: store.savePiSessionsDir,
     openBrowse: store.openBrowse,
     browseEnter: store.browseEnter,
     browseUp: store.browseUp,

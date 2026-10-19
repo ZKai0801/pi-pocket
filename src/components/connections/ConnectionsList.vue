@@ -62,7 +62,7 @@ function removeHost(name: string): void {
 }
 
 function toggleConnect(host: SavedHost): void {
-  if (store.activeName === host.name) void store.disconnect();
+  if (store.activeName === host.name && store.status === 'connected') void store.disconnect();
   else void store.requestConnect(host.name);
 }
 </script>

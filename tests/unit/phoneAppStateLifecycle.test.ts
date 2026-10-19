@@ -33,4 +33,43 @@ describe('phone background grace', () => {
     dispose();
     await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
   });
+
+  it('reconnects on return with the shared reconnect flag', async () => {
+    let listener: ((state: { isActive: boolean }) => void) | undefined;
+    const app = {
+      addListener: vi.fn(async (_event: 'appStateChange', callback: (state: { isActive: boolean }) => void) => {
+        listener = callback;
+        return { remove: vi.fn() };
+      }),
+    };
+    let phase = 'live';
+    const controller = {
+      getSnapshot: () => ({ phase }),
+      enterBackground: vi.fn(async (graceMs: number) => {
+        expect(graceMs).toBe(12_000);
+        phase = 'background';
+      }),
+      returnToForeground: vi.fn(async (options: { reconnect: boolean }) => {
+        expect(options).toEqual({ reconnect: true });
+        phase = 'live';
+      }),
+    };
+    const onError = vi.fn();
+    const dispose = installAppStateLifecycle({
+      app,
+      getController: () => controller,
+      getBackgroundGraceMs: () => 12_000,
+      getReconnectOnReturn: () => true,
+      onError,
+    });
+
+    await vi.waitFor(() => expect(app.addListener).toHaveBeenCalledOnce());
+    listener?.({ isActive: false });
+    await vi.waitFor(() => expect(controller.enterBackground).toHaveBeenCalledOnce());
+    listener?.({ isActive: true });
+    await vi.waitFor(() => expect(controller.returnToForeground).toHaveBeenCalledOnce());
+    expect(onError).not.toHaveBeenCalled();
+
+    dispose();
+  });
 });
