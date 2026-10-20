@@ -485,6 +485,25 @@ Deferred (Plan 5, device only): Pi's session-file timing/location, the `pgrep`
 check for the leftover sessionless process, adoption latency, the "another
 interactive `pi` on the same project" heuristic risk, and the draft-title UI.
 
+### R26 — Task 6 second fix round (authoritative, resolved 2026-10-19)
+R25's rule "a failed `startNew` does not dispose" is **wrong**, and the review
+proved the consequence: a failure that happens **after** Pi wrote the session file
+leaves the sessionless PTY already attached to that conversation; `ensureOpen`
+reuses it, and the next `startNew` still waits for a **different** file, so every
+retry dead-ends in 新会话创建超时. (The pre-R25 `finally` disposal was correct.)
+Correct rule: **dispose the bare runner on every `startNew` exit** — success and
+failure alike. The *store* keeps the draft (text + empty chat); the *runner* does
+not survive an attempt.
+- `turnRunnerFacade.test.ts`: a failed `startNew` calls `disposeChat`; the retry
+  builds a fresh runner (`runnerFor` called again); adoption still disposes exactly
+  once and the next `send` asks for the **adopted** path.
+- Insert the adopted `PiSessionMeta` only when the loaded list belongs to the same
+  project (`lastProject.path === project.path`); never prepend it to another
+  project's list.
+- If `PiRepository` already exports a session-id-from-path helper (or the store has
+  one), reuse it instead of the new duplicate (D22: no second copy).
+
+
 
 
 
