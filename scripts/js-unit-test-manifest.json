@@ -1052,6 +1052,19 @@
         "collapses a multi-line message into one line"
       ]
     },
+    "tests/unit/piTurnRunner.test.ts": {
+      "suite": "createPiTurnRunner",
+      "tests": [
+        "opens with the built command, delivers the line and CR, then returns the polled session",
+        "refuses a second send while a turn is in flight",
+        "reports a failed write without polling and clears busy",
+        "fails with a readiness error when the PTY never prints a prompt",
+        "times out when a poll never sees a new assistant turn",
+        "retries a failed session read and returns once the assistant turn appears",
+        "reuses the same handle for a later send after the first turn completes",
+        "dispose closes the handle, unsubscribes and refuses later sends"
+      ]
+    },
     "tests/unit/turnReadiness.test.ts": {
       "suite": "pi turn readiness",
       "tests": [

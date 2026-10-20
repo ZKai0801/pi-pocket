@@ -18,18 +18,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export interface ComposerDeliveryOptions {
+  submitDelayMs?: number;
+  pasteGapMs?: number;
+}
+
 /** Adapt the app's acknowledged PTY write effect to the pinned composer policy. */
 export function createComposerDeliveryController(
   writePty: PtyWriteEffect,
   wait: ComposerDeliveryEffects['sleep'] = sleep,
+  options: ComposerDeliveryOptions = {},
 ): ComposerDeliveryController {
-  return new ComposerDeliveryController({
-    write: async (bytes, context) => {
-      const acknowledgement = await writePty(bytes, context);
-      if (!acknowledgement.ok) {
-        throw new Error(acknowledgement.message || 'The terminal did not confirm this input.');
-      }
+  return new ComposerDeliveryController(
+    {
+      write: async (bytes, context) => {
+        const acknowledgement = await writePty(bytes, context);
+        if (!acknowledgement.ok) {
+          throw new Error(acknowledgement.message || 'The terminal did not confirm this input.');
+        }
+      },
+      sleep: wait,
     },
-    sleep: wait,
-  });
+    options,
+  );
 }
