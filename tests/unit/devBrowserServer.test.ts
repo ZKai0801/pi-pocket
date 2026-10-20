@@ -136,7 +136,11 @@ describe('browser dev mode live dev server', () => {
       expect(foreign.body).not.toContain(token);
     }
     expect((await get('/src/dev/browser/install.ts', `evil.example:${port}`)).status).toBe(403);
-  });
+    // Seven round trips to a real Vite dev server: on a Windows box the cold
+    // first request alone can take a second, so the 5 s default expires on a
+    // slower machine while every assertion still holds. The budget covers the
+    // requests, not a retry.
+  }, 30_000);
 
   it('refuses the bridge WebSocket from a foreign Host or a foreign Origin even with the right token', async () => {
     const devOrigin = `http://127.0.0.1:${port}`;

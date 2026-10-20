@@ -115,7 +115,12 @@ async function main() {
     }
   }
   viteArgs.push(...options.viteArgs);
-  const vite = spawn(path.join(repoRoot, 'node_modules', '.bin', 'vite'), viteArgs, { cwd: repoRoot, env, stdio: 'inherit' });
+  // Spawn Vite's CLI through node rather than the .bin/vite shim: that shim is
+  // a POSIX shell script, so on Windows CreateProcess fails with ENOENT and
+  // `dev:live` cannot start at all (the packaged-UI acceptance and
+  // tests/unit/devBrowserServer.test.ts both ride this launcher). Running the
+  // JS entry point directly is identical on every platform and needs no shell.
+  const vite = spawn(process.execPath, [path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js'), ...viteArgs], { cwd: repoRoot, env, stdio: 'inherit' });
   if (liveUrl) {
     process.stdout.write(
       '[dev-browser] Open this URL (it carries the per-run bridge token; keep it to this terminal):\n'
