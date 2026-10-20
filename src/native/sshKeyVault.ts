@@ -49,9 +49,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** The 36-character UUID shape the native vault uses for handles and secret ids. */
+export function isUuidShapedId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value);
+}
+
 export function isSshKeyMetadata(value: unknown): value is SshKeyMetadata {
   if (!isRecord(value)) return false;
-  return typeof value.handleId === 'string' && /^[0-9a-f-]{36}$/i.test(value.handleId)
+  return isUuidShapedId(value.handleId)
     && typeof value.label === 'string' && value.label.length > 0 && value.label.length <= 80
     && (value.algorithm === 'ssh-ed25519' || value.algorithm === 'ssh-rsa')
     && typeof value.fingerprintSha256 === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/.test(value.fingerprintSha256)

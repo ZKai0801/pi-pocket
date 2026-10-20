@@ -14,6 +14,22 @@
         "keeps grace and reconnect-on-return in the one shared settings store (D42)"
       ]
     },
+    "tests/unit/rememberedSecrets.test.ts": {
+      "suite": "rememberedSecrets",
+      "tests": [
+        "returns the id the native store handed back",
+        "rejects a reply that is not a UUID-shaped id",
+        "resolves null when the bridge rejects a lookup",
+        "returns a resolved secret verbatim",
+        "put forwards the kind and omits secretId when it was not given",
+        "put forwards an existing secretId",
+        "resolves null for a missing secret",
+        "resolves null for an empty-string secret instead of returning an empty password",
+        "forget calls the plugin with the id and resolves on deleted:false",
+        "forget rejects only when the bridge fails",
+        "passes the secret to the store without logging it"
+      ]
+    },
     "tests/unit/homeSurface.test.ts": {
       "suite": "phone workspace destinations",
       "tests": [
