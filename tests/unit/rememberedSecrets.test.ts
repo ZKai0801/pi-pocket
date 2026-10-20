@@ -59,6 +59,18 @@ describe('rememberedSecrets', () => {
     expect(await store.resolve(SECRET_ID)).toBeNull();
   });
 
+  it('resolves null when the reply has no secret field', async () => {
+    const native = plugin({ resolveSecret: vi.fn(async () => ({})) });
+    const store = createRememberedSecrets(native);
+    expect(await store.resolve(SECRET_ID)).toBeNull();
+  });
+
+  it('resolves null when the bridge answers a non-record', async () => {
+    const native = plugin({ resolveSecret: vi.fn(async () => null) });
+    const store = createRememberedSecrets(native);
+    expect(await store.resolve(SECRET_ID)).toBeNull();
+  });
+
   it('resolves null for an empty-string secret instead of returning an empty password', async () => {
     const native = plugin({ resolveSecret: vi.fn(async () => ({ secret: '' })) });
     const store = createRememberedSecrets(native);
@@ -70,6 +82,21 @@ describe('rememberedSecrets', () => {
     const store = createRememberedSecrets(plugin({ forgetSecret }));
     await expect(store.forget(SECRET_ID)).resolves.toBeUndefined();
     expect(forgetSecret).toHaveBeenCalledWith({ secretId: SECRET_ID });
+  });
+
+  it('forget resolves when the bridge answers deleted:true', async () => {
+    const forgetSecret = vi.fn(async () => ({ deleted: true }));
+    const store = createRememberedSecrets(plugin({ forgetSecret }));
+    await expect(store.forget(SECRET_ID)).resolves.toBeUndefined();
+    expect(forgetSecret).toHaveBeenCalledWith({ secretId: SECRET_ID });
+  });
+
+  it('forget rejects a malformed reply', async () => {
+    for (const reply of [{}, { deleted: 'yes' }]) {
+      const native = plugin({ forgetSecret: vi.fn(async () => reply) });
+      const store = createRememberedSecrets(native);
+      await expect(store.forget(SECRET_ID)).rejects.toThrow(/remembered secret reply/i);
+    }
   });
 
   it('forget rejects only when the bridge fails', async () => {

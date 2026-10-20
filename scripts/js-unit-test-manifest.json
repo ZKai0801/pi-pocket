@@ -24,8 +24,12 @@
         "put forwards the kind and omits secretId when it was not given",
         "put forwards an existing secretId",
         "resolves null for a missing secret",
+        "resolves null when the reply has no secret field",
+        "resolves null when the bridge answers a non-record",
         "resolves null for an empty-string secret instead of returning an empty password",
         "forget calls the plugin with the id and resolves on deleted:false",
+        "forget resolves when the bridge answers deleted:true",
+        "forget rejects a malformed reply",
         "forget rejects only when the bridge fails",
         "passes the secret to the store without logging it"
       ]
