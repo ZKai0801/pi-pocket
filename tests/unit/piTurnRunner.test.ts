@@ -6,6 +6,7 @@ import type { TurnPtyHandle } from '../../src/session/turnPty';
 
 interface FakeHandle extends TurnPtyHandle {
   writes: string[];
+  write: ReturnType<typeof vi.fn>;
   emit(chunk: string): void;
   unsubscribe: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
@@ -54,13 +55,20 @@ function harness(options: {
   writeError?: Error;
   reads: Array<ParsedPiSession | Error>;
   neverSettles?: boolean;
+  newest?: Array<string | null | Error>;
 }) {
   const handle = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
   const reads = [...options.reads];
+  const newest = [...(options.newest ?? [null])];
   const openPty = vi.fn(async (_command: string, _geometry: { cols: number; rows: number }) => handle);
   const readSession = vi.fn(async (_path: string) => {
     if (options.neverSettles) return new Promise<ParsedPiSession>(() => {});
     const next = reads.length > 1 ? reads.shift()! : reads[0]!;
+    if (next instanceof Error) throw next;
+    return next;
+  });
+  const newestSessionFile = vi.fn(async (_projectPath: string) => {
+    const next = newest.length > 1 ? newest.shift()! : newest[0]!;
     if (next instanceof Error) throw next;
     return next;
   });
@@ -73,6 +81,7 @@ function harness(options: {
     piCommand: '/opt/bin/pi',
     projectPath: '/home/kai/project',
     readSession,
+    newestSessionFile,
     sleep,
     now: () => nowMs,
     readyTimeoutMs: 20_000,
@@ -80,7 +89,7 @@ function harness(options: {
     pollIntervalMs: 1_000,
     submitDelayMs: 0,
   });
-  return { handle, openPty, reads, readSession, runner };
+  return { handle, openPty, reads, newest, readSession, newestSessionFile, runner };
 }
 
 describe('createPiTurnRunner', () => {
@@ -228,5 +237,120 @@ describe('createPiTurnRunner', () => {
       error: expect.stringMatching(/disposed/i),
     });
     expect(h.openPty).toHaveBeenCalledTimes(1);
+  });
+
+  it('startNew opens a sessionless command, adopts the newest file and returns its first assistant turn', async () => {
+    const completed = sessionWithAssistantTurns(1);
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl', '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0), completed],
+    });
+
+    const result = await h.runner.startNew('/home/kai/other', 'hi');
+
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+    expect(h.openPty).toHaveBeenCalledWith(
+      buildPiOpenCommand('/opt/bin/pi', '/home/kai/other'),
+      { cols: 80, rows: 24 },
+    );
+    expect(h.newestSessionFile).toHaveBeenCalledWith('/home/kai/other');
+    expect(h.handle.writes).toEqual(['hi', '\r']);
+    // The baseline list is read before the first byte is delivered.
+    expect(h.newestSessionFile.mock.invocationCallOrder[0]).toBeLessThan(
+      h.handle.write.mock.invocationCallOrder[0]!,
+    );
+    expect(h.readSession).toHaveBeenCalledWith('/r/new.jsonl');
+    expect(result).toEqual({
+      ok: true,
+      sessionFile: '/r/new.jsonl',
+      session: completed,
+    });
+    expect(h.runner.isBusy()).toBe(false);
+    expect(h.handle.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('startNew adopts the first file when the project had no sessions before', async () => {
+    const completed = sessionWithAssistantTurns(1);
+    const h = harness({
+      autoReady: true,
+      newest: [null, '/r/first.jsonl'],
+      reads: [sessionWithAssistantTurns(0), completed],
+    });
+
+    await expect(h.runner.startNew('/home/kai/project', 'hi')).resolves.toEqual({
+      ok: true,
+      sessionFile: '/r/first.jsonl',
+      session: completed,
+    });
+  });
+
+  it('startNew times out when no new session file appears', async () => {
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl'],
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const result = await h.runner.startNew('/home/kai/project', 'hi');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/new session file/i);
+    expect(result.ok === false && result.error).toMatch(/timeout|timed out/i);
+    expect(h.newestSessionFile.mock.calls.length).toBeGreaterThan(1);
+    expect(h.readSession).not.toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
+    expect(h.handle.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('startNew refuses an empty message without opening a PTY', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.startNew('/home/kai/project', ' \n\t ');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/empty/i);
+    expect(h.openPty).not.toHaveBeenCalled();
+    expect(h.newestSessionFile).not.toHaveBeenCalled();
+    expect(h.readSession).not.toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('startNew refuses a second turn while one is in flight', async () => {
+    const h = harness({
+      autoReady: false,
+      newest: ['/r/old.jsonl', '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    const first = h.runner.startNew('/home/kai/project', 'one');
+    const second = await h.runner.startNew('/home/kai/project', 'two');
+
+    expect(second).toEqual({ ok: false, error: expect.stringMatching(/running/i) });
+    await flushMicrotasks();
+    h.handle.emit('\u203a ');
+    await expect(first).resolves.toMatchObject({ ok: true, sessionFile: '/r/new.jsonl' });
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('startNew abandons an in-flight draft when the runner is disposed', async () => {
+    const h = harness({
+      autoReady: false,
+      newest: [null, '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const pending = h.runner.startNew('/home/kai/project', 'hi');
+    await flushMicrotasks();
+    h.runner.dispose();
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      error: expect.stringMatching(/disposed/i),
+    });
+    expect(h.handle.close).toHaveBeenCalledTimes(1);
+    expect(h.handle.unsubscribe).toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
   });
 });

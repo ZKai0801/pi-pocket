@@ -17,7 +17,12 @@ const store = useSessionsStore();
 
 const emit = defineEmits<{ 'open-terminal': [path: string] }>();
 
-const title = computed(() => store.open?.name ?? store.open?.id ?? '会话');
+const title = computed(() => {
+  const name = store.open?.name;
+  if (name) return name;
+  const id = store.open?.id;
+  return id ? id : '会话';
+});
 
 /** The chat's own project: the folder whose terminal the header opens. */
 const terminalPath = computed(() => store.lastProject?.path ?? null);

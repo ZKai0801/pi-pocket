@@ -23,7 +23,12 @@
 import { reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { PiRepository, type PiProject, type PiSessionMeta } from '../pi/piRepository';
-import { createPiTurnRunner, type PiTurnRunner, type PiTurnSendResult } from '../pi/piTurnRunner';
+import {
+  createPiTurnRunner,
+  type PiTurnRunner,
+  type PiTurnSendResult,
+  type PiTurnStartNewResult,
+} from '../pi/piTurnRunner';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession } from '../pi/types';
@@ -50,6 +55,8 @@ export interface SessionsStoreState {
   sending: boolean;
   /** The last send failure, already in the UI's language. */
   sendError: string | null;
+  /** The open chat is a draft: its first send creates the session file. */
+  startingNew: boolean;
 }
 
 export interface SessionsStore extends SessionsStoreState {
@@ -59,6 +66,11 @@ export interface SessionsStore extends SessionsStoreState {
   openSession(path: string): Promise<void>;
   /** Re-reads the open session, or reloads the last project, or does nothing. */
   refresh(): Promise<void>;
+  /**
+   * Opens an empty draft chat for `project`; the first `send` creates the
+   * session file and adopts it (spec §8.5). Requires a selected project.
+   */
+  newConversation(project: PiProject): void;
   /** Back navigation: clears the open session and its path. */
   closeChat(): void;
   /**
@@ -107,6 +119,7 @@ const TURN_ERROR_COPY: ReadonlyArray<readonly [RegExp, string]> = [
   [/not-sent|not sent/i, '消息未发送成功，请重试。'],
   [/empty/i, '消息为空。'],
   [/not become ready|\bready\b/i, 'Pi 尚未准备好，请稍后重试。'],
+  [/new session file/i, '新会话创建超时，请重试。'],
   [/timed out|timeout/i, '等待回复超时，请重试。'],
   [/did not confirm|write/i, '消息写入失败，请重试。'],
   [/opener|installed|live ssh connection/i, '发送通道尚未就绪，请稍后重试。'],
@@ -152,6 +165,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     error: null,
     sending: false,
     sendError: null,
+    startingNew: false,
   });
 
   // The active host, re-read at write time (D8): a run captured on one host
@@ -196,6 +210,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       sendToken += 1;
       state.sending = false;
       state.sendError = null;
+      state.startingNew = false;
     }
     const token = ++loadToken;
     loadInFlight = {
@@ -253,6 +268,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
           if (openToken !== token || hostId() !== host) return;
           state.open = session;
           state.openPath = path;
+          state.startingNew = false;
           state.state = 'ready';
         } catch (error) {
           if (openToken !== token || hostId() !== host) return;
@@ -264,6 +280,21 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       })(),
     };
     return openInFlight.promise;
+  }
+
+  // A draft chat is an ordinary empty `ParsedPiSession` with no path yet, so
+  // the existing chat surface and composer work unchanged. Any in-flight open
+  // or turn belongs to the chat being left and must not paint over the draft.
+  function newConversation(project: PiProject): void {
+    openToken += 1;
+    openInFlight = null;
+    sendToken += 1;
+    state.sending = false;
+    state.startingNew = true;
+    state.lastProject = project;
+    state.open = { version: 3, id: '', cwd: project.path, name: null, turns: [] };
+    state.openPath = null;
+    state.sendError = null;
   }
 
   async function refresh(): Promise<void> {
@@ -280,8 +311,14 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   // path it was made for, and both are re-checked at settlement (D8), so a
   // turn that lands after a host/project/chat switch never paints `open`.
   async function send(text: string): Promise<'sent' | 'busy' | 'error'> {
-    const sessionFile = state.openPath;
-    if (state.open === null || sessionFile === null || !deps.runner) {
+    const startingNew = state.startingNew;
+    const projectPath = startingNew ? state.open?.cwd ?? null : null;
+    const sessionFile = startingNew ? '' : state.openPath;
+    if (
+      state.open === null ||
+      !deps.runner ||
+      (startingNew ? projectPath === null : sessionFile === null)
+    ) {
       state.sendError = '当前无法发送消息。';
       return 'error';
     }
@@ -298,18 +335,40 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.sendError = null;
     try {
       let result: PiTurnSendResult;
+      let adoptedFile: string | null = null;
       try {
-        result = await runner.send(sessionFile, text);
+        if (startingNew) {
+          // A draft's first turn creates the file; the project directory is
+          // part of the claim, so a project switch mid-turn drops the write.
+          const created = await runner.startNew(projectPath as string, text);
+          if (created.ok) adoptedFile = created.sessionFile;
+          result = created;
+        } else {
+          result = await runner.send(sessionFile as string, text);
+        }
       } catch (error) {
         result = { ok: false, error: errorMessage(error) };
       }
       // A stale claim's turn is abandoned, never shown (D8): the host changed,
-      // the chat closed, or another project replaced it mid-flight.
-      if (sendToken !== token || hostId() !== host || state.openPath !== sessionFile) {
+      // the chat closed, the draft's project changed, or another project
+      // replaced it mid-flight.
+      const staleClaim =
+        sendToken !== token ||
+        hostId() !== host ||
+        (startingNew
+          ? !state.startingNew ||
+            state.open?.cwd !== projectPath ||
+            state.openPath !== null
+          : state.openPath !== sessionFile);
+      if (staleClaim) {
         return 'error';
       }
       if (result.ok) {
         state.open = result.session;
+        if (startingNew) {
+          state.openPath = adoptedFile;
+          state.startingNew = false;
+        }
         return 'sent';
       }
       state.sendError = localiseTurnError(result.error);
@@ -325,6 +384,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     sendToken += 1;
     state.sending = false;
     state.sendError = null;
+    state.startingNew = false;
     state.open = null;
     state.openPath = null;
   }
@@ -338,6 +398,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     sendToken += 1;
     state.sending = false;
     state.sendError = null;
+    state.startingNew = false;
     loadInFlight = null;
     openInFlight = null;
   }
@@ -359,8 +420,11 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     set sending(value: boolean) { state.sending = value; },
     get sendError() { return state.sendError; },
     set sendError(value: string | null) { state.sendError = value; },
+    get startingNew() { return state.startingNew; },
+    set startingNew(value: boolean) { state.startingNew = value; },
     load,
     openSession,
+    newConversation,
     refresh,
     closeChat,
     send,
@@ -411,6 +475,19 @@ async function readActiveSession(path: string): Promise<ParsedPiSession> {
   return new PiRepository(piLive().transport(), root).readSession(path);
 }
 
+/**
+ * The project's newest session file, from the existing newest-first session
+ * listing (no new shell builder). `null` means the project has none yet.
+ */
+async function newestSessionFileOnActiveHost(projectPath: string): Promise<string | null> {
+  const root = await resolveActiveSessionRoot();
+  const sessions = await new PiRepository(piLive().transport(), root).listSessions({
+    path: projectPath,
+    name: projectBasename(projectPath),
+  });
+  return sessions.length > 0 ? sessions[0]?.path ?? null : null;
+}
+
 export interface TurnRunnerCacheDeps {
   /** The active host name, read now. */
   hostId: () => string | null;
@@ -443,7 +520,7 @@ export interface TurnRunnerCache {
  * the stale error instead of caching a runner bound to the wrong directory.
  */
 export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCache {
-  let cached: { key: string; runner: PiTurnRunner } | null = null;
+  let cached: { key: string; projectPath: string; runner: PiTurnRunner } | null = null;
   // `resolvePiCommand` probes the shell once per connection, not per chat.
   let cachedCommand: { host: string; command: string } | null = null;
   let generation = 0;
@@ -460,8 +537,20 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     disposeChat();
   }
 
-  function claimed(started: number, host: string | null, path: string | null): boolean {
-    return generation === started && deps.hostId() === host && deps.openPath() === path;
+  function claimed(
+    started: number,
+    host: string | null,
+    path: string | null,
+    projectPath: string,
+  ): boolean {
+    // A draft's open path is always null, so the project directory is the only
+    // thing that can prove which conversation the build was claimed for.
+    return (
+      generation === started &&
+      deps.hostId() === host &&
+      deps.openPath() === path &&
+      deps.projectPath() === projectPath
+    );
   }
 
   async function commandFor(
@@ -487,22 +576,30 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     const path = deps.openPath();
     const projectPath = deps.projectPath();
     const key = `${host ?? ''}\n${sessionFile}`;
-
-    if (path !== sessionFile) throw new Error(STALE_TURN_ERROR);
-    if (cached !== null && cached.key === key) return cached.runner;
+    // A draft chat has no session path yet; its key is host + '' and the
+    // project directory keeps two drafts from sharing a runner.
+    const draft = sessionFile === '';
+    if (path !== (draft ? null : sessionFile)) throw new Error(STALE_TURN_ERROR);
+    if (
+      cached !== null &&
+      cached.key === key &&
+      cached.projectPath === projectPath
+    ) {
+      return cached.runner;
+    }
     if (projectPath === null) throw new Error('会话缺少项目目录，无法发送。');
     if (cached !== null) disposeChat();
 
     const command = await commandFor(host ?? '', started);
-    if (!claimed(started, host, path)) throw new Error(STALE_TURN_ERROR);
+    if (!claimed(started, host, path, projectPath)) throw new Error(STALE_TURN_ERROR);
     if (!command.ok) throw new Error(command.error);
 
     const runner = deps.build(command.command, projectPath);
-    if (!claimed(started, host, path)) {
+    if (!claimed(started, host, path, projectPath)) {
       runner.dispose();
       throw new Error(STALE_TURN_ERROR);
     }
-    cached = { key, runner };
+    cached = { key, projectPath, runner };
     return runner;
   }
 
@@ -542,6 +639,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         // PiRepository bounds its own fallback exec; the turn's overall deadline
         // is the runner's, not a single read's.
         readSession: readSessionOnActiveHost,
+        newestSessionFile: newestSessionFileOnActiveHost,
         pollIntervalMs: clampTurnPollInterval(TURN_POLL_INTERVAL_MS),
       }),
   });
@@ -550,10 +648,12 @@ export const useSessionsStore = defineStore('sessions', () => {
     turnRunners.dispose();
   }
 
-  let pendingTurn: Promise<PiTurnSendResult> | null = null;
+  let pendingTurn: Promise<PiTurnSendResult | PiTurnStartNewResult> | null = null;
 
   // Serializes the build + turn before a runner exists: two taps in the same
-  // tick must not open two turn PTYs (D10).
+  // tick must not open two turn PTYs (D10). The draft runner is built under the
+  // host + '' key and disposed as soon as it adopts a file: the next turn uses
+  // the normal `--session <adopted>` runner.
   const runnerFacade: PiTurnRunner = {
     isBusy: () => pendingTurn !== null || turnRunners.isBusy(),
     send(sessionFile, message) {
@@ -564,6 +664,30 @@ export const useSessionsStore = defineStore('sessions', () => {
         try {
           const runner = await turnRunners.runnerFor(sessionFile);
           return await runner.send(sessionFile, message);
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      })();
+      pendingTurn = run;
+      void run.then(() => {
+        if (pendingTurn === run) pendingTurn = null;
+      });
+      return run;
+    },
+    startNew(projectPath, message) {
+      if (pendingTurn !== null) {
+        return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
+      }
+      const run = (async (): Promise<PiTurnStartNewResult> => {
+        try {
+          const runner = await turnRunners.runnerFor('');
+          try {
+            return await runner.startNew(projectPath, message);
+          } finally {
+            // A failed draft attempt must not leave a sessionless PTY cached:
+            // a retry has to start a fresh session, not reuse the failed one.
+            turnRunners.disposeChat();
+          }
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
@@ -632,6 +756,13 @@ export const useSessionsStore = defineStore('sessions', () => {
     store.closeChat();
   }
 
+  function newConversation(project: PiProject): void {
+    // A draft already has `openPath === null`, so the openPath watch cannot
+    // see a second `+`; dispose here so its retry/next draft starts fresh.
+    turnRunners.disposeChat();
+    store.newConversation(project);
+  }
+
   return {
     sessions: toRef(store, 'sessions'),
     open: toRef(store, 'open'),
@@ -641,8 +772,10 @@ export const useSessionsStore = defineStore('sessions', () => {
     error: toRef(store, 'error'),
     sending: toRef(store, 'sending'),
     sendError: toRef(store, 'sendError'),
+    startingNew: toRef(store, 'startingNew'),
     load: store.load,
     openSession: store.openSession,
+    newConversation,
     refresh: store.refresh,
     closeChat,
     send: store.send,

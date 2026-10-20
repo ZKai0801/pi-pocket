@@ -15,6 +15,7 @@ type StubRunner = PiTurnRunner & { dispose: ReturnType<typeof vi.fn>; isBusy: Re
 function stubRunner(): StubRunner {
   return {
     send: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
+    startNew: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),
   };
@@ -154,6 +155,56 @@ describe('turn runner cache', () => {
 
     await expect(cache.runnerFor('/r/a.jsonl')).rejects.toThrow(STALE);
     expect(resolveCommand).not.toHaveBeenCalled();
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  it('builds one draft runner for the empty session key and the open project', async () => {
+    const { cache, build, built } = cacheWith({
+      openPath: () => null,
+      projectPath: () => '/p/a',
+    });
+
+    const first = await cache.runnerFor('');
+    const second = await cache.runnerFor('');
+
+    expect(second).toBe(first);
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(build).toHaveBeenCalledWith('/usr/bin/pi', '/p/a');
+    expect(built[0]?.dispose).not.toHaveBeenCalled();
+  });
+
+  it('refuses a draft build whose project changed while the probe ran', async () => {
+    const probe = deferred<{ ok: true; command: string }>();
+    let project = '/p/a';
+    const { cache, build } = cacheWith({
+      openPath: () => null,
+      projectPath: () => project,
+      resolveCommand: () => probe.promise,
+    });
+
+    const stale = cache.runnerFor('');
+    project = '/p/b';
+    probe.resolve({ ok: true, command: '/usr/bin/pi' });
+
+    await expect(stale).rejects.toThrow(STALE);
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  it('refuses a draft build whose host changed while the probe ran', async () => {
+    const probe = deferred<{ ok: true; command: string }>();
+    let host = 'A';
+    const { cache, build } = cacheWith({
+      hostId: () => host,
+      openPath: () => null,
+      projectPath: () => '/p/a',
+      resolveCommand: () => probe.promise,
+    });
+
+    const stale = cache.runnerFor('');
+    host = 'B';
+    probe.resolve({ ok: true, command: '/usr/bin/pi' });
+
+    await expect(stale).rejects.toThrow(STALE);
     expect(build).not.toHaveBeenCalled();
   });
 });

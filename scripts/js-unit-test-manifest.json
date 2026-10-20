@@ -1065,7 +1065,13 @@
         "refuses an empty message without opening a PTY",
         "retries a failed session read and returns once the assistant turn appears",
         "reuses the same handle for a later send after the first turn completes",
-        "dispose closes the handle, unsubscribes and refuses later sends"
+        "dispose closes the handle, unsubscribes and refuses later sends",
+        "startNew opens a sessionless command, adopts the newest file and returns its first assistant turn",
+        "startNew adopts the first file when the project had no sessions before",
+        "startNew times out when no new session file appears",
+        "startNew refuses an empty message without opening a PTY",
+        "startNew refuses a second turn while one is in flight",
+        "startNew abandons an in-flight draft when the runner is disposed"
       ]
     },
     "tests/unit/turnReadiness.test.ts": {
@@ -1235,6 +1241,10 @@
         "refuses to send without a runner and never throws",
         "clears the last send error when the host changes",
         "clears the last send error when another project loads",
+        "newConversation opens an empty draft chat for the selected project",
+        "sends the first draft message through startNew and adopts the new file",
+        "keeps the draft chat when startNew fails",
+        "drops a draft turn whose project changed before it settled",
         "maps every runner failure string to its own copy"
       ]
     },
@@ -1259,7 +1269,17 @@
         "disposes the chat runner on a chat close but keeps the resolved command",
         "refuses without a project directory and never probes the shell",
         "propagates a failed command resolution without building a runner",
-        "refuses a chat that is no longer open before probing"
+        "refuses a chat that is no longer open before probing",
+        "builds one draft runner for the empty session key and the open project",
+        "refuses a draft build whose project changed while the probe ran",
+        "refuses a draft build whose host changed while the probe ran"
+      ]
+    },
+    "tests/unit/sessionListNewChat.test.ts": {
+      "suite": "session list new chat",
+      "tests": [
+        "disables the new-chat button without a selected project",
+        "enables the new-chat button for a project and opens a draft conversation"
       ]
     }
   }

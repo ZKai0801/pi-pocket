@@ -2,9 +2,10 @@
 /**
  * The 会话 tab's list (spec §8.5): the selected project's Pi conversations,
  * most recent first, each row title + preview + relative time. Tapping a row
- * opens it in the read-only chat; the + is inert in this version (no new
- * sessions from the phone yet). The list loads for the projects tab's
- * selection; with nothing selected it is a hint, not an empty list.
+ * opens it in the read-only chat; the + opens a draft chat for the selected
+ * project, whose first message creates the session. The list loads for the
+ * projects tab's selection; with nothing selected it is a hint, not an empty
+ * list.
  */
 import { computed, onMounted } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
@@ -32,6 +33,12 @@ function openSession(path: string): void {
   void store.openSession(path);
 }
 
+function newConversation(): void {
+  const project = store.lastProject;
+  if (project === null) return;
+  store.newConversation(project);
+}
+
 function retry(): void {
   void store.refresh();
 }
@@ -41,7 +48,13 @@ function retry(): void {
   <section class="sessions">
     <header class="sessions__bar">
       <h1 class="sessions__title">会话</h1>
-      <button type="button" class="sessions__add" aria-label="新建会话" disabled>
+      <button
+        type="button"
+        class="sessions__add"
+        aria-label="新建会话"
+        :disabled="store.lastProject === null"
+        @click="newConversation"
+      >
         <AppIcon name="plus" />
       </button>
     </header>

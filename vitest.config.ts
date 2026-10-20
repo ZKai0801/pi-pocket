@@ -31,6 +31,7 @@ export default defineConfig({
       '**/tests/unit/composerNoSpeechWarning.test.ts',
       '**/tests/unit/inlineDictationNoSpeech.test.ts',
       '**/tests/unit/chatComposer.test.ts',
+      '**/tests/unit/sessionListNewChat.test.ts',
     ] },
     include: ['tests/unit/**/*.test.ts'],
   },
