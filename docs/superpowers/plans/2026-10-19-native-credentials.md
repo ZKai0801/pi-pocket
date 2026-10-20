@@ -306,7 +306,8 @@ Keystore alias, app-data wipe and the bridge round-trip stay Plan 5 device check
 **Interfaces:**
 - Consumes: `SshKeyVaultPlugin` registration (Task 2).
 - Produces:
-  - `interface RememberedSecrets { put(secret: string, secretId?: string): Promise<string>; resolve(secretId: string): Promise<string | null>; forget(secretId: string): Promise<void> }`
+  - `type RememberedSecretKind = 'key-passphrase' | 'password'`
+- `interface RememberedSecrets { put(secret: string, kind: RememberedSecretKind, secretId?: string): Promise<string>; resolve(secretId: string): Promise<string | null>; forget(secretId: string): Promise<void> }`
   - `function createRememberedSecrets(plugin: NativeRememberedSecretsPlugin): RememberedSecrets`
 
 - [ ] **Step 1: Write the failing tests**
@@ -319,12 +320,12 @@ import { createRememberedSecrets } from '../../src/native/rememberedSecrets';
 describe('rememberedSecrets', () => {
   it('returns the id the native store handed back', async () => {
     const store = createRememberedSecrets({ rememberSecret: vi.fn(async () => ({ secretId: 's-1' })), resolveSecret: vi.fn(), forgetSecret: vi.fn() } as never);
-    expect(await store.put('pw')).toBe('s-1');
+    expect(await store.put('pw', 'password')).toBe('s-1');
   });
 
   it('rejects a reply that is not a UUID-shaped id', async () => {
     const store = createRememberedSecrets({ rememberSecret: vi.fn(async () => ({ secretId: 'nope' })), resolveSecret: vi.fn(), forgetSecret: vi.fn() } as never);
-    await expect(store.put('pw')).rejects.toThrow();
+    await expect(store.put('pw', 'password')).rejects.toThrow();
   });
 
   it('resolves null for a missing secret instead of throwing', async () => {
