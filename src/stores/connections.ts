@@ -187,9 +187,14 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
   async function save(host: SavedHost, previousName?: string | null, secret?: string | null): Promise<void> {
     const previous = previousRecords(previousName, host.name);
     const typed = typeof secret === 'string' && secret.length > 0 ? secret : null;
-    const record = typed === null
-      ? withoutUnusedSecretId(host)
-      : withSealedSecret(host, await secrets.put(typed, secretKind(host)));
+    let sealedId: string | null = null;
+    let record: SavedHost;
+    if (typed === null) {
+      record = withoutUnusedSecretId(host);
+    } else {
+      sealedId = await secrets.put(typed, secretKind(host));
+      record = withSealedSecret(host, sealedId);
+    }
 
     // A rename replaces the old record rather than sitting beside it, and the
     // active row follows the new name so it keeps its connected state.
@@ -199,7 +204,14 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       if (state.activeName === previousName) state.activeName = record.name;
       if (state.pendingSwitch === previousName) state.pendingSwitch = record.name;
     }
-    deps.hosts.save(record);
+    try {
+      deps.hosts.save(record);
+    } catch (error) {
+      // The record never landed, so the secret sealed for it has no owner:
+      // forget it rather than leaving an orphan behind.
+      if (sealedId !== null) await forgetSwallowed([sealedId]);
+      throw error;
+    }
     load();
 
     const stillReferenced = referencedSecretIds(record);
@@ -331,28 +343,35 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       state.pendingSwitch = null;
 
       // Every saved host dials with a credential built here, from opaque ids
-      // only: a v1 key host falls back to its key handle (Plan 4, R29).
-      let credential: SshCredential;
-      try {
-        credential = await buildSshCredential(
-          host.auth ?? { kind: 'key', keyHandleId: host.keyHandleId },
-          (secretId) => secrets.resolve(secretId),
-        );
-      } catch (error) {
-        // A missing password is an actionable failure, not a dial.
-        state.status = 'error';
-        state.lastError = errorMessage(error);
-        return;
+      // only: a v1 key host falls back to its key handle (Plan 4, R29). A key
+      // host whose handle was cleared by a key delete has nothing to build, so
+      // it dials with no credential at all and `resolve` raises its actionable
+      // "choose a key" error instead of handing the plugin an empty handle.
+      const auth = host.auth ?? { kind: 'key' as const, keyHandleId: host.keyHandleId };
+      const keyless = auth.kind === 'key' && auth.keyHandleId.trim() === '';
+      let credential: SshCredential | undefined;
+      if (!keyless) {
+        try {
+          credential = await buildSshCredential(auth, (secretId) => secrets.resolve(secretId));
+        } catch (error) {
+          // A missing password is an actionable failure, not a dial.
+          state.status = 'error';
+          state.lastError = errorMessage(error);
+          return;
+        }
       }
 
+      const request = {
+        host: host.hostname,
+        port: host.port,
+        user: host.user,
+        hostAlias: host.name,
+      };
       let target: SshHostTarget;
       try {
-        target = await deps.hosts.resolve({
-          host: host.hostname,
-          port: host.port,
-          user: host.user,
-          hostAlias: host.name,
-        }, credential);
+        target = credential === undefined
+          ? await deps.hosts.resolve(request)
+          : await deps.hosts.resolve(request, credential);
       } catch (error) {
         state.status = 'error';
         state.lastError = errorMessage(error);

@@ -956,13 +956,16 @@
         "dials a password host with the sealed password",
         "reports a missing saved password instead of dialling",
         "sends no passphrase and reads no secret when remembering is off",
+        "refuses a keyless key host with no dial and no credential argument",
         "forgets the previous secret when a save stops referencing it",
+        "drops an unread secret id from the written record so it can be forgotten",
         "keeps a secret the new record still references",
         "keeps the remembered secret when the host is renamed",
         "remove forgets every remembered secret the record held",
         "saveSecret seals a key passphrase and writes its id",
         "saveSecret seals a password and writes its id",
         "save seals a supplied secret before writing the record",
+        "forgets the just-sealed secret when the host write fails",
         "a failing forget never blocks a save or a remove",
         "forgetSecrets clears the stored ids and rewrites the record"
       ]
