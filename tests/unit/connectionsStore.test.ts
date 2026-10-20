@@ -39,7 +39,10 @@ describe('connections store', () => {
     const d = deps();
     const store = createConnectionsStore(d as never);
     await store.connect('kai');
-    expect(d.hosts.resolve).toHaveBeenCalledWith({ host: '192.168.1.3', port: 22, user: 'kai', hostAlias: 'kai' });
+    expect(d.hosts.resolve).toHaveBeenCalledWith(
+      { host: '192.168.1.3', port: 22, user: 'kai', hostAlias: 'kai' },
+      { kind: 'key-handle', handleId: 'h-1', passphrase: null },
+    );
     expect(d.port.connect).toHaveBeenCalledWith(
       expect.objectContaining({ credential: { kind: 'key-handle', handleId: 'h-1' } }),
     );

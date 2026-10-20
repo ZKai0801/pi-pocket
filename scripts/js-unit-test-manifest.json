@@ -949,6 +949,24 @@
         "neutralises a javascript: link"
       ]
     },
+    "tests/unit/connectionsCredentials.test.ts": {
+      "suite": "connections store credentials",
+      "tests": [
+        "dials with the remembered key passphrase",
+        "dials a password host with the sealed password",
+        "reports a missing saved password instead of dialling",
+        "sends no passphrase and reads no secret when remembering is off",
+        "forgets the previous secret when a save stops referencing it",
+        "keeps a secret the new record still references",
+        "keeps the remembered secret when the host is renamed",
+        "remove forgets every remembered secret the record held",
+        "saveSecret seals a key passphrase and writes its id",
+        "saveSecret seals a password and writes its id",
+        "save seals a supplied secret before writing the record",
+        "a failing forget never blocks a save or a remove",
+        "forgetSecrets clears the stored ids and rewrites the record"
+      ]
+    },
     "tests/unit/connectionsStore.test.ts": {
       "suite": "connections store",
       "tests": [
@@ -974,7 +992,10 @@
         "loads a key auth record saved before remember fields existed",
         "round-trips rememberPassphrase and secretId through a save",
         "drops a key auth with a malformed remember flag or secret id",
-        "refuses to dial a password host until Plan 4 wires the secret"
+        "refuses to dial a password host until Plan 4 wires the secret",
+        "dials a password host with a supplied credential",
+        "dials a key host with no handle when a supplied credential replaces it",
+        "still refuses a key host with no handle and no credential"
       ]
     },
     "tests/unit/buildSshCredential.test.ts": {

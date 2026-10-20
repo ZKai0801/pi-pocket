@@ -76,4 +76,28 @@ describe('SavedHost auth', () => {
     await expect(make(seed).resolve({ host: 'h', user: 'u', hostAlias: 'p' }))
       .rejects.toThrow(/password|credential/i);
   });
+
+  it('dials a password host with a supplied credential', async () => {
+    const seed = JSON.stringify([{ name: 'p', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
+      auth: { kind: 'password', passwordCredentialId: 's-1' } }]);
+    const credential = { kind: 'password' as const, password: 'pw' };
+    const target = await make(seed).resolve({ host: 'h', user: 'u', hostAlias: 'p' }, credential);
+    expect(target).toEqual({
+      hostId: 'u@h:22', hostname: 'h', port: 22, username: 'u', credential,
+    });
+  });
+
+  it('dials a key host with no handle when a supplied credential replaces it', async () => {
+    const seed = JSON.stringify([{ name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
+      auth: { kind: 'key', keyHandleId: '' } }]);
+    const credential = { kind: 'key-handle' as const, handleId: 'h-9', passphrase: null };
+    const target = await make(seed).resolve({ host: 'h', user: 'u', hostAlias: 'k' }, credential);
+    expect(target.credential).toEqual(credential);
+  });
+
+  it('still refuses a key host with no handle and no credential', async () => {
+    const seed = JSON.stringify([{ name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: '' }]);
+    await expect(make(seed).resolve({ host: 'h', user: 'u', hostAlias: 'k' }))
+      .rejects.toThrow(/SSH key/i);
+  });
 });

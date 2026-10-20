@@ -52,7 +52,7 @@ function closeEditor(): void {
 }
 
 function saveHost(host: SavedHost): void {
-  store.save(host, editing.value?.name ?? null);
+  void store.save(host, editing.value?.name ?? null);
   closeEditor();
 }
 

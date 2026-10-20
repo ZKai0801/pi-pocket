@@ -11,7 +11,7 @@
  *    host names either a key handle or an opaque password-credential id, and
  *    the native plugin resolves the secret at dial time.
  */
-import type { HostEntry, SshHostTarget } from '@pocketshell/core';
+import type { HostEntry, SshCredential, SshHostTarget } from '@pocketshell/core';
 import { makeLegacySshHostTarget } from '@/migration/legacySshTarget';
 import type { ImportedLegacyHost } from '@/migration/installedDataMigration';
 
@@ -191,7 +191,10 @@ export class AndroidHostStore {
    * The dial target for a connect request, matched the way the shared store
    * names it: by alias first, then hostname + port.
    */
-  async resolve(request: { host: string; port?: number; user: string; hostAlias?: string }): Promise<SshHostTarget> {
+  async resolve(
+    request: { host: string; port?: number; user: string; hostAlias?: string },
+    credential?: SshCredential,
+  ): Promise<SshHostTarget> {
     const port = request.port ?? 22;
     const saved = this.readSaved();
     const atAddress = (host: SavedHost) => host.hostname === request.host && host.port === port;
@@ -202,18 +205,22 @@ export class AndroidHostStore {
       (request.user ? saved.find((host) => atAddress(host) && host.user === request.user) : undefined) ??
       saved.find(atAddress);
     if (savedMatch) {
-      if (savedMatch.auth?.kind === 'password') {
-        // The secret lives in the native vault (Plan 4); refuse rather than
-        // dial it keyless with a misleading "choose a key" message.
-        throw new Error(`“${savedMatch.name}” uses a password credential that is not available yet.`);
+      // The caller resolved the record's secret (Plan 4) and its credential is
+      // authoritative: use it verbatim instead of refusing the dial.
+      if (credential === undefined) {
+        if (savedMatch.auth?.kind === 'password') {
+          // The secret lives in the native vault; refuse rather than dial it
+          // keyless with a misleading "choose a key" message.
+          throw new Error(`“${savedMatch.name}” uses a password credential that is not available yet.`);
+        }
+        if (!savedMatch.keyHandleId) throw new MissingHostCredential(savedMatch);
       }
-      if (!savedMatch.keyHandleId) throw new MissingHostCredential(savedMatch);
       return {
         hostId: `${savedMatch.user}@${savedMatch.hostname}:${savedMatch.port}`,
         hostname: savedMatch.hostname,
         port: savedMatch.port,
         username: request.user || savedMatch.user,
-        credential: { kind: 'key-handle', handleId: savedMatch.keyHandleId },
+        credential: credential ?? { kind: 'key-handle', handleId: savedMatch.keyHandleId },
       };
     }
     if (this.legacy.length === 0) this.legacy = await this.options.readLegacyHosts().catch(() => []);

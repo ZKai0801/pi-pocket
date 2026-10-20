@@ -15,8 +15,10 @@
  */
 import { reactive, toRef } from 'vue';
 import { defineStore } from 'pinia';
-import type { SshHostTarget } from '@pocketshell/core';
-import type { AndroidHostStore, SavedHost } from '../platform/android/hostStore';
+import type { SshCredential, SshHostTarget } from '@pocketshell/core';
+import type { AndroidHostStore, HostAuth, SavedHost } from '../platform/android/hostStore';
+import type { RememberedSecretKind, RememberedSecrets } from '../native/rememberedSecrets';
+import { buildSshCredential } from '../credentials/buildSshCredential';
 import { connectionPort, type ConnectionPort } from '../session/connectionPort';
 
 /** The exact method surface the store needs from the Android host source. */
@@ -36,7 +38,16 @@ export interface ConnectionsStoreState {
 
 export interface ConnectionsStore extends ConnectionsStoreState {
   load(): void;
-  save(host: SavedHost, previousName?: string | null): void;
+  /**
+   * Save a host, sealing `secret` (a passphrase or password) first. The old
+   * record keeps its rename semantics; a secret the new record no longer
+   * references is forgotten after the write.
+   */
+  save(host: SavedHost, previousName?: string | null, secret?: string | null): Promise<void>;
+  /** Seal a secret for the host and write the record; never renames. */
+  saveSecret(host: SavedHost, secret: string): Promise<void>;
+  /** The explicit "clear saved credentials" action: forget and rewrite the record. */
+  forgetSecrets(name: string): Promise<void>;
   /** Removes the host and, if it is the live one, closes it first (D8). */
   remove(name: string): Promise<void>;
   connect(name: string): Promise<void>;
@@ -58,11 +69,78 @@ export interface ConnectionsStore extends ConnectionsStoreState {
 export interface ConnectionsStoreDeps {
   hosts: ConnectionsHosts;
   port: ConnectionPort;
+  /** Optional so existing callers and tests keep their dependency shape. */
+  secrets?: RememberedSecrets;
 }
+
+/**
+ * The fail-closed default: nothing is remembered, forgetting is a no-op, and a
+ * write is refused loudly rather than silently losing a secret.
+ */
+const NO_REMEMBERED_SECRETS: RememberedSecrets = {
+  put: async () => { throw new Error('The remembered-secret store is not available.'); },
+  resolve: async () => null,
+  forget: async () => {},
+};
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
   return 'The connection could not be opened.';
+}
+
+/** Which sealed secret a newly typed value becomes for this host. */
+function secretKind(host: SavedHost): RememberedSecretKind {
+  return host.auth?.kind === 'password' ? 'password' : 'key-passphrase';
+}
+
+/** Every id a record holds, whether or not it currently uses it. */
+function heldSecretIds(host: SavedHost | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!host) return ids;
+  if (host.auth?.kind === 'password') {
+    if (host.auth.passwordCredentialId) ids.add(host.auth.passwordCredentialId);
+  } else if (host.auth?.kind === 'key' && host.auth.secretId) {
+    ids.add(host.auth.secretId);
+  }
+  return ids;
+}
+
+/** The ids a written record actually reads from the store at dial time. */
+function referencedSecretIds(host: SavedHost): Set<string> {
+  if (host.auth?.kind === 'password') {
+    return host.auth.passwordCredentialId ? new Set([host.auth.passwordCredentialId]) : new Set();
+  }
+  if (host.auth?.kind === 'key' && host.auth.rememberPassphrase === true && host.auth.secretId) {
+    return new Set([host.auth.secretId]);
+  }
+  return new Set();
+}
+
+/** Drop a secret id the record would not use, so it can be forgotten. */
+function withoutUnusedSecretId(host: SavedHost): SavedHost {
+  if (host.auth?.kind !== 'key' || host.auth.secretId === undefined) return host;
+  if (host.auth.rememberPassphrase === true) return host;
+  const { secretId: _unused, ...auth } = host.auth;
+  return { ...host, auth };
+}
+
+/** Write a newly sealed id into the field the record's auth kind reads. */
+function withSealedSecret(host: SavedHost, secretId: string): SavedHost {
+  if (host.auth?.kind === 'password') {
+    return { ...host, auth: { kind: 'password', passwordCredentialId: secretId } };
+  }
+  const auth = host.auth ?? { kind: 'key' as const, keyHandleId: host.keyHandleId };
+  return { ...host, auth: { ...auth, rememberPassphrase: true, secretId } };
+}
+
+/** Rewrite the record without any id it used to point at. */
+function withoutSecretIds(host: SavedHost): SavedHost {
+  if (host.auth?.kind === 'password') {
+    return { ...host, auth: { kind: 'password', passwordCredentialId: '' } };
+  }
+  if (host.auth?.kind !== 'key') return host;
+  const auth: HostAuth = { kind: 'key', keyHandleId: host.auth.keyHandleId };
+  return { ...host, auth };
 }
 
 export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsStore {
@@ -74,20 +152,70 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     pendingSwitch: null,
   });
 
+  const secrets = deps.secrets ?? NO_REMEMBERED_SECRETS;
+
   function load(): void {
     state.hosts = deps.hosts.savedHosts();
   }
 
-  function save(host: SavedHost, previousName?: string | null): void {
+  function findRecord(name: string): SavedHost | undefined {
+    return deps.hosts.savedHosts().find((candidate) => candidate.name === name)
+      ?? state.hosts.find((candidate) => candidate.name === name);
+  }
+
+  /** The records a save replaces: the renamed one and any same-name one. */
+  function previousRecords(previousName: string | null | undefined, name: string): SavedHost[] {
+    const records = new Map<string, SavedHost>();
+    for (const candidate of [previousName ?? name, name]) {
+      const record = findRecord(candidate);
+      if (record) records.set(record.name, record);
+    }
+    return [...records.values()];
+  }
+
+  /** Forgetting is cleanup: it never fails the write or delete that caused it. */
+  async function forgetSwallowed(ids: Iterable<string>): Promise<void> {
+    for (const id of new Set(ids)) {
+      try {
+        await secrets.forget(id);
+      } catch {
+        // An orphaned secret is recoverable; a failed save or delete is not.
+      }
+    }
+  }
+
+  async function save(host: SavedHost, previousName?: string | null, secret?: string | null): Promise<void> {
+    const previous = previousRecords(previousName, host.name);
+    const typed = typeof secret === 'string' && secret.length > 0 ? secret : null;
+    const record = typed === null
+      ? withoutUnusedSecretId(host)
+      : withSealedSecret(host, await secrets.put(typed, secretKind(host)));
+
     // A rename replaces the old record rather than sitting beside it, and the
     // active row follows the new name so it keeps its connected state.
-    const renamed = Boolean(previousName) && previousName !== host.name;
+    const renamed = Boolean(previousName) && previousName !== record.name;
     if (renamed) {
       deps.hosts.remove(previousName as string);
-      if (state.activeName === previousName) state.activeName = host.name;
-      if (state.pendingSwitch === previousName) state.pendingSwitch = host.name;
+      if (state.activeName === previousName) state.activeName = record.name;
+      if (state.pendingSwitch === previousName) state.pendingSwitch = record.name;
     }
-    deps.hosts.save(host);
+    deps.hosts.save(record);
+    load();
+
+    const stillReferenced = referencedSecretIds(record);
+    const stale = previous.flatMap((old) => [...heldSecretIds(old)]).filter((id) => !stillReferenced.has(id));
+    await forgetSwallowed(stale);
+  }
+
+  async function saveSecret(host: SavedHost, secret: string): Promise<void> {
+    await save(host, null, secret);
+  }
+
+  async function forgetSecrets(name: string): Promise<void> {
+    const host = findRecord(name);
+    if (!host) return;
+    for (const id of heldSecretIds(host)) await secrets.forget(id);
+    deps.hosts.save(withoutSecretIds(host));
     load();
   }
 
@@ -104,10 +232,13 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
   }
 
   async function remove(name: string): Promise<void> {
+    const removed = findRecord(name);
     // D8: never drop the tracking of a live connection without closing it.
     if (state.activeName === name) await disconnect();
     deps.hosts.remove(name);
     load();
+    // The record is gone, so its sealed secrets must not survive it.
+    await forgetSwallowed(heldSecretIds(removed));
   }
 
   const CONNECTED_PHASES = new Set(['connected', 'listing', 'attaching', 'live']);
@@ -199,6 +330,21 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       state.lastError = null;
       state.pendingSwitch = null;
 
+      // Every saved host dials with a credential built here, from opaque ids
+      // only: a v1 key host falls back to its key handle (Plan 4, R29).
+      let credential: SshCredential;
+      try {
+        credential = await buildSshCredential(
+          host.auth ?? { kind: 'key', keyHandleId: host.keyHandleId },
+          (secretId) => secrets.resolve(secretId),
+        );
+      } catch (error) {
+        // A missing password is an actionable failure, not a dial.
+        state.status = 'error';
+        state.lastError = errorMessage(error);
+        return;
+      }
+
       let target: SshHostTarget;
       try {
         target = await deps.hosts.resolve({
@@ -206,7 +352,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
           port: host.port,
           user: host.user,
           hostAlias: host.name,
-        });
+        }, credential);
       } catch (error) {
         state.status = 'error';
         state.lastError = errorMessage(error);
@@ -249,6 +395,8 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     set pendingSwitch(value: string | null) { state.pendingSwitch = value; },
     load,
     save,
+    saveSecret,
+    forgetSecrets,
     remove,
     connect,
     requestConnect,
@@ -274,6 +422,32 @@ function loadAndroidHosts(): Promise<ConnectionsHosts> {
   return androidHostsPromise;
 }
 
+let rememberedSecretsPromise: Promise<RememberedSecrets | null> | null = null;
+
+/** The real Keystore-sealed store, imported lazily like the saved hosts. */
+function loadRememberedSecrets(): Promise<RememberedSecrets | null> {
+  rememberedSecretsPromise ??= import('../native/rememberedSecrets')
+    .then((module) => module.rememberedSecrets)
+    .catch(() => null);
+  return rememberedSecretsPromise;
+}
+
+const lazySecrets: RememberedSecrets = {
+  async put(secret, kind, secretId) {
+    const real = await loadRememberedSecrets();
+    if (!real) throw new Error('The Android remembered-secret store is not available.');
+    return real.put(secret, kind, secretId);
+  },
+  async resolve(secretId) {
+    const real = await loadRememberedSecrets();
+    return real ? real.resolve(secretId) : null;
+  },
+  async forget(secretId) {
+    const real = await loadRememberedSecrets();
+    if (real) await real.forget(secretId);
+  },
+};
+
 export const useConnectionsStore = defineStore('connections', () => {
   let realHosts: ConnectionsHosts | null = null;
   // Bound before the dynamic import resolves; the app calls `load()` again once
@@ -283,12 +457,12 @@ export const useConnectionsStore = defineStore('connections', () => {
     savedHosts: () => realHosts?.savedHosts() ?? [],
     save: (host) => { realHosts?.save(host); },
     remove: (name) => { realHosts?.remove(name); },
-    resolve: (request) => realHosts
-      ? realHosts.resolve(request)
+    resolve: (request, credential) => realHosts
+      ? realHosts.resolve(request, credential)
       : Promise.reject(new Error('The saved hosts are still loading.')),
   };
 
-  const store = createConnectionsStore({ hosts: lazyHosts, port: shellPort });
+  const store = createConnectionsStore({ hosts: lazyHosts, port: shellPort, secrets: lazySecrets });
   void loadAndroidHosts().then(
     (hosts) => {
       realHosts = hosts;
@@ -307,6 +481,8 @@ export const useConnectionsStore = defineStore('connections', () => {
     pendingSwitch: toRef(store, 'pendingSwitch'),
     load: store.load,
     save: store.save,
+    saveSecret: store.saveSecret,
+    forgetSecrets: store.forgetSecrets,
     remove: store.remove,
     connect: store.connect,
     requestConnect: store.requestConnect,
