@@ -98,8 +98,10 @@ function errorMessage(error: unknown): string {
 }
 
 // The runner reports typed English failures; the chat is Chinese. Ordered:
-// "did not become ready" must win over the generic timeout wording it carries.
+// "did not become ready" must win over the generic timeout wording it carries,
+// and the build's stale error must be recognised before the generic patterns.
 const TURN_ERROR_COPY: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bchat changed\b|\bsuperseded\b/, '会话已切换，请重新发送。'],
   [/already running|already in progress|\brunning\b/i, '上一条消息仍在处理中，请稍候。'],
   [/disposed/i, '当前会话已断开，请重新打开。'],
   [/not-sent|not sent/i, '消息未发送成功，请重试。'],
@@ -189,6 +191,11 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.openPath = null;
       openToken += 1;
       openInFlight = null;
+      // The old project's chat is gone, so its in-flight turn and its failure
+      // must go with it: a new project never inherits the last chat's error.
+      sendToken += 1;
+      state.sending = false;
+      state.sendError = null;
     }
     const token = ++loadToken;
     loadInFlight = {
@@ -330,6 +337,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     openToken += 1;
     sendToken += 1;
     state.sending = false;
+    state.sendError = null;
     loadInFlight = null;
     openInFlight = null;
   }
@@ -386,6 +394,12 @@ export async function resolveActiveSessionRoot(): Promise<string> {
 const MIN_TURN_POLL_INTERVAL_MS = 250;
 const TURN_POLL_INTERVAL_MS = 500;
 const BUSY_TURN_ERROR = 'A turn is already running in this chat.';
+const STALE_TURN_ERROR = 'The chat changed before the turn could start.';
+
+/** The turn's poll interval, never tighter than the shared floor (R22). */
+export function clampTurnPollInterval(requestedMs: number): number {
+  return Math.max(MIN_TURN_POLL_INTERVAL_MS, requestedMs);
+}
 
 /** Re-read the open session through the live seam, bounded by PiRepository's own exec timeout. */
 function readSessionOnActiveHost(path: string): Promise<ParsedPiSession> {
@@ -397,83 +411,158 @@ async function readActiveSession(path: string): Promise<ParsedPiSession> {
   return new PiRepository(piLive().transport(), root).readSession(path);
 }
 
+export interface TurnRunnerCacheDeps {
+  /** The active host name, read now. */
+  hostId: () => string | null;
+  /** The open chat's session file, read now. */
+  openPath: () => string | null;
+  /** The open chat's project directory, read now. */
+  projectPath: () => string | null;
+  /** Resolve the Pi command for the active host; this probes the shell. */
+  resolveCommand: () => Promise<{ ok: true; command: string } | { ok: false; error: string }>;
+  /** Build one runner for a resolved command and the claimed project directory. */
+  build: (command: string, projectPath: string) => PiTurnRunner;
+}
+
+export interface TurnRunnerCache {
+  /** The runner for `sessionFile`, built on first use and reused afterwards. */
+  runnerFor(sessionFile: string): Promise<PiTurnRunner>;
+  /** True while a cached runner is running a turn. */
+  isBusy(): boolean;
+  /** Forget only the chat's runner; the resolved command outlives the chat. */
+  disposeChat(): void;
+  /** Forget everything and invalidate every build in flight. */
+  dispose(): void;
+}
+
+/**
+ * One turn runner per host + chat (D10), built behind a probe that can take up
+ * to 15 s. Host, chat path and project directory are all captured synchronously
+ * at the start of a build and re-checked after every await (D8): a build whose
+ * connection or chat changed meanwhile disposes what it built and refuses with
+ * the stale error instead of caching a runner bound to the wrong directory.
+ */
+export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCache {
+  let cached: { key: string; runner: PiTurnRunner } | null = null;
+  // `resolvePiCommand` probes the shell once per connection, not per chat.
+  let cachedCommand: { host: string; command: string } | null = null;
+  let generation = 0;
+
+  function disposeChat(): void {
+    const previous = cached;
+    cached = null;
+    previous?.runner.dispose();
+  }
+
+  function dispose(): void {
+    generation += 1;
+    cachedCommand = null;
+    disposeChat();
+  }
+
+  function claimed(started: number, host: string | null, path: string | null): boolean {
+    return generation === started && deps.hostId() === host && deps.openPath() === path;
+  }
+
+  async function commandFor(
+    host: string,
+    started: number,
+  ): Promise<{ ok: true; command: string } | { ok: false; error: string }> {
+    if (cachedCommand !== null && cachedCommand.host === host) {
+      return { ok: true, command: cachedCommand.command };
+    }
+    const resolution = await deps.resolveCommand();
+    if (!resolution.ok) return resolution;
+    // A probe that lands after disposal or a host switch must not seed the
+    // next connection's cache with this host's answer.
+    if (generation === started && deps.hostId() === host) {
+      cachedCommand = { host, command: resolution.command };
+    }
+    return resolution;
+  }
+
+  async function runnerFor(sessionFile: string): Promise<PiTurnRunner> {
+    const started = generation;
+    const host = deps.hostId();
+    const path = deps.openPath();
+    const projectPath = deps.projectPath();
+    const key = `${host ?? ''}\n${sessionFile}`;
+
+    if (path !== sessionFile) throw new Error(STALE_TURN_ERROR);
+    if (cached !== null && cached.key === key) return cached.runner;
+    if (projectPath === null) throw new Error('会话缺少项目目录，无法发送。');
+    if (cached !== null) disposeChat();
+
+    const command = await commandFor(host ?? '', started);
+    if (!claimed(started, host, path)) throw new Error(STALE_TURN_ERROR);
+    if (!command.ok) throw new Error(command.error);
+
+    const runner = deps.build(command.command, projectPath);
+    if (!claimed(started, host, path)) {
+      runner.dispose();
+      throw new Error(STALE_TURN_ERROR);
+    }
+    cached = { key, runner };
+    return runner;
+  }
+
+  return {
+    runnerFor,
+    isBusy: () => cached?.runner.isBusy() === true,
+    disposeChat,
+    dispose,
+  };
+}
+
 export const useSessionsStore = defineStore('sessions', () => {
   const connections = useConnectionsStore();
-
-  // One runner per host + open session file (D10): the runner owns the turn
-  // PTY and may only be reused for the chat and connection it was built for.
-  // Reconnect/host switch/unmount dispose it; a new chat gets a fresh one.
-  let cachedRunner: { key: string; runner: PiTurnRunner } | null = null;
-  // `resolvePiCommand` probes the shell once per connection, not per chat.
-  let cachedPiCommand: { host: string; command: string } | null = null;
-  let pendingTurn: Promise<PiTurnSendResult> | null = null;
 
   function activeSavedHost(): SavedHost | undefined {
     const name = connections.activeName;
     return name === null ? undefined : connections.hosts.find((host) => host.name === name);
   }
 
-  function disposeChatRunner(): void {
-    const cached = cachedRunner;
-    cachedRunner = null;
-    cached?.runner.dispose();
-  }
+  const turnRunners = createTurnRunnerCache({
+    hostId: () => connections.activeName,
+    openPath: () => store.openPath,
+    projectPath: () => store.open?.cwd ?? null,
+    resolveCommand: async () => {
+      const host = activeSavedHost();
+      const override = host?.piCommand?.trim();
+      return resolvePiCommand(
+        piLive().transport(),
+        override && override.length > 0 ? override : undefined,
+      );
+    },
+    build: (command, projectPath) =>
+      createPiTurnRunner({
+        openPty: (commandLine, geometry) => turnPtyOpener().open(commandLine, geometry),
+        piCommand: command,
+        projectPath,
+        // PiRepository bounds its own fallback exec; the turn's overall deadline
+        // is the runner's, not a single read's.
+        readSession: readSessionOnActiveHost,
+        pollIntervalMs: clampTurnPollInterval(TURN_POLL_INTERVAL_MS),
+      }),
+  });
 
   function disposeTurnRunner(): void {
-    disposeChatRunner();
-    cachedPiCommand = null;
+    turnRunners.dispose();
   }
 
-  async function commandForActiveHost(): Promise<{ ok: true; command: string } | { ok: false; error: string }> {
-    const host = activeSavedHost();
-    const hostName = host?.name ?? '';
-    if (cachedPiCommand !== null && cachedPiCommand.host === hostName) {
-      return { ok: true, command: cachedPiCommand.command };
-    }
-    const override = host?.piCommand?.trim();
-    const resolution = await resolvePiCommand(
-      piLive().transport(),
-      override && override.length > 0 ? override : undefined,
-    );
-    if (!resolution.ok) return resolution;
-    cachedPiCommand = { host: hostName, command: resolution.command };
-    return resolution;
-  }
-
-  async function runnerFor(sessionFile: string): Promise<PiTurnRunner> {
-    const key = `${activeSavedHost()?.name ?? ''}\n${sessionFile}`;
-    if (cachedRunner !== null && cachedRunner.key === key) return cachedRunner.runner;
-
-    disposeChatRunner();
-    const command = await commandForActiveHost();
-    if (!command.ok) throw new Error(command.error);
-    const projectPath = store.open?.cwd ?? null;
-    if (projectPath === null) throw new Error('会话缺少项目目录，无法发送。');
-
-    const runner = createPiTurnRunner({
-      openPty: (commandLine, geometry) => turnPtyOpener().open(commandLine, geometry),
-      piCommand: command.command,
-      projectPath,
-      // PiRepository bounds its own fallback exec; the turn's overall deadline
-      // is the runner's, not a single read's.
-      readSession: readSessionOnActiveHost,
-      pollIntervalMs: Math.max(MIN_TURN_POLL_INTERVAL_MS, TURN_POLL_INTERVAL_MS),
-    });
-    cachedRunner = { key, runner };
-    return runner;
-  }
+  let pendingTurn: Promise<PiTurnSendResult> | null = null;
 
   // Serializes the build + turn before a runner exists: two taps in the same
   // tick must not open two turn PTYs (D10).
   const runnerFacade: PiTurnRunner = {
-    isBusy: () => pendingTurn !== null || cachedRunner?.runner.isBusy() === true,
+    isBusy: () => pendingTurn !== null || turnRunners.isBusy(),
     send(sessionFile, message) {
       if (pendingTurn !== null) {
         return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
       }
       const run = (async (): Promise<PiTurnSendResult> => {
         try {
-          const runner = await runnerFor(sessionFile);
+          const runner = await turnRunners.runnerFor(sessionFile);
           return await runner.send(sessionFile, message);
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -515,6 +604,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       store.openPath = null;
       store.lastProject = null;
       store.error = null;
+      store.sendError = null;
       store.state = 'idle';
     },
   );
@@ -523,7 +613,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   // (and the resolved pi command) outlives the chat, so keep that cache.
   watch(
     () => store.openPath,
-    () => disposeChatRunner(),
+    () => turnRunners.disposeChat(),
   );
 
   // The projects tab's selection is what the 会话 tab lists (spec §8.5); the
@@ -538,7 +628,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   );
 
   function closeChat(): void {
-    disposeChatRunner();
+    turnRunners.disposeChat();
     store.closeChat();
   }
 

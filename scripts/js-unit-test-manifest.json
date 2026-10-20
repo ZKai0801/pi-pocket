@@ -1012,7 +1012,8 @@
         "falls back to command -v pi",
         "falls back to the node bin glob when pi is not on PATH",
         "fails with an actionable error when nothing is found",
-        "rejects an override containing whitespace without probing"
+        "rejects an override containing whitespace without probing",
+        "rejects a relative override that would only resolve in the login directory"
       ]
     },
     "tests/unit/piResolveSessionRoot.test.ts": {
@@ -1113,6 +1114,7 @@
         "refresh does nothing without a project and no open chat",
         "does not start a second load while one is in flight",
         "keeps the previous chat intact when a re-read fails",
+        "clamps the turn poll interval to the shared floor",
         "host switch: drops a load result that resolves after the host changed",
         "host switch: drops an open-session result that resolves after the host changed",
         "host switch: starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim",
@@ -1227,7 +1229,13 @@
         "refuses to send with no open session",
         "refuses empty or whitespace text without calling the runner",
         "toggles sending while the turn is in flight",
-        "drops a send that settles after the host changed"
+        "drops a send that settles after the host changed",
+        "drops a send when the host dep changes without a hostChanged signal",
+        "reports an error when the runner rejects without throwing",
+        "refuses to send without a runner and never throws",
+        "clears the last send error when the host changes",
+        "clears the last send error when another project loads",
+        "maps every runner failure string to its own copy"
       ]
     },
     "tests/unit/chatComposer.test.ts": {
@@ -1239,6 +1247,19 @@
         "retains the text when the send reports busy",
         "renders the inline error as an alert",
         "disables send for empty or whitespace text"
+      ]
+    },
+    "tests/unit/turnRunnerCache.test.ts": {
+      "suite": "turn runner cache",
+      "tests": [
+        "builds one runner for a host and chat and reuses it afterwards",
+        "captures the claim before the command probe so a stale build cannot open another chat's directory",
+        "refuses and does not cache a build whose host was disposed while the probe ran",
+        "disposes and refuses a runner that went stale while it was built",
+        "disposes the chat runner on a chat close but keeps the resolved command",
+        "refuses without a project directory and never probes the shell",
+        "propagates a failed command resolution without building a runner",
+        "refuses a chat that is no longer open before probing"
       ]
     }
   }

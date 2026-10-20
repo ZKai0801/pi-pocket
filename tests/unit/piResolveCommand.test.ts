@@ -98,4 +98,13 @@ describe('resolvePiCommand', () => {
     expect(r.ok === false && r.error).toContain('参数');
     expect(calls).toEqual([]);
   });
+
+  it('rejects a relative override that would only resolve in the login directory', async () => {
+    const { transport, calls } = fake({ stdout: 'bin/pi\n', exitCode: 0 });
+    const r = await resolvePiCommand(transport, 'bin/pi');
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.error).toContain('Pi 命令');
+    expect(r.ok === false && r.error).toContain('完整路径');
+    expect(calls).toEqual([]);
+  });
 });

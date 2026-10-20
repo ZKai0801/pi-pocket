@@ -392,6 +392,4 @@ function goBack(): void {
   font-size: var(--fs-200);
   text-align: center;
 }
-
-
 </style>

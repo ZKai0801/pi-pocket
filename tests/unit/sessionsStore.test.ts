@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PiProject, PiSessionMeta } from '../../src/pi/piRepository';
 import type { ParsedPiSession } from '../../src/pi/types';
-import { createSessionsStore } from '../../src/stores/sessions';
+import { clampTurnPollInterval, createSessionsStore } from '../../src/stores/sessions';
 
 const session: ParsedPiSession = { version: 3, id: 'a', cwd: '/home/kai', name: null, turns: [{ role: 'user', text: 'hi', timestampMs: 1 }] };
 
@@ -102,6 +102,12 @@ describe('sessions store', () => {
     expect(store.error).toContain('sftp failed');
     expect(store.open?.turns).toHaveLength(1);
     expect(store.openPath).toBe('/r/a.jsonl');
+  });
+
+  it('clamps the turn poll interval to the shared floor', () => {
+    expect(clampTurnPollInterval(50)).toBe(250);
+    expect(clampTurnPollInterval(250)).toBe(250);
+    expect(clampTurnPollInterval(1_000)).toBe(1_000);
   });
 
   it('host switch: drops a load result that resolves after the host changed', async () => {
