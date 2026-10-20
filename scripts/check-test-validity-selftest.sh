@@ -524,11 +524,10 @@ assert_report present "J1LegacyWiredE2eTest" "J1 — WIRED" "legacy app2 path st
 assert_exit 1 "J1 unwired androidTest journey hard-fails the guard"
 unset CHECK_TEST_VALIDITY_J1_MODE
 
-if "$REPO_ROOT/scripts/check-js-first-android-journeys.py" --self-test; then
-  note_pass "JS lane dispatch, missing selector/method, unjustified, issue-justified, and legacy app2 J1 self-tests"
-else
-  note_fail "JS lane dispatch / legacy app2 J1 synthetic self-tests"
-fi
+# The JS-first lane-dispatch self-test that used to run here was retired with
+# the J1 dispatch checker and the fifteen packaged lanes it checked (Plan 5
+# Task 6, docs/fork-gate-posture.md); the legacy app2 J1 rule above is still
+# proved on a synthetic tree.
 
 # Remove the BAD J1 so advisory checks can still prove guard-mode exit 0 when
 # no hard-fail smells remain.

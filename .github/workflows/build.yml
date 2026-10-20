@@ -3,6 +3,13 @@ name: Build
 # Legacy artifact-only workflow. Workflow ID 280774562 is disabled in GitHub
 # and must stay disabled; release publication now belongs to
 # publish-release.yml, which can run only from the default branch.
+#
+# RETIRED for this fork (Plan 5 Task 6): the job is gated off with `if: false`.
+# It builds and signs tag artifacts for the 0.5.x line with Play-style signing
+# secrets that this checkout does not have, from a tag that this checkout has no
+# remote to push. The halfway-useful part — the derived version and the debug
+# APK identity/signature checks — is duplicated by the kept steps in
+# js-first-rewrite.yml and js-full-suite.yml. See docs/fork-gate-posture.md.
 
 on:
   push:
@@ -15,6 +22,10 @@ concurrency:
 
 jobs:
   build:
+    # RETIRED: see docs/fork-gate-posture.md ("build.yml"). Nothing below this
+    # line guards anything this fork ships; the gate stays here so the upstream
+    # release contract is still readable, but it never runs.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

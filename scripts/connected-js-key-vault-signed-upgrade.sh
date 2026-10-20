@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Signed 0.5.6-to-candidate migration proof; never touches an existing base app.
-# Blocking CI lane: scripts/ci-js-first-packaged-lanes.sh runs this after the
-# other packaged lanes, and scripts/check-js-first-android-journeys.py fails if
-# that invocation, the exact three-method selector, or the result contract drifts.
+# RETIRED BY CONSTRUCTION (Plan 5 Task 6): this lane drove
+# com.pocketshell.app.migration.InstalledDataMigrationJourneyTest, which Plan 5
+# Task 3 deleted with the pre-#2936 shared shell, and nothing invokes this script
+# any more — js-first-rewrite.yml / js-full-suite.yml no longer run
+# scripts/ci-js-first-packaged-lanes.sh. The old dispatch checker that failed on
+# selector drift was deleted with the lanes. See docs/fork-gate-posture.md.
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"

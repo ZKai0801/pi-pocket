@@ -26,6 +26,13 @@
 # until the registered journey classes execute (issue #2863). That is the
 # release-readiness signal, NOT a D36 feature freeze: only "JS full suite"
 # redness freezes feature merges.
+#
+# RETIRED for this fork (Plan 5 Task 6): the job is gated off with `if: false`.
+# It is a `workflow_run` consumer that needs a remote to react to, it produces
+# the exact-SHA verdict for the 0.5.x tag line, and every journey it qualifies
+# was deleted with the pre-#2936 shared shell (Plan 5 Task 3). The release
+# derivation it fed (`scripts/derive-version.sh`, `scripts/derive-version.mjs`)
+# is kept: `versionCode` still comes from it. See docs/fork-gate-posture.md.
 
 name: JS release validation
 
@@ -50,10 +57,11 @@ jobs:
 
     # React only to a GREEN full-suite completion on main; a manual dispatch
     # always runs. Red/skipped full-suite runs are not validated-RC signals.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+    # RETIRED: see docs/fork-gate-posture.md — this job never runs in this fork.
+    if: false
+    # Was: github.event_name == 'workflow_dispatch' ||
+    #      (github.event.workflow_run.conclusion == 'success' &&
+    #       github.event.workflow_run.head_branch == 'main')
 
     steps:
       - name: Checkout with pinned core source

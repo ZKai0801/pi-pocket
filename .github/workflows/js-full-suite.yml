@@ -7,8 +7,9 @@
 # The battery is deliberately the same steps: each lane's fail-closed result
 # guard is the tripwire if the two copies ever drift.
 #
-# D37 wiring this workflow must keep (checked by
-# scripts/check-tag-release-authorization.py --self-test):
+# D37 wiring this workflow kept from upstream. It used to be asserted by the
+# release-authorization self-test, which is retired with the release chain
+# (docs/fork-gate-posture.md), so these are now properties to preserve by hand:
 #   - `schedule:` carries the nightly cron and there are NO push/pull_request
 #     triggers and NO workflow-level paths:/paths-ignore (issue #2509: a path
 #     filter silently suppressed an entire nightly cadence);
@@ -18,7 +19,13 @@
 #   - every lane stays fail-closed: no continue-on-error on a result guard.
 #
 # js-release-validation.yml reacts to this workflow's green completions and
-# produces the exact-SHA release verdict artifact.
+# produces the exact-SHA release verdict artifact. Both halves of that release
+# chain are retired for this fork (no remote, 0.5.x line, no Play signing);
+# docs/fork-gate-posture.md records why.
+#
+# Plan 5 Task 6 trimmed the packaged JS journey lanes and the emulator boot from
+# this battery for the same reason they were trimmed from js-first-rewrite.yml:
+# every lane selected an `androidTest` class that no longer exists.
 
 name: JS full suite
 
@@ -72,9 +79,6 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install screenshot OCR for packaged lifecycle evidence
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y imagemagick tesseract-ocr
-
       - name: Install Android SDK platform
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
@@ -95,63 +99,6 @@ jobs:
 
       - name: Check authorized_keys install under every login shell (Docker, issue 3021)
         run: tests/scripts/authorized-key-install-login-shells-test.sh
-
-      - name: Check CI watcher required-check defaults
-        run: python3 scripts/watch-ci.py --self-test
-
-      - name: Check fail-closed feature journey qualification guard
-        run: scripts/check-js-journey-results.py --self-test
-
-      - name: Check fail-closed packaged lifecycle result guard
-        run: scripts/check-js-lifecycle-results.py --self-test
-
-      - name: Check Android input-focus failure diagnostics guard
-        run: scripts/check-android-input-diagnostics.py --self-test
-
-      - name: Check fail-closed packaged usage and ports result guards
-        run: |
-          scripts/check-js-usage-ports-results.py --self-test
-          scripts/check-js-usage-ports-host-evidence.py --self-test
-
-      - name: Check fail-closed packaged fast-key result guard
-        run: scripts/check-js-hotkeys-journey-results.py --self-test
-
-      - name: Check fail-closed packaged Files result guard
-        run: scripts/check-js-files-results.py --self-test
-
-      - name: Check fail-closed packaged settings and support result guard
-        run: scripts/check-js-settings-results.py --self-test
-
-      - name: Check fail-closed packaged account-sync result guard
-        run: scripts/check-js-account-sync-results.py --self-test
-
-      - name: Check fail-closed packaged key-vault and signed-upgrade result guards
-        run: |
-          scripts/check-js-key-vault-results.py --self-test
-          scripts/check-js-signed-upgrade-results.py --self-test
-
-      - name: Check fail-closed packaged durable-storage result guard
-        run: scripts/check-js-durable-storage-results.py --self-test
-
-      - name: Check JS Android journey dispatch guard
-        run: |
-          scripts/check-test-validity.sh --j1-only --self-test
-          scripts/check-test-validity.sh --j1-only
-
-      - name: Check JS-first connected-test dispatch and lock contracts
-        run: |
-          tests/scripts/connected-test-js-runner-test.sh
-          tests/scripts/android-input-preflight-test.sh
-          tests/scripts/start-local-avd-launcher-recovery-test.sh
-          tests/scripts/connected-test-root-guard-test.sh
-          tests/scripts/connected-test-serial-ownership-test.sh
-          tests/scripts/avd-lock-test.sh
-          tests/scripts/avd-lock-sharing-test.sh
-          scripts/test-gradle-output-lock.sh
-          tests/scripts/js-fixture-port-lock-test.sh
-          tests/scripts/js-first-rewrite-composer-gate-test.sh
-          tests/scripts/js-first-rewrite-hotkeys-gate-test.sh
-          tests/scripts/shared-app-runner-cleanup-test.sh
 
       - name: Build Android debug APK
         run: pnpm build:android:debug
@@ -221,15 +168,6 @@ jobs:
             --expected-version-name "$version_name"
           scripts/check-apk-signing.sh --variant debug --js-first --apk "$apk"
 
-      - name: Prepare packaged JS smoke APKs
-        run: |
-          scripts/connected-js-smoke.sh --suffix i2855ci --prepare-only
-          scripts/connected-js-files-docker.sh --suffix i2858ci --prepare-only
-          scripts/connected-js-key-vault-docker.sh --suffix i2926ci --prepare-only
-
-      - name: Prepare the packaged gateway lane (vendored pinned gateway source, test-CA APK)
-        uses: ./.github/actions/prepare-gateway-lane
-
       - name: Start version-matched Docker agents fixture
         run: |
           source scripts/lib/agents-fixture-version.sh
@@ -241,7 +179,6 @@ jobs:
 
       # Issue #3022: dev:live through the local ssh2 bridge must connect and
       # trust the fixture's host key, checked against an independent handshake.
-      # (The phone shell has no session/PTY surface yet; Plan 5 owns that step.)
       - name: Run the browser dev:live smoke against the Docker agents fixture
         run: node scripts/dev-browser-smoke.mjs live --host testuser@127.0.0.1:2222=fixture --identity tests/docker/test_key --artifacts build/dev-browser-smoke/live
 
@@ -253,206 +190,12 @@ jobs:
           path: build/dev-browser-smoke/
           if-no-files-found: warn
 
-      - name: Start isolated Docker agents lanes for Composer and key-vault journeys
-        run: scripts/agents-pool.sh up 2244 2245
-
-      - name: Start isolated Docker agents lane for the mobile fast-key and shared-app journeys
-        run: scripts/agents-pool.sh up 2243
-
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Free disk space for API 35 emulator
-        run: scripts/ci-emulator-free-disk.sh
-
-      - name: Capture and verify emulator JS runtime after disk cleanup
-        id: emulator-js-runtime
-        shell: bash
-        run: |
-          node_path="$(command -v node)"
-          pnpm_path="$(command -v pnpm)"
-          [[ "$node_path" == /* && -x "$node_path" ]] || { echo 'FAIL: node is unavailable after disk cleanup' >&2; exit 1; }
-          [[ "$pnpm_path" == /* && -x "$pnpm_path" ]] || { echo 'FAIL: pnpm is unavailable after disk cleanup' >&2; exit 1; }
-          "$node_path" --version
-          "$pnpm_path" --version
-          printf 'path=%s\n' "$PATH" >> "$GITHUB_OUTPUT"
-          printf 'pnpm=%s\n' "$pnpm_path" >> "$GITHUB_OUTPUT"
-
-      - name: Repair Android cmdline-tools and accept licenses
-        run: scripts/ci-emulator-repair-sdk-tools.sh
-
-      - name: Check emulator action pin
-        run: scripts/check-emulator-action-pin.sh
-
-      - name: Run packaged JS journeys on API 35
-        id: packaged-smoke
-        timeout-minutes: 45
-        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
-        env:
-          PATH: ${{ steps.emulator-js-runtime.outputs.path }}
-          PNPM: ${{ steps.emulator-js-runtime.outputs.pnpm }}
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_7
-          force-avd-creation: true
-          disable-animations: true
-          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
-          emulator-boot-timeout: 900
-          script: scripts/ci-js-first-packaged-lanes.sh
-
-      - name: Require exact reports for every packaged JS lane
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          failed=0
-          run_check() {
-            local lane="$1"
-            shift
-            if "$@"; then
-              return 0
-            else
-              local status=$?
-              printf 'FAIL: %s result check exited %s\n' "$lane" "$status" >&2
-              failed=1
-            fi
-          }
-
-          run_check smoke scripts/check-js-smoke-results.py \
-            --results-dir android/app/build/outputs/js-smoke-results
-          run_check lifecycle scripts/check-js-lifecycle-results.py \
-            --results-dir "android/app/build/outputs/js-lifecycle/js2861-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results"
-          run_check Files scripts/check-js-files-results.py \
-            --results-dir "android/app/build/outputs/js-files/js2858-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results"
-          run_check Usage/Ports scripts/check-js-usage-ports-results.py \
-            --results-dir "android/app/build/outputs/js-usage-ports/js2859-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results"
-          run_check Settings scripts/check-js-settings-results.py \
-            --results-dir "android/app/build/outputs/js-settings/js2861s-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results" \
-            --screenshots-dir "android/app/build/outputs/js-settings/js2861s-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/device-screenshots" \
-            --reconnect-evidence "android/app/build/outputs/js-settings/js2861s-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/reconnect-evidence.json" \
-            --host-listing "android/app/build/outputs/js-settings/js2861s-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/host-pocketshell-sessions-list.json"
-          run_check "Account sync" scripts/check-js-account-sync-results.py \
-            --results-dir "android/app/build/outputs/js-account-sync/js3020-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results" \
-            --screenshots-dir "android/app/build/outputs/js-account-sync/js3020-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/device-screenshots" \
-            --logcat "android/app/build/outputs/js-account-sync/js3020-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/logcat.txt"
-          run_check Gateway scripts/check-js-gateway-results.py \
-            --results-dir "android/app/build/outputs/js-gateway/gw3086-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results" \
-            --host-dir "android/app/build/outputs/js-gateway/gw3086-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/host"
-          run_check "Shared app" scripts/check-js-shared-app-results.py \
-            --results-dir android/app/build/outputs/js-shared-app-results
-          run_check Key-vault scripts/check-js-key-vault-results.py \
-            --results-dir "android/app/build/outputs/js-key-vault/js2926-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/instrumentation-results"
-          run_check "Durable storage" scripts/check-js-durable-storage-results.py \
-            --run-dir "android/app/build/outputs/js-durable-storage/js2993-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          run_check Signed-upgrade scripts/check-js-signed-upgrade-results.py \
-            --artifacts-dir "android/app/build/outputs/js-key-vault-upgrade/up2926-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          composer_root="android/app/build/outputs/js-composer"
-          composer_prefix="js2891-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
-          shopt -s nullglob
-          composer_runs=("$composer_root/$composer_prefix"*)
-          if (( ${#composer_runs[@]} == 1 )); then
-            composer_run="${composer_runs[0]}"
-            run_check "Composer prepare" scripts/check-js-composer-journey-results.py \
-              --results-dir "$composer_run/phase-prepare"
-            run_check "Composer resume" scripts/check-js-composer-journey-results.py \
-              --results-dir "$composer_run/phase-resume"
-          else
-            printf 'FAIL: expected exactly one Composer report directory for prefix %s; found %s\n' \
-              "$composer_prefix" "${#composer_runs[@]}" >&2
-            failed=1
-          fi
-
-          if (( failed != 0 )); then
-            exit 1
-          fi
-
-      - name: Assert the packaged JS mobile fast-key journey executed exactly once
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          evidence_root="android/app/build/outputs/js-hotkeys"
-          evidence_prefix="js2884-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
-          shopt -s nullglob
-          evidence_runs=("$evidence_root/$evidence_prefix"*)
-          if (( ${#evidence_runs[@]} != 1 )); then
-            printf 'FAIL: expected exactly one same-run fast-key evidence directory for %s; found %s\n' \
-              "$evidence_prefix" "${#evidence_runs[@]}" >&2
-            exit 1
-          fi
-          scripts/check-js-hotkeys-journey-results.py --results-dir "${evidence_runs[0]}"
-
-      - name: Collect isolated composer fixture diagnostics
-        if: always()
-        run: |
-          mkdir -p android/app/build/outputs/js-composer/ci-fixture
-          docker inspect pocketshell-test-agents-2245 \
-            > android/app/build/outputs/js-composer/ci-fixture/agents-inspect.json 2>&1 || true
-          docker logs pocketshell-test-agents-2245 \
-            > android/app/build/outputs/js-composer/ci-fixture/agents.log 2>&1 || true
-
-      - name: Collect isolated fast-key fixture diagnostics
-        if: always()
-        run: |
-          mkdir -p android/app/build/outputs/js-hotkeys/ci-fixture
-          docker inspect pocketshell-test-agents-2243 \
-            > android/app/build/outputs/js-hotkeys/ci-fixture/agents-inspect.json 2>&1 || true
-          docker logs pocketshell-test-agents-2243 \
-            > android/app/build/outputs/js-hotkeys/ci-fixture/agents.log 2>&1 || true
-
-      - name: Upload packaged JS composer run evidence
+      - name: Upload the debug APK
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: pocketshell-js-first-composer-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            android/app/build/outputs/js-composer/
-            android/app/build/outputs/androidTest-results/connected/debug/TEST-*.xml
-          if-no-files-found: error
-
-      - name: Upload packaged JS fast-key run evidence
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: pocketshell-js-first-hotkeys-${{ github.run_id }}-${{ github.run_attempt }}
-          path: android/app/build/outputs/js-hotkeys/
-          if-no-files-found: error
-
-      - name: Stop isolated Composer and key-vault Docker agents lanes
-        if: always()
-        run: scripts/agents-pool.sh down 2244 2245
-
-      - name: Stop isolated fast-key and shared-app Docker agents lane
-        if: always()
-        run: scripts/agents-pool.sh down 2243
-
-      - name: Upload packaged APK and connected journey evidence
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: pocketshell-js-first-packaged-journeys
-          path: |
-            android/app/build/outputs/apk/debug/app-debug.apk
-            android/app/build/outputs/androidTest-results/connected/debug/TEST-*.xml
-            android/app/build/outputs/js-smoke-results/TEST-*.xml
-            android/app/build/outputs/js-smoke-diagnostics/**
-            android/app/build/outputs/js-usage-ports/**
-            android/app/build/outputs/androidTest-results/connected/debug/diagnostics-*
-            android/app/build/outputs/js-lifecycle/**
-            android/app/build/outputs/js-files/**
-            android/app/build/outputs/js-settings/**
-            android/app/build/outputs/js-account-sync/**
-            android/app/build/outputs/js-key-vault/**
-            android/app/build/outputs/js-key-vault-upgrade/**
-            android/app/build/outputs/js-durable-storage/**
-            android/app/build/outputs/js-shared-app-results/**
-            android/app/build/outputs/js-gateway/**
+          name: pocketshell-js-full-suite-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
 
       - name: Stop Docker agents fixture

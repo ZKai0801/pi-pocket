@@ -48,13 +48,27 @@ python3 scripts/check-no-dev-shims.py --dist dist --apk android/app/build/output
 ```
 
 The last command proves the dev shims are absent from the built APK. Browser
-runs are fast evidence only; the packaged emulator lanes below stay the gate.
+runs are fast evidence only; the packaged APK on a device stays the acceptance
+(`docs/acceptance/`), and the emulator journey lanes that used to sit in the
+middle are retired — see [fork-gate-posture.md](fork-gate-posture.md).
 
 The remaining legacy app2 Gradle commands and journey inventory describe
 `release/0.5.x`. They are not available on `main`, where the Kotlin product
 modules and root Gradle graph were removed.
 
 ## JS-first packaged Android lanes
+
+> **Retired by construction.** Every lane in this section drove an
+> `androidTest` journey class bound to the pre-#2936 shared shell, and Plan 5
+> Task 3 deleted those classes with the screens they exercised. The lane
+> scripts and their result guards are still on disk but nothing invokes them —
+> `js-first-rewrite.yml` and `js-full-suite.yml` no longer run
+> `scripts/ci-js-first-packaged-lanes.sh`. The section is kept as the record of
+> what those lanes asserted; the authoritative posture, and the follow-up that
+> deletes the dead apparatus, is
+> [fork-gate-posture.md](fork-gate-posture.md). The gates that still run are the
+> JS unit gate, the dev-mode shim guard, the native Android unit tests and the
+> APK identity checks described above.
 
 The JS-first `connected-test.sh` requires a lane name and an explicit package
 suffix. It dispatches only to the existing `android/` packaged runners; it does

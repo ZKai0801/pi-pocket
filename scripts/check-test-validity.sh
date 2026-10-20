@@ -78,14 +78,15 @@
 #   J1 (HARD-FAIL on a NEW occurrence) — an androidTest journey class that is
 #       not actually dispatched. On main/stable, app2 keeps its legacy rule:
 #       `*E2eTest` / `*DockerTest` classes must be under the wholesale
-#       `ci-app2-journey-suite.sh` root or carry a local justification. On the
-#       JS-first tree, `scripts/check-js-first-android-journeys.py` verifies the
-#       smoke/lifecycle/usage-ports/files/composer/key-vault selectors against dispatcher, child
-#       runners, source `@Test` methods, and exact result-checker contracts.
+#       `ci-app2-journey-suite.sh` root or carry a local justification.
 #       Other `*E2eTest`, `*DockerTest`, or `*JourneyTest` classes need a
-#       nearby issue-backed `// CI_JOURNEY_SUITE_JUSTIFIED:` reason. A zero-class
-#       tree or missing lane contract is a hard failure; this dispatch guard
-#       does not claim the separate 24-class feature inventory is implemented.
+#       nearby issue-backed `// CI_JOURNEY_SUITE_JUSTIFIED:` reason.
+#       RETIRED FOR THE JS-FIRST TREE (Plan 5 Task 6): the fifteen packaged
+#       lanes and their androidTest journey classes were deleted with the
+#       pre-#2936 shared shell, so there is no dispatch subject left to check
+#       and the JS-first dispatch checker was deleted with them. J1
+#       now only reports the retained app2 rule, which is unreachable on this
+#       checkout (`app2/` is gone) — see docs/fork-gate-posture.md.
 #
 #   --- #1430 addition (the synthetic-masks-reality state-injection cheat class) ---
 #
@@ -161,7 +162,6 @@
 #   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/A5L/C1/J1/TIMING1/SEAM1 hard-fail smell
 #   scripts/check-test-validity.sh --report   # report ALL findings incl. baseline; never fails
 #   scripts/check-test-validity.sh --self-test # run the synthetic red->green proof (delegates to check-test-validity-selftest.sh)
-#   scripts/check-test-validity.sh --j1-only   # run only the cross-platform Android journey dispatcher guard
 #
 # REVIEWER FAST-CHECK: run this (and scripts/check-test-validity-selftest.sh)
 # locally before approving any test change — it is the machine sibling of
@@ -182,13 +182,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 # The rewrite has a Capacitor Android module and explicit package-lane class
-# selectors. Keep a narrow entry point so the JS workflow can run the adapted
-# J1 check without accidentally treating the legacy app2-only detectors below
-# as coverage of the new tree.
-if [[ "${1:-}" == "--j1-only" ]]; then
-  shift
-  exec "$REPO_ROOT/scripts/check-js-first-android-journeys.py" "$@"
-fi
+# selectors. The `--j1-only` entry point that let the JS workflow run the
+# adapted J1 dispatch check is RETIRED (Plan 5 Task 6): its subject — the
+# fifteen packaged lanes and their journey classes — no longer exists, and the
+# JS-first dispatch checker was deleted with them. See docs/fork-gate-posture.md.
 
 # --------------------------------------------------------------------------
 # #850: scan EVERY test source root, not just app/src/androidTest. The original
@@ -1049,37 +1046,14 @@ scan_j1() {
   done
 }
 
-# The JS-first Android source tree is not under app2, and its packaged lanes
-# select exact classes rather than running a wholesale Gradle module. Delegate
-# to the fail-closed selector contract checker and preserve its findings in the
-# existing J1 report categories. CHECK_TEST_VALIDITY_J1_MODE exists only so the
-# self-test can exercise the retained app2 path after this checkout has moved
-# to the JS-first tree.
-scan_js_j1() {
-  J1_JOURNEY_ROOT="android/app/src/androidTest"
-  local output="" rc=0 kind value detail
-  output="$(python3 "$REPO_ROOT/scripts/check-js-first-android-journeys.py" \
-    --repo-root "$REPO_ROOT" --mode js --machine 2>&1)" || rc=$?
-  if [[ -z "$output" ]]; then
-    J1_PARSER_FAILURE+=("JS-first J1 checker returned no findings (exit $rc)")
-    return
-  fi
-  while IFS=$'\t' read -r kind value detail; do
-    case "$kind" in
-      WIRED)
-        J1_WIRED_ANDROID_TEST_CLASSES+=("$value")
-        J1_WIRED+=("$value — $detail")
-        ;;
-      JUSTIFIED) J1_JUSTIFIED+=("$value — $detail") ;;
-      NEW) J1_NEW+=("$value — $detail") ;;
-      ERROR) J1_PARSER_FAILURE+=("$value${detail:+ — $detail}") ;;
-      *) J1_PARSER_FAILURE+=("unrecognized JS-first J1 checker output: $kind $value $detail") ;;
-    esac
-  done <<< "$output"
-  if [[ "$rc" -ne 0 && "${#J1_NEW[@]}" -eq 0 && "${#J1_PARSER_FAILURE[@]}" -eq 0 ]]; then
-    J1_PARSER_FAILURE+=("JS-first J1 checker exited $rc without a classified finding")
-  fi
-}
+# The JS-first J1 delegation lived here: it shelled out to the dispatch
+# checker, which asserted that each of the fifteen packaged lanes selected its
+# exact journey class. Both the lanes and the classes were deleted with the
+# pre-#2936 shared shell (Plan 5 Task 3), so the delegation and its checker were
+# retired together (Plan 5 Task 6). Nothing in this fork replaces it: J1's other
+# half — the retained app2 wholesale rule in scan_j1() — is unreachable because
+# app2/ is gone.
+# See docs/fork-gate-posture.md.
 
 # --------------------------------------------------------------------------
 # TIMING1 scan (#1048/#2026) — connection/terminal `runTest` tests whose owned
@@ -1928,19 +1902,15 @@ scan_a4
 scan_c1
 scan_fake1
 scan_await1
-case "${CHECK_TEST_VALIDITY_J1_MODE:-auto}" in
-  js) scan_js_j1 ;;
+# J1 scans nothing by default on this checkout: the JS-first packaged lanes (the
+# dispatch subject) were deleted with the shared shell, and app2/ — the retained
+# wholesale-root rule's subject — is not in this fork. `app2` stays selectable
+# only so check-test-validity-selftest.sh can keep proving that retained rule on
+# a synthetic tree. docs/fork-gate-posture.md records the retirement.
+case "${CHECK_TEST_VALIDITY_J1_MODE:-none}" in
   app2) scan_j1 ;;
-  auto)
-    if [[ -f "$REPO_ROOT/app2/build.gradle" || -f "$REPO_ROOT/app2/build.gradle.kts" ]]; then
-      scan_j1
-    elif [[ -d "$REPO_ROOT/android/app/src/androidTest" ]]; then
-      scan_js_j1
-    else
-      scan_j1
-    fi
-    ;;
-  *) J1_PARSER_FAILURE+=("CHECK_TEST_VALIDITY_J1_MODE must be auto, js, or app2") ;;
+  none|"") ;;
+  *) J1_PARSER_FAILURE+=("CHECK_TEST_VALIDITY_J1_MODE must be app2 or unset; the js mode was retired") ;;
 esac
 validate_timing1_scope_contract
 scan_timing1

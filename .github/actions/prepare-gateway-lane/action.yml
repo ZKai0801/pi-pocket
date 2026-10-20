@@ -1,8 +1,12 @@
 # The packaged gateway lane's preparation (pocketshell#3086 slice 3), shared
 # by every workflow that runs scripts/ci-js-first-packaged-lanes.sh
 # (js-first-rewrite.yml, js-full-suite.yml, js-release-validation.yml), so
-# they cannot drift apart. The contract is pinned by
-# tests/scripts/js-first-rewrite-composer-gate-test.sh.
+# they cannot drift apart. Since Plan 5 Task 6 none of those workflows runs the
+# packaged lanes: js-first-rewrite/js-full-suite dropped them with the deleted
+# journeys and js-release-validation is gated off, so this action is referenced
+# only by that gated file. The contract test that used to pin it was deleted in
+# the same change as the Usage/Ports composer-order guard — see
+# docs/fork-gate-posture.md.
 #
 # The lane builds the real gateway and host agent from the VENDORED
 # PocketShell-io/pocketshell-gateway source at the pinned commit

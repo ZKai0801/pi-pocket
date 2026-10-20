@@ -1,5 +1,13 @@
 name: Publish release
 
+# RETIRED for this fork (Plan 5 Task 6): every job is gated off with `if: false`.
+# Publishing needs a remote (`gh release create --repo PocketShell-io/pocketshell`),
+# a reachable `v*` tag, and the Play-style keystore secrets this checkout does
+# not have — none of which exist here, and Play-style signing is explicitly out
+# of scope for the single-shell Android fork. The version derivation this file
+# used is NOT retired: `scripts/derive-version.sh` / `scripts/derive-version.mjs`
+# still feed `versionCode`. See docs/fork-gate-posture.md.
+
 on:
   workflow_dispatch:
     inputs:
@@ -18,7 +26,7 @@ permissions:
 jobs:
   authorize:
     name: Authorize exact main tag and D37 proof
-    if: github.ref == 'refs/heads/main'
+    if: false  # RETIRED, see docs/fork-gate-posture.md; was: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -58,7 +66,7 @@ jobs:
   build:
     name: Build and sign release APKs
     needs: authorize
-    if: github.ref == 'refs/heads/main' && needs.authorize.result == 'success'
+    if: false  # RETIRED, see docs/fork-gate-posture.md; was: github.ref == 'refs/heads/main' && needs.authorize.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -197,7 +205,7 @@ jobs:
   publish:
     name: Publish authorized APKs
     needs: [authorize, build]
-    if: github.ref == 'refs/heads/main' && needs.authorize.result == 'success' && needs.build.result == 'success'
+    if: false  # RETIRED, see docs/fork-gate-posture.md; was: github.ref == 'refs/heads/main' && needs.authorize.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
