@@ -316,6 +316,62 @@ Unchanged: the English typed error strings stay (the plan's tests pin them); Tas
 localises at display time. Geometry, `decodeUtf8` and the readiness model are out
 of scope.
 
+### R22 — Task 5 design (authoritative, resolved 2026-10-19)
+Task 5 is the wiring task; these decisions are fixed so it does not re-litigate
+R18.4/R20/R21.
+
+**Store (`src/stores/sessions.ts`).**
+- `SessionsStoreState` += `sending: boolean`, `sendError: string | null`.
+- `SessionsStoreDeps` += `runner?: PiTurnRunner` (Task 4's type; **optional** so the
+  existing host-less tests and their `as never` deps keep compiling).
+- `send(text: string): Promise<'sent' | 'busy' | 'error'>`:
+  - no open session or no runner → `'error'`, `sendError` set, nothing called;
+  - `runner.isBusy()` → `'busy'`, **no** runner call, `sending` stays false;
+  - `text.trim() === ''` → `'error'`, `sendError = '消息为空。'`, no runner call;
+  - `sending = true`, `sendError = null`; capture the D8 host claim **and**
+    `openPath`; on settle drop the write when either changed (same rule as
+    `openSession`) — a stale host's turn never lands in `open`;
+  - `'sent'` → `open = result.session`; anything else → `sendError =
+    <localised copy>`;
+  - `finally` clears `sending`. Never throws; never touches the composer's text.
+- The plan's three tests stay; add: no open session, empty text, `sending`
+  toggles true→false, and a D8 drop (host changed mid-flight leaves `open` and
+  `sendError` alone).
+
+**Wrapper (`useSessionsStore`) + `PhoneApp.vue`.**
+- One `PiTurnRunner` per **host + openPath**, cached; `dispose()` it on
+  `closeChat`, project switch, host switch, reconnect and unmount (D10: the
+  in-flight turn is abandoned, never replayed). Deps: `openPty` =
+  `turnPtyOpener().open`; `piCommand` = the active `SavedHost.piCommand` resolved
+  through `resolvePiCommand(transport)` **once per connection** (a `{ ok: false }`
+  resolution becomes a `sendError`, no runner); `projectPath` = the open session's
+  `cwd`; `readSession` = `PiRepository.readSession(path)` (already bounded by its
+  own exec timeout — say so in a comment); `pollIntervalMs` **clamped to >= 250**.
+- `PhoneApp.vue` installs the real opener over
+  `sshCapability.openPty`/`readPty`/`writePty`/`closePty` + `liveConnectionRef()`
+  (R18.3), and calls `installTurnPtyOpener(null)` on unmount/disconnect. Do **not**
+  share the terminal screen's PTY or its single `onData` slot.
+- Runner errors are English typed strings; localise **here** (one small map) so the
+  Chinese UI never shows "timed out".
+
+**`ChatComposer.vue`** (replaces `ChatScreen.vue:192-203`'s disabled placeholder —
+do not keep both):
+- Multi-line textarea (48px+), placeholder `输入消息…`, send button `发送`,
+  tap-to-send (spec §7.4), disabled while `sending` with a spinner, inline error
+  with `role="alert"`, send disabled for empty/whitespace text.
+- **Text cleared only on `'sent'`**; kept on `'busy'`/`'error'` (Review Focus 3).
+  While `sending`, the textarea stays editable but the button is disabled (one turn
+  at a time, D10).
+- `data-testid`: `chat-composer-input`, `chat-composer-send`,
+  `chat-composer-error`; tokens only, scoped styles, no PTY/terminal jargon.
+- `ChatScreen.vue` keeps its 打开终端 escape hatch (`:21-27`) untouched.
+
+**Tests.** `tests/unit/sessionsSend.test.ts` (store, as above) and
+`tests/unit/chatComposer.test.ts` (component: disabled-while-sending, clear only on
+`'sent'`, retain on `'error'`, inline error rendered, empty disables send). Both
+**one flat top-level `describe`**, registered in the manifest from a fresh report.
+
+
 
 
 ---
