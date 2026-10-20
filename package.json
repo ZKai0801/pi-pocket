@@ -16,7 +16,8 @@
     "build:web": "pnpm verify:js-source && vue-tsc --noEmit && vite build",
     "verify:js-source": "node scripts/verify-js-source.mjs",
     "cap:sync": "cap sync android",
-    "build:android:debug": "pnpm build:web && pnpm cap:sync && ./android/gradlew -p android assembleDebug"
+    "build:android:debug": "pnpm build:web && pnpm cap:sync && ./android/gradlew -p android assembleDebug",
+    "build:android:debug:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-debug.ps1"
   },
   "dependencies": {
     "@capacitor/android": "8.1.0",
