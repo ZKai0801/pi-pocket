@@ -367,109 +367,217 @@ git commit -m "feat(native): typed wrapper over the remembered-secret store"
 
 ---
 
-### Task 4: Wire connect and the editor
+### R29 — Task 4 preflight, split into 4a (store) and 4b (editor) (authoritative, resolved 2026-10-19)
+The plan's Task 4 test skeleton does not match `main` (`60cdad2`):
+1. **Dep shape.** `createConnectionsStore` takes `{ hosts: ConnectionsHosts, port: ConnectionPort }`
+   (`src/stores/connections.ts:69-72`); there is no `readHosts`/`writeHosts`/`controller`.
+   Add **optional** `secrets?: RememberedSecrets` (default: `resolve → null`,
+   `forget → no-op`, `put → throws`) so every existing store test keeps
+   constructing the same deps; the Pinia wrapper always binds the real
+   `rememberedSecrets` singleton.
+2. **Where the credential enters.** `port.connect(target: SshHostTarget)` already
+   carries `credential`, and `androidHosts.resolve()` builds it
+   (`src/platform/android/hostStore.ts:194-228`) — today it refuses a password
+   host outright (`:205-209`). Give `resolve` an **optional second argument**
+   `credential?: SshCredential`; when present it is used verbatim and the
+   password refusal is skipped (a key host with no handle still throws
+   `MissingHostCredential`). `connect()` builds it first:
+   `buildSshCredential(host.auth ?? { kind: 'key', keyHandleId: host.keyHandleId }, id => secrets.resolve(id))`,
+   then `hosts.resolve(request, credential)`.
+3. **`save` becomes async** (`Promise<void>`): it must seal a newly typed secret
+   and forget an unreferenced one, both async. Callers use `void`/`await`.
+   - `save(host, previousName?, secret?)`: when `secret` is non-empty, seal it
+     with the kind implied by `host.auth` (`password` → `'password'`; key →
+     `'key-passphrase'`) and write the returned id into the record
+     (`passwordCredentialId` / `secretId`). When the incoming record no longer
+     references an old id (remember off, auth switched, or a replaced id), call
+     `secrets.forget(oldId)` **after** the host write; a failing forget must not
+     fail the save.
+   - `saveSecret(host, secret)`: the plan's public helper (seal + write, no
+     rename) so tests and any other caller can use it directly.
+   - `remove(name)`: forget the removed record's ids (key `secretId` and
+     password `passwordCredentialId`), then delete the host; a failing forget
+     never blocks the deletion.
+   - `forgetSecrets(name)`: the explicit 清除已保存凭据 action — forget every id
+     the record holds and rewrite the record without them.
+4. **A remembering key host with no `secretId`** must build `passphrase: null`
+   (sshj prompts) — that is Task 1's contract, not a store error. Record in the
+   ledger that the phone build has no transient passphrase prompt yet, so such a
+   host fails to dial; Plan 5 decides whether to add it. Do not fake it.
+5. **No PTY/terminal jargon** in new user copy; Chinese labels; ≥48px targets;
+   tokens only; `data-testid` on new controls.
+6. **Split:** 4a = store + `hostStore.resolve` + tests
+   (`tests/unit/connectionsCredentials.test.ts`, plus the existing
+   `connectionsStore`/`connectionsSwitchConfirm`/`connectionsPiDir`/`connectionsRename`
+   still green). 4b = `ConnectionEditor.vue` + `ConnectionsList.vue` + a local
+   `LockIcon.vue` (no `lock` glyph in core `AppIcon`; follow `KeyIcon.vue`'s
+   precedent) + `tests/unit/connectionEditorAuth.test.ts` (jsdom +
+   `testTransformMode.web` entry). 4b's editor emits
+   `save: [host, secret: string | null]` and `forget-credentials: []`.
+
+---
+
+### Task 4a: Store wiring — credential, forget-on-save, forget-on-delete
 
 **Files:**
-- Modify: `src/stores/connections.ts`, `src/components/connections/ConnectionEditor.vue`, `src/components/connections/ConnectionsList.vue`
+- Modify: `src/stores/connections.ts`, `src/platform/android/hostStore.ts`
 - Test: `tests/unit/connectionsCredentials.test.ts`
 
-**Interfaces:**
-- Consumes: `buildSshCredential` (Task 1), `RememberedSecrets` (Task 3).
-- Produces: `useConnectionsStore()` gains `saveSecret(host, secret)`,
-  `forgetSecrets(host)`, and `connect(name)` now resolves a credential before
-  dialing.
+**Interfaces (per R29):**
+- `ConnectionsStoreDeps` gains **optional** `secrets?: RememberedSecrets`.
+- `AndroidHostStore.resolve(request, credential?)` uses a supplied credential and
+  no longer refuses a password host when one is given.
+- `connect(name)` resolves the credential through `buildSshCredential` first.
+- `save(host, previousName?, secret?)` becomes async; `saveSecret(host, secret)`
+  and `forgetSecrets(name)` are new.
 
 - [ ] **Step 1: Write the failing tests**
+
+The skeleton below shows the **real** dependency shape (`hosts`/`port`/`secrets`)
+— do not copy the plan's earlier `readHosts`/`controller` sketch.
 
 ```ts
 // tests/unit/connectionsCredentials.test.ts
 import { describe, expect, it, vi } from 'vitest';
 import { createConnectionsStore } from '../../src/stores/connections';
+import type { ConnectionPort } from '../../src/session/connectionPort';
+import type { SavedHost } from '../../src/platform/android/hostStore';
 
-const keyHost = { name: 'k', hostname: 'h', port: 22, user: 'u',
-  auth: { kind: 'key' as const, keyHandleId: 'h-1', rememberPassphrase: true, secretId: 's-1' } };
+const keyHost: SavedHost = {
+  name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: 'h-1',
+  auth: { kind: 'key', keyHandleId: 'h-1', rememberPassphrase: true, secretId: 's-1' },
+};
+
+function deps(hosts: SavedHost[], connect = vi.fn(async () => ({ ok: true }))) {
+  const save = vi.fn();
+  const remove = vi.fn();
+  const resolve = vi.fn(async (request, credential) => ({
+    hostId: `${request.user}@${request.host}:${request.port ?? 22}`,
+    hostname: request.host, port: request.port ?? 22, username: request.user,
+    credential: credential ?? { kind: 'key-handle', handleId: 'h-1', passphrase: null },
+  }));
+  const port = { connect, disconnect: vi.fn() } as unknown as ConnectionPort;
+  const secrets = { resolve: vi.fn(async () => 'pw'), put: vi.fn(async () => 's-9'), forget: vi.fn(async () => {}) };
+  return { hosts: { savedHosts: () => hosts, save, remove, resolve }, port, secrets };
+}
 
 describe('connections store credentials', () => {
   it('dials with the resolved passphrase', async () => {
-    const controller = { connect: vi.fn(async () => ({ ok: true })), disconnect: vi.fn() };
-    const secrets = { resolve: vi.fn(async () => 'pw'), put: vi.fn(), forget: vi.fn() };
-    const store = createConnectionsStore({ readHosts: () => [keyHost], writeHosts: vi.fn(), controller: controller as never, secrets: secrets as never });
-    await store.load(); await store.connect('k');
-    expect(controller.connect).toHaveBeenCalledWith(expect.objectContaining({ credential: { kind: 'key-handle', handleId: 'h-1', passphrase: 'pw' } }));
+    const d = deps([keyHost]);
+    const store = createConnectionsStore(d as never);
+    store.load();
+    await store.connect('k');
+    expect(d.secrets.resolve).toHaveBeenCalledWith('s-1');
+    expect(d.port.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ credential: { kind: 'key-handle', handleId: 'h-1', passphrase: 'pw' } }),
+    );
   });
-
-  it('forgets the secret when a host stops remembering', async () => {
-    const secrets = { resolve: vi.fn(), put: vi.fn(), forget: vi.fn(async () => {}) };
-    const store = createConnectionsStore({ readHosts: () => [keyHost], writeHosts: vi.fn(), controller: {} as never, secrets: secrets as never });
-    await store.load();
-    await store.save({ ...keyHost, auth: { kind: 'key', keyHandleId: 'h-1', rememberPassphrase: false } });
-    expect(secrets.forget).toHaveBeenCalledWith('s-1');
-  });
-
-  it('forgets the secret when a host is deleted', async () => {
-    const secrets = { resolve: vi.fn(), put: vi.fn(), forget: vi.fn(async () => {}) };
-    const store = createConnectionsStore({ readHosts: () => [keyHost], writeHosts: vi.fn(), controller: {} as never, secrets: secrets as never });
-    await store.load(); await store.remove('k');
-    expect(secrets.forget).toHaveBeenCalledWith('s-1');
-  });
-
-  it('stores a freshly typed password and references it by id', async () => {
-    const secrets = { resolve: vi.fn(), put: vi.fn(async () => 's-9'), forget: vi.fn() };
-    const writeHosts = vi.fn();
-    const store = createConnectionsStore({ readHosts: () => [], writeHosts, controller: {} as never, secrets: secrets as never });
-    await store.load();
-    await store.saveSecret({ name: 'p', hostname: 'h', port: 22, user: 'u', auth: { kind: 'password', passwordCredentialId: '' } }, 'pw');
-    expect(secrets.put).toHaveBeenCalledWith('pw', undefined);
-    expect(writeHosts).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ auth: { kind: 'password', passwordCredentialId: 's-9' } })]);
-  });
+  // …password host dials with the sealed password; a missing password fails the
+  // dial with the /password/i copy and status 'error'; a key host with remember
+  // off gets passphrase null and no lookup; save() forgets an unreferenced id;
+  // remove() forgets both ids; saveSecret() seals with the right kind and writes
+  // the id; a failing forget never blocks a save or a delete; forgetSecrets()
+  // clears both ids; a rename moves the record without forgetting the kept id.
 });
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pnpm exec vitest run tests/unit/connectionsCredentials.test.ts`
-Expected: FAIL — the store has no `secrets` dependency, `saveSecret` or `forgetSecrets`.
+Run: `npx vitest run tests/unit/connectionsCredentials.test.ts`
+Expected: FAIL — no `secrets` dep, no `saveSecret`/`forgetSecrets`, `resolve` takes one argument.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement (R29 rules)**
 
-Inject `secrets` alongside `controller`. `connect` builds the credential with
-`buildSshCredential(host.auth, (id) => secrets.resolve(id))` and passes it to
-`controller.connect`. `save` compares the incoming and stored `auth` and, when
-the old `secretId` is no longer referenced, calls `secrets.forget` (Review Focus
-3). `remove` forgets first, then writes the list. `saveSecret` seals a typed
-password/passphrase and writes the returned id into the host record. Then the
-editor: an auth-method switch (密钥 / 密码), a password field with a 记住密码
-toggle, and a 记住口令 toggle on the key path plus a 清除已保存凭据 action; the
-list shows a lock glyph on hosts with a remembered secret.
+1. `src/platform/android/hostStore.ts`: `resolve(request, credential?)`; with a
+   credential, use it and skip the password refusal (keep
+   `MissingHostCredential` for a key host with no handle and **no** credential).
+2. `src/stores/connections.ts`:
+   - `secrets?: RememberedSecrets` with a fail-closed default
+     (`resolve → null`, `forget → no-op`, `put → throws`), so every existing test
+     keeps its old deps.
+   - `connect`: build the credential from the found host's `auth` (or
+     `{kind:'key', keyHandleId}` for a v1 record), wrap `buildSshCredential`'s
+     rejection into `status:'error'` + `lastError` exactly like a failed resolve.
+   - `save(host, previousName?, secret?)` async — seal a supplied secret with the
+     kind implied by `auth`, write the id, then forget every id the **previous**
+     record held but the new one does not (remember off, auth switch, or a
+     replaced id). A forget failure is swallowed **after** the write.
+   - `saveSecret(host, secret)` — seal + write, no rename.
+   - `remove(name)` — forget the removed record's ids after the delete (a failure
+     is swallowed), so the list always shrinks.
+   - `forgetSecrets(name)` — forget every id the record holds, then rewrite it
+     without them.
+   - Bind `rememberedSecrets` in `useConnectionsStore`, and update
+     `ConnectionsList.saveHost` to `void store.save(...)`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pnpm exec vitest run tests/unit/connectionsCredentials.test.ts tests/unit/connectionsStore.test.ts`
-Expected: PASS (4 + 4 tests).
+Run: `npx vitest run tests/unit/connectionsCredentials.test.ts tests/unit/connectionsStore.test.ts tests/unit/connectionsSwitchConfirm.test.ts tests/unit/connectionsPiDir.test.ts tests/unit/connectionsRename.test.ts`
+Expected: PASS (new + existing all green).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/stores/connections.ts src/components/connections tests/unit/connectionsCredentials.test.ts
-git commit -m "feat(connections): password auth and remembered credentials in the editor"
+git add src/stores/connections.ts src/platform/android/hostStore.ts tests/unit/connectionsCredentials.test.ts
+git commit -m "feat(connections): dial with a remembered credential"
 ```
+
+---
+
+### Task 4b: The editor and the list
+
+**Files:**
+- Modify: `src/components/connections/ConnectionEditor.vue`, `src/components/connections/ConnectionsList.vue`
+- Create: `src/components/connections/LockIcon.vue` (core `AppIcon` has no `lock`
+  glyph; copy `KeyIcon.vue`'s precedent)
+- Test: `tests/unit/connectionEditorAuth.test.ts` (jsdom docblock +
+  `testTransformMode.web` entry), plus list assertions in the same file or a
+  second `describe` inside it (one flat top-level `describe` per file — put the
+  list assertions in the same file only if they share the mount harness,
+  otherwise a second file)
+
+- [ ] **Step 1: Write the failing tests** — the editor renders a 密钥/密码 switch;
+  choosing 密码 reveals a password field (`type="password"`,
+  `autocomplete="new-password"`) and a 记住密码 toggle; choosing 密钥 keeps the key
+  select and adds a 记住口令 toggle; 保存 is disabled until a key is chosen or a
+  password is typed; editing a host with a saved credential shows 已保存 and a
+  清除已保存凭据 button that emits `forget-credentials`; a typed secret is emitted
+  with `save` (and the record carries no plaintext).
+- [ ] **Step 2: RED** (`npx vitest run tests/unit/connectionEditorAuth.test.ts`)
+- [ ] **Step 3: Implement** — bilingual-free Chinese labels, tokens only,
+  ≥48px targets, `data-testid` (`auth-key`, `auth-password`, `password-input`,
+  `remember-password`, `remember-passphrase`, `forget-credentials`). Emit
+  `save: [host, secret: string | null]`; `ConnectionsList.saveHost` forwards the
+  secret to `store.save(host, previousName, secret)` and
+  `forget-credentials` to `store.forgetSecrets(name)`. The list shows
+  `LockIcon` for a host whose `auth` references a secret
+  (`passwordCredentialId`, or key + `rememberPassphrase` + `secretId`).
+- [ ] **Step 4: GREEN** — the new file plus `connectionsStore`/`connectionsPiDir`
+  suites; check `releaseChrome.test.ts` for banned words.
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/components/connections tests/unit/connectionEditorAuth.test.ts vitest.config.ts scripts/js-unit-test-manifest.json
+git commit -m "feat(connections): key or password auth in the editor"
+```
+
 
 ---
 
 ## Self-Review
 
-- **Spec coverage:** §7.1 → Tasks 2, 3; §7.2 (password) → Tasks 1, 4 (native path
-  already exists); §7.3 (remembered passphrase) → Tasks 1, 2, 4; D2 → Global
+- **Spec coverage:** §7.1 → Tasks 2, 3; §7.2 (password) → Tasks 1, 4a, 4b (native path
+  already exists); §7.3 (remembered passphrase) → Tasks 1, 2, 4a, 4b; D2 → Global
   Constraints.
 - **Review Focus:** RF1 → Task 1's throw test; RF2 → Task 1's null-passphrase
   test; RF3 → Task 4's forget-on-save test; RF4 → Task 2's `forTesting` and the
   no-log constraint.
-- **Interface consistency:** `HostAuth` gains `secretId?` in Task 1, which Task 4
-  writes and Plan 2's editor renders; `SshCredential` is core's type, unchanged.
+- **Interface consistency:** `HostAuth` gains `secretId?` in Task 1, which Task 4a
+  writes and Task 4b's editor renders; `SshCredential` is core's type, unchanged.
 - **Explicitly not doing:** any change to `client.authPassword` or the key
   decryption path — both already work; biometric gating (not in spec).
 - **Not verifiable here:** Task 2's JVM test and the package's compile both need
-  a JDK (Plan 5 Task 1). Tasks 1, 3, 4 are pure JS and pass locally.
+  a JDK (Plan 5 Task 1). Tasks 1, 3, 4a, 4b are pure JS and pass locally.
 
 ## Follow-on plans
 
