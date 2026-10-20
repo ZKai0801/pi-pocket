@@ -405,6 +405,59 @@ Deferred (Plan 5 / Task 6): the opener swallows async write rejections (they sur
 as the turn timeout) and its read pump stops on EOF/sequence gap without closing the
 channel or notifying the runner — the seam's `void` write cannot report either.
 
+### R24 — Task 6 design (authoritative, resolved 2026-10-19)
+New conversation per §8.5/§9.4. **No navigation change**: the chat already shows
+while `open !== null`, so a draft chat is an empty `ParsedPiSession`, not a new
+screen state.
+
+**Store.**
+- `newConversation(project: PiProject): void` — requires a selected project; sets
+  `lastProject = project`, `open = { version: 3, id: '', cwd: project.path, name:
+  null, turns: [] }`, `openPath = null`, `sendError = null`, `startingNew = true`.
+- `send` when `startingNew`: call `runner.startNew(project.path, text)` instead of
+  `runner.send`. On `ok`: `open = session`, `openPath = sessionFile`,
+  `startingNew = false`. On failure: the draft **stays** (so the text and the empty
+  chat survive), `sendError` set. `'busy'` semantics and the D8 host claim are the
+  same as the existing path (the claim also carries `startingNew`'s project path).
+- `closeChat()` clears `startingNew`; `refresh()` with `openPath === null` keeps its
+  current list-reload behaviour.
+- `SessionsStoreDeps.runner` type extends to include `startNew`.
+
+**Runner (`PiTurnRunner`).**
+- New dep `newestSessionFile(projectPath: string): Promise<string | null>` (the
+  wrapper implements it from the existing `listSessions(project)` meta list — the
+  command sorts newest-first — so no new shell builder).
+- New method
+  `startNew(projectPath: string, message: string): Promise<{ ok: true; sessionFile: string; session: ParsedPiSession } | { ok: false; error: string }>`:
+  same busy/empty refusals; open **without** `--session`
+  (`buildPiOpenCommand(piCommand, projectPath)`); readiness latch; capture
+  `baseline = newestSessionFile(projectPath)` **before** delivery; deliver with
+  `intent: 'submit'`; poll `newestSessionFile` until it returns a **different
+  non-null** path (bounded by `turnTimeoutMs`, actionable error when no file
+  appears); then poll `readSession(adopted)` for the first assistant turn (same
+  deadline); return the adopted path + parsed session. Every exit clears busy,
+  unsubscribes, and follows `dispose()`.
+- The store **disposes the bare runner after adoption**; the next turn builds the
+  normal `--session` runner for the adopted path (Pi resumes the file). Cache key
+  stays host + session file; a draft's key is `host \n ''` and must not survive
+  adoption.
+
+**UI.** `SessionList.vue`'s `+` (`:44-46`) is undisabled when a project is selected
+(`lastProject !== null`) and calls `newConversation(lastProject)`. The draft chat
+shows the existing empty state; the composer works unchanged (text cleared only on
+`'sent'`).
+
+**Tests.** `tests/unit/piTurnRunner.test.ts` grows: `startNew` opens the sessionless
+command, adopts the newest file, times out with no new file, refuses empty/busy.
+`tests/unit/sessionsSend.test.ts` grows: `newConversation` opens an empty chat;
+`send` in a draft calls `startNew` and adopts its path; a failed `startNew` keeps
+the draft. `tests/unit/sessionListNewChat.test.ts` (new): `+` disabled without a
+project, enabled with one, calls `newConversation`. All one flat top-level
+`describe`; register in the manifest. **Every Pi-CLI assumption here (that a bare
+`pi` writes its session file on the first message, and that it lands in the
+project's encoded dir) stays UNVERIFIED until the Plan 5 device run.**
+
+
 
 
 
