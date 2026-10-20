@@ -23,9 +23,13 @@
 import { reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { PiRepository, type PiProject, type PiSessionMeta } from '../pi/piRepository';
+import { createPiTurnRunner, type PiTurnRunner, type PiTurnSendResult } from '../pi/piTurnRunner';
+import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession } from '../pi/types';
 import { piLive } from '../session/piLive';
+import { turnPtyOpener } from '../session/turnPty';
+import type { SavedHost } from '../platform/android/hostStore';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { useConnectionsStore } from './connections';
 import { useProjectsStore } from './projects';
@@ -42,6 +46,10 @@ export interface SessionsStoreState {
   lastProject: PiProject | null;
   state: SessionsState;
   error: string | null;
+  /** A turn is being written to Pi and awaited in the open chat. */
+  sending: boolean;
+  /** The last send failure, already in the UI's language. */
+  sendError: string | null;
 }
 
 export interface SessionsStore extends SessionsStoreState {
@@ -53,6 +61,12 @@ export interface SessionsStore extends SessionsStoreState {
   refresh(): Promise<void>;
   /** Back navigation: clears the open session and its path. */
   closeChat(): void;
+  /**
+   * Sends `text` as one Pi turn in the open chat. Never throws: a turn already
+   * running is `'busy'`, and a refused/failed turn is `'error'` with
+   * `sendError` set. The composer keeps its text unless this says `'sent'`.
+   */
+  send(text: string): Promise<'sent' | 'busy' | 'error'>;
   /**
    * Invalidates every in-flight run (D8): their results settle into dropped
    * writes, and nothing may join them any more. The wrapper's host-switch
@@ -71,11 +85,37 @@ export interface SessionsStoreDeps {
    * behaving exactly as before.
    */
   hostId?: () => string | null;
+  /**
+   * The turn runner for the open chat. Optional so host-less callers (and the
+   * existing tests) keep compiling; `send` refuses without one.
+   */
+  runner?: PiTurnRunner;
 }
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
   return 'The sessions could not be loaded.';
+}
+
+// The runner reports typed English failures; the chat is Chinese. Ordered:
+// "did not become ready" must win over the generic timeout wording it carries.
+const TURN_ERROR_COPY: ReadonlyArray<readonly [RegExp, string]> = [
+  [/already running|already in progress|\brunning\b/i, '上一条消息仍在处理中，请稍候。'],
+  [/disposed/i, '当前会话已断开，请重新打开。'],
+  [/not-sent|not sent/i, '消息未发送成功，请重试。'],
+  [/empty/i, '消息为空。'],
+  [/not become ready|\bready\b/i, 'Pi 尚未准备好，请稍后重试。'],
+  [/timed out|timeout/i, '等待回复超时，请重试。'],
+  [/did not confirm|write/i, '消息写入失败，请重试。'],
+  [/opener|installed|live ssh connection/i, '发送通道尚未就绪，请稍后重试。'],
+];
+
+/** The Chinese copy for a runner failure; unknown messages pass through. */
+export function localiseTurnError(error: string): string {
+  for (const [pattern, copy] of TURN_ERROR_COPY) {
+    if (pattern.test(error)) return copy;
+  }
+  return error;
 }
 
 /** The last path segment, matching `PiRepository`'s `projectNameFromPath`. */
@@ -108,6 +148,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     lastProject: null,
     state: 'idle',
     error: null,
+    sending: false,
+    sendError: null,
   });
 
   // The active host, re-read at write time (D8): a run captured on one host
@@ -122,6 +164,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   // dropped at settlement. One token counter per op family.
   let loadToken = 0;
   let openToken = 0;
+  let sendToken = 0;
   let loadInFlight: { token: number; host: string | null; project: PiProject; promise: Promise<void> } | null = null;
   let openInFlight: { token: number; host: string | null; path: string; promise: Promise<void> } | null = null;
 
@@ -226,7 +269,55 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     }
   }
 
+  // One turn at a time in the open chat (D10). The claim carries the host and
+  // path it was made for, and both are re-checked at settlement (D8), so a
+  // turn that lands after a host/project/chat switch never paints `open`.
+  async function send(text: string): Promise<'sent' | 'busy' | 'error'> {
+    const sessionFile = state.openPath;
+    if (state.open === null || sessionFile === null || !deps.runner) {
+      state.sendError = '当前无法发送消息。';
+      return 'error';
+    }
+    const runner = deps.runner;
+    if (runner.isBusy()) return 'busy';
+    if (text.trim() === '') {
+      state.sendError = '消息为空。';
+      return 'error';
+    }
+
+    const host = hostId();
+    const token = ++sendToken;
+    state.sending = true;
+    state.sendError = null;
+    try {
+      let result: PiTurnSendResult;
+      try {
+        result = await runner.send(sessionFile, text);
+      } catch (error) {
+        result = { ok: false, error: errorMessage(error) };
+      }
+      // A stale claim's turn is abandoned, never shown (D8): the host changed,
+      // the chat closed, or another project replaced it mid-flight.
+      if (sendToken !== token || hostId() !== host || state.openPath !== sessionFile) {
+        return 'error';
+      }
+      if (result.ok) {
+        state.open = result.session;
+        return 'sent';
+      }
+      state.sendError = localiseTurnError(result.error);
+      return 'error';
+    } finally {
+      if (sendToken === token) state.sending = false;
+    }
+  }
+
   function closeChat(): void {
+    // Abandon any in-flight turn (D10) and clear the composer's failure so the
+    // next chat starts clean; the runner itself is disposed by the wrapper.
+    sendToken += 1;
+    state.sending = false;
+    state.sendError = null;
     state.open = null;
     state.openPath = null;
   }
@@ -237,6 +328,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   function hostChanged(): void {
     loadToken += 1;
     openToken += 1;
+    sendToken += 1;
+    state.sending = false;
     loadInFlight = null;
     openInFlight = null;
   }
@@ -254,10 +347,15 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     set state(value: SessionsState) { state.state = value; },
     get error() { return state.error; },
     set error(value: string | null) { state.error = value; },
+    get sending() { return state.sending; },
+    set sending(value: boolean) { state.sending = value; },
+    get sendError() { return state.sendError; },
+    set sendError(value: string | null) { state.sendError = value; },
     load,
     openSession,
     refresh,
     closeChat,
+    send,
     hostChanged,
   });
 }
@@ -268,7 +366,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
  * the active host's per-host override. Throws when there is no live seam or
  * no root — the store turns that into `state: 'error'`, never a crash.
  */
-async function resolveActiveSessionRoot(): Promise<string> {
+export async function resolveActiveSessionRoot(): Promise<string> {
   const live = piLive();
   const context = await live.remoteContext();
   const connections = useConnectionsStore();
@@ -285,7 +383,111 @@ async function resolveActiveSessionRoot(): Promise<string> {
   return root;
 }
 
+const MIN_TURN_POLL_INTERVAL_MS = 250;
+const TURN_POLL_INTERVAL_MS = 500;
+const BUSY_TURN_ERROR = 'A turn is already running in this chat.';
+
+/** Re-read the open session through the live seam, bounded by PiRepository's own exec timeout. */
+function readSessionOnActiveHost(path: string): Promise<ParsedPiSession> {
+  return readActiveSession(path);
+}
+
+async function readActiveSession(path: string): Promise<ParsedPiSession> {
+  const root = await resolveActiveSessionRoot();
+  return new PiRepository(piLive().transport(), root).readSession(path);
+}
+
 export const useSessionsStore = defineStore('sessions', () => {
+  const connections = useConnectionsStore();
+
+  // One runner per host + open session file (D10): the runner owns the turn
+  // PTY and may only be reused for the chat and connection it was built for.
+  // Reconnect/host switch/unmount dispose it; a new chat gets a fresh one.
+  let cachedRunner: { key: string; runner: PiTurnRunner } | null = null;
+  // `resolvePiCommand` probes the shell once per connection, not per chat.
+  let cachedPiCommand: { host: string; command: string } | null = null;
+  let pendingTurn: Promise<PiTurnSendResult> | null = null;
+
+  function activeSavedHost(): SavedHost | undefined {
+    const name = connections.activeName;
+    return name === null ? undefined : connections.hosts.find((host) => host.name === name);
+  }
+
+  function disposeChatRunner(): void {
+    const cached = cachedRunner;
+    cachedRunner = null;
+    cached?.runner.dispose();
+  }
+
+  function disposeTurnRunner(): void {
+    disposeChatRunner();
+    cachedPiCommand = null;
+  }
+
+  async function commandForActiveHost(): Promise<{ ok: true; command: string } | { ok: false; error: string }> {
+    const host = activeSavedHost();
+    const hostName = host?.name ?? '';
+    if (cachedPiCommand !== null && cachedPiCommand.host === hostName) {
+      return { ok: true, command: cachedPiCommand.command };
+    }
+    const override = host?.piCommand?.trim();
+    const resolution = await resolvePiCommand(
+      piLive().transport(),
+      override && override.length > 0 ? override : undefined,
+    );
+    if (!resolution.ok) return resolution;
+    cachedPiCommand = { host: hostName, command: resolution.command };
+    return resolution;
+  }
+
+  async function runnerFor(sessionFile: string): Promise<PiTurnRunner> {
+    const key = `${activeSavedHost()?.name ?? ''}\n${sessionFile}`;
+    if (cachedRunner !== null && cachedRunner.key === key) return cachedRunner.runner;
+
+    disposeChatRunner();
+    const command = await commandForActiveHost();
+    if (!command.ok) throw new Error(command.error);
+    const projectPath = store.open?.cwd ?? null;
+    if (projectPath === null) throw new Error('会话缺少项目目录，无法发送。');
+
+    const runner = createPiTurnRunner({
+      openPty: (commandLine, geometry) => turnPtyOpener().open(commandLine, geometry),
+      piCommand: command.command,
+      projectPath,
+      // PiRepository bounds its own fallback exec; the turn's overall deadline
+      // is the runner's, not a single read's.
+      readSession: readSessionOnActiveHost,
+      pollIntervalMs: Math.max(MIN_TURN_POLL_INTERVAL_MS, TURN_POLL_INTERVAL_MS),
+    });
+    cachedRunner = { key, runner };
+    return runner;
+  }
+
+  // Serializes the build + turn before a runner exists: two taps in the same
+  // tick must not open two turn PTYs (D10).
+  const runnerFacade: PiTurnRunner = {
+    isBusy: () => pendingTurn !== null || cachedRunner?.runner.isBusy() === true,
+    send(sessionFile, message) {
+      if (pendingTurn !== null) {
+        return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
+      }
+      const run = (async (): Promise<PiTurnSendResult> => {
+        try {
+          const runner = await runnerFor(sessionFile);
+          return await runner.send(sessionFile, message);
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      })();
+      pendingTurn = run;
+      void run.then(() => {
+        if (pendingTurn === run) pendingTurn = null;
+      });
+      return run;
+    },
+    dispose: disposeTurnRunner,
+  };
+
   const store = createSessionsStore({
     // Bound lazily at call time through the shell's live seam, root re-probed
     // per call (R11.1): with the per-host override that is one `test -d`.
@@ -293,23 +495,20 @@ export const useSessionsStore = defineStore('sessions', () => {
       const root = await resolveActiveSessionRoot();
       return new PiRepository(piLive().transport(), root).listSessions(project);
     },
-    readSession: async (path) => {
-      const root = await resolveActiveSessionRoot();
-      return new PiRepository(piLive().transport(), root).readSession(path);
-    },
+    readSession: readActiveSession,
     // D8: claims are keyed to the active host and re-checked at write time,
     // so a run captured on one host cannot write under another.
-    hostId: () => useConnectionsStore().activeName,
+    hostId: () => connections.activeName,
+    runner: runnerFacade,
   });
 
   // Host switch (D8): the previous host's list and chat are stale the moment
-  // the connection changes. Invalidate the in-flight runs first — their
-  // results must settle into dropped writes — then clear the state, which is
-  // what makes the UI immediately honest.
-  const connections = useConnectionsStore();
+  // the connection changes. The runner's PTY belongs to that connection too,
+  // so abandon it (D10) before clearing the state.
   watch(
     () => connections.activeName,
     () => {
+      disposeTurnRunner();
       store.hostChanged();
       store.sessions = [];
       store.open = null;
@@ -318,6 +517,13 @@ export const useSessionsStore = defineStore('sessions', () => {
       store.error = null;
       store.state = 'idle';
     },
+  );
+
+  // Closing a chat or switching projects abandons its runner; the connection
+  // (and the resolved pi command) outlives the chat, so keep that cache.
+  watch(
+    () => store.openPath,
+    () => disposeChatRunner(),
   );
 
   // The projects tab's selection is what the 会话 tab lists (spec §8.5); the
@@ -331,6 +537,11 @@ export const useSessionsStore = defineStore('sessions', () => {
     },
   );
 
+  function closeChat(): void {
+    disposeChatRunner();
+    store.closeChat();
+  }
+
   return {
     sessions: toRef(store, 'sessions'),
     open: toRef(store, 'open'),
@@ -338,9 +549,13 @@ export const useSessionsStore = defineStore('sessions', () => {
     lastProject: toRef(store, 'lastProject'),
     state: toRef(store, 'state'),
     error: toRef(store, 'error'),
+    sending: toRef(store, 'sending'),
+    sendError: toRef(store, 'sendError'),
     load: store.load,
     openSession: store.openSession,
     refresh: store.refresh,
-    closeChat: store.closeChat,
+    closeChat,
+    send: store.send,
+    disposeTurnRunner,
   };
 });

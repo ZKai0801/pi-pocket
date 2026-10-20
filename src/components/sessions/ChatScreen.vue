@@ -2,7 +2,7 @@
 /**
  * Read-only chat (spec §8.6): the open session's turns as WeChat-style
  * bubbles with day/time separators, pull-to-refresh re-reading the session
- * file, and a disabled composer that says sending is not in this version.
+ * file, and the composer that sends one Pi turn at a time.
  * Navigation is store-driven: back is `closeChat()`, the chat shows while
  * `open !== null`.
  */
@@ -11,6 +11,7 @@ import AppIcon from '@ui/components/AppIcon.vue';
 import { useSessionsStore } from '../../stores/sessions';
 import type { PiTurn } from '../../pi/types';
 import ChatBubble from './ChatBubble.vue';
+import ChatComposer from './ChatComposer.vue';
 
 const store = useSessionsStore();
 
@@ -190,16 +191,7 @@ function goBack(): void {
     </div>
 
     <footer class="chat__composer">
-      <input
-        class="chat__composer-input"
-        type="text"
-        placeholder="消息发送将在后续版本提供"
-        aria-label="消息发送将在后续版本提供"
-        disabled
-      />
-      <button type="button" class="chat__send" aria-label="发送" disabled>
-        <AppIcon name="arrow-up" />
-      </button>
+      <ChatComposer :send="store.send" :sending="store.sending" :error="store.sendError" />
     </footer>
   </section>
 </template>
@@ -240,7 +232,6 @@ function goBack(): void {
 
 .chat__back:focus-visible,
 .chat__retry:focus-visible,
-.chat__send:focus-visible,
 .chat__terminal:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
@@ -402,46 +393,5 @@ function goBack(): void {
   text-align: center;
 }
 
-.chat__composer {
-  display: flex;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-}
 
-.chat__composer-input {
-  flex: 1 1 auto;
-  min-height: 48px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  padding: 0 var(--sp-2);
-  color: var(--fg);
-  font: var(--fs-300) var(--font-ui);
-  outline: none;
-}
-
-.chat__composer-input::placeholder {
-  color: var(--fg-muted);
-}
-
-.chat__composer-input:disabled {
-  opacity: var(--disabled-opacity);
-}
-
-.chat__send {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--accent);
-  border-radius: var(--r-md);
-  background: var(--accent);
-  color: var(--on-accent);
-}
-
-.chat__send:disabled {
-  opacity: var(--disabled-opacity);
-}
 </style>

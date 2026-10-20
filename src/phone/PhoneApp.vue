@@ -18,6 +18,7 @@ import {
   type HostKeyTrustChoice,
   type SessionRow,
   type SshHostTarget,
+  isSshResponseFor,
 } from '@pocketshell/core';
 import HostKeyTrustPrompt from '@ui/app/components/HostKeyTrustPrompt.vue';
 import AppTabBar, { type PhoneTab } from '../components/shell/AppTabBar.vue';
@@ -46,6 +47,7 @@ import {
   type PiRemoteContext,
 } from '../session/piLive';
 import { installTerminalPty, type TerminalPty } from '../session/terminalPty';
+import { installTurnPtyOpener, type TurnPtyOpener } from '../session/turnPty';
 import { createPiTransport } from '../pi/piTransport';
 import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
 import { projectBasename, useSessionsStore } from '../stores/sessions';
@@ -59,6 +61,9 @@ import { createTerminalTextDecoder } from './terminalText';
 import type { TerminalGeometry } from '../terminalGeometry';
 
 const EXEC_TIMEOUT_MS = 15_000;
+const TURN_PTY_MAX_BYTES = 32_768;
+const TURN_PTY_WAIT_MS = 250;
+const TURN_TERM = 'xterm-256color';
 const nativePlatform = Capacitor.getPlatform();
 
 const activeTab = ref<PhoneTab>('connections');
@@ -131,6 +136,16 @@ watch(
     }
   },
 );
+
+// A new generation means a reconnect: the turn PTY belonged to the old
+// transport, so abandon it rather than replay the turn (D10).
+watch(
+  () => snapshot.value?.generationId,
+  (next, previous) => {
+    if (next === previous) return;
+    sessions.disposeTurnRunner();
+  },
+);
 const keyboardVisible = ref(false);
 const connectionMessage = ref('');
 const terminalTarget = ref<{ name: string; title: string } | null>(null);
@@ -199,11 +214,13 @@ function bindController(next: ConnectionController): void {
 function releaseSeams(): void {
   installPiLive(null);
   installTerminalPty(null);
+  installTurnPtyOpener(null);
 }
 
 function installSeams(): void {
   installPiLive(piLiveImplementation);
   installTerminalPty(terminalPtyImplementation);
+  installTurnPtyOpener(turnPtyImplementation);
 }
 
 async function closeController(): Promise<void> {
@@ -220,6 +237,7 @@ async function closeController(): Promise<void> {
   decoder.reset();
   snapshot.value = null;
   terminalTarget.value = null;
+  sessions.disposeTurnRunner();
   releaseSeams();
   if (active) await active.close().catch(() => undefined);
 }
@@ -328,6 +346,123 @@ const piLiveImplementation: PiLive = {
       .filter((entry) => entry.isDirectory)
       .map((entry) => ({ name: entry.name, path: entry.path }))
       .sort((left, right) => left.name.localeCompare(right.name));
+  },
+};
+
+/* -------------------------------------------------------------- turn PTY */
+
+function decodeBase64Bytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function encodeBase64Bytes(bytes: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+/**
+ * A turn's own PTY (R18.3): never the terminal screen's attach PTY or its
+ * single `onData` slot. It runs `pi --session <file>` in the chat's project
+ * directory and keeps its own read pump and UTF-8 decoder.
+ */
+const turnPtyImplementation: TurnPtyOpener = {
+  async open(command, geometry) {
+    const connection = liveConnectionRef();
+    const requestId = nextRequestId();
+    const opened = await sshCapability.openPty({
+      ...connection,
+      requestId,
+      command,
+      cols: geometry.cols,
+      rows: geometry.rows,
+      term: TURN_TERM,
+    });
+    if (!isSshResponseFor(opened, requestId, connection)) {
+      await sshCapability.closePty({ ...opened, requestId: nextRequestId() }).catch(() => undefined);
+      throw new Error('发送通道未能打开。');
+    }
+
+    const pty = {
+      connectionId: opened.connectionId,
+      generationId: opened.generationId,
+      channelId: opened.channelId,
+    };
+    const listeners = new Set<(chunk: string) => void>();
+    const turnDecoder = createTerminalTextDecoder();
+    let closed = false;
+    let readSequence = 0;
+    let writeSequence = 0;
+    let writeQueue: Promise<void> = Promise.resolve();
+
+    void (async () => {
+      while (!closed) {
+        const readRequestId = nextRequestId();
+        let result;
+        try {
+          result = await sshCapability.readPty({
+            ...pty,
+            requestId: readRequestId,
+            sequence: readSequence,
+            maxBytes: TURN_PTY_MAX_BYTES,
+            waitMs: TURN_PTY_WAIT_MS,
+          });
+        } catch {
+          return;
+        }
+        if (closed) return;
+        if (result.channelId !== pty.channelId || !isSshResponseFor(result, readRequestId, pty)) {
+          return;
+        }
+        if (result.sequence === readSequence + 1) {
+          readSequence = result.sequence;
+          if (result.dataBase64.length > 0) {
+            const chunk = turnDecoder.decode(decodeBase64Bytes(result.dataBase64));
+            for (const listener of listeners) listener(chunk);
+          }
+        } else if (result.sequence !== readSequence) {
+          return;
+        }
+        if (result.eof) return;
+      }
+    })();
+
+    return {
+      onData(callback) {
+        listeners.add(callback);
+        return () => { listeners.delete(callback); };
+      },
+      write(data) {
+        const payload = encodeBase64Bytes(encoder.encode(data));
+        // The seam's write is fire-and-forget; queue so two writes never race
+        // their sequence, and let the runner's poll report a failed turn.
+        writeQueue = writeQueue.then(async () => {
+          if (closed) return;
+          writeSequence += 1;
+          const writeRequestId = nextRequestId();
+          const result = await sshCapability.writePty({
+            ...pty,
+            requestId: writeRequestId,
+            sequence: writeSequence,
+            dataBase64: payload,
+          });
+          if (result.sequence !== writeSequence || !isSshResponseFor(result, writeRequestId, pty)) {
+            throw new Error('发送通道拒绝了输入。');
+          }
+        }).catch(() => undefined);
+      },
+      close() {
+        if (closed) return;
+        closed = true;
+        listeners.clear();
+        void sshCapability.closePty({ ...pty, requestId: nextRequestId() }).catch(() => undefined);
+      },
+    };
   },
 };
 
@@ -520,6 +655,8 @@ onBeforeUnmount(() => {
   removeBackButton?.();
   disposeAppStateLifecycle?.();
   installBackNavigation(null);
+  sessions.disposeTurnRunner();
+  installTurnPtyOpener(null);
   void closeController();
 });
 </script>

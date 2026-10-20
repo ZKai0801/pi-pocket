@@ -1217,6 +1217,29 @@
         "keeps the open chat when the same project is reloaded",
         "drops an open from the previous project that resolves after the switch"
       ]
+    },
+    "tests/unit/sessionsSend.test.ts": {
+      "suite": "sessions store send",
+      "tests": [
+        "replaces the open session with the one the runner read back",
+        "returns busy without writing when a turn is in flight",
+        "reports a localised error without throwing",
+        "refuses to send with no open session",
+        "refuses empty or whitespace text without calling the runner",
+        "toggles sending while the turn is in flight",
+        "drops a send that settles after the host changed"
+      ]
+    },
+    "tests/unit/chatComposer.test.ts": {
+      "suite": "chat composer",
+      "tests": [
+        "disables send while a turn is in flight but keeps the text editable",
+        "clears the text only when the send reports sent",
+        "retains the text when the send reports an error",
+        "retains the text when the send reports busy",
+        "renders the inline error as an alert",
+        "disables send for empty or whitespace text"
+      ]
     }
   }
 }
