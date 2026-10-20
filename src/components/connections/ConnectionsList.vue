@@ -108,7 +108,7 @@ function toggleConnect(host: SavedHost): void {
 </script>
 
 <template>
-  <section class="connections">
+  <section class="connections" :class="{ 'connections--editing': editorOpen }">
     <ConnectionEditor
       v-if="editorOpen"
       :host="editing"
@@ -157,7 +157,11 @@ function toggleConnect(host: SavedHost): void {
         </div>
       </div>
 
-      <ul v-if="store.hosts.length > 0" class="connections__list">
+      <ul
+        v-if="store.hosts.length > 0"
+        class="connections__list"
+        :class="{ 'connections__list--menu-open': menuFor !== null }"
+      >
         <li v-for="host in store.hosts" :key="host.name" class="connections__row">
           <button
             type="button"
@@ -220,6 +224,15 @@ function toggleConnect(host: SavedHost): void {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+}
+
+/* Only the editor scrolls. The list itself must NOT be a scroll container:
+   its row menu is an absolutely positioned child, and any overflow clip here
+   cuts the menu down to a sliver (the row already sits inside a clipped card). */
+.connections--editing {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .connections__bar {
@@ -335,6 +348,13 @@ function toggleConnect(host: SavedHost): void {
   border-radius: var(--r-lg);
   background: var(--surface);
   overflow: hidden;
+}
+
+/* After the base rule on purpose: equal specificity, so the open state must
+   come later to win. The card clips its rows to a rounded rectangle, which
+   also clipped the row menu (it hangs below its row). */
+.connections__list--menu-open {
+  overflow: visible;
 }
 
 .connections__row {
