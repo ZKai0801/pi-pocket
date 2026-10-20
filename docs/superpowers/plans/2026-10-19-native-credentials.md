@@ -417,6 +417,53 @@ The plan's Task 4 test skeleton does not match `main` (`60cdad2`):
 
 ---
 
+### R30 — Task 4b contract: where a remembered secret may enter, and how it leaves (authoritative, resolved 2026-10-21)
+
+Written after the 4a review (`e149628`) so 4b cannot guess. These clauses are
+**criteria**, not advice: each needs a test.
+
+1. **A secret enters only while remembering is on.** The editor emits a non-empty
+   `secret` only when its remember toggle (记住口令 on the key path, 记住密码 on the
+   password path) is on **and** the user typed a value. Toggle off ⇒ emit
+   `null`. This is forced by the store: `withSealedSecret`
+   (`src/stores/connections.ts:127-135`) writes `rememberPassphrase: true` for a
+   key host unconditionally, so a secret passed with the toggle off would
+   silently resurrect remembering.
+2. **`save` is awaited; the editor closes only on success.** `ConnectionsList.saveHost`
+   becomes `async` and does `await store.save(host, previousName, secret)`,
+   then `closeEditor()`. A rejected save (e.g. `secrets.put` throwing on a broken
+   Keystore) keeps the editor open and shows a Chinese error. Required test:
+   a rejected save ⇒ the editor is still mounted and the error is rendered, and
+   `closeEditor` was not reached.
+3. **Clearing a saved password is an explicit forget, not an omission.**
+   `HostAuth`'s password variant has no remember flag and `withoutUnusedSecretId`
+   (`:120-125`) only strips the **key** branch, so "记住密码 off" on a host that
+   already holds a `passwordCredentialId` cannot be expressed by `save` alone —
+   without this clause the toggle would silently keep the old password. Contract:
+   when the stored record holds a password id and the toggle is now off (no new
+   password typed), the list calls `store.forgetSecrets(name)` **after** the
+   successful save; the resulting record must no longer reference the id.
+   Required test: `secrets.forget` called with that id and the written record
+   carries `passwordCredentialId: ''`.
+4. **An explicit forget action must not fail silently.** `forgetSecrets` is the
+   one path that intentionally lets a rejection escape (4a report, "Limits"), so
+   the list must `catch` it and show a Chinese error rather than leave an
+   unhandled rejection. Required test: a rejecting `forgetSecrets` surfaces a
+   message and the row survives.
+5. **A rename that fails to write leaves the tree as it found it.** 4a's `save`
+   removes the previous record *before* `deps.hosts.save` (`:202-214`), so a
+   thrown host write during a rename deletes the old record and cannot forget its
+   secret. Out of 4b's scope to restructure, but 4b must not add a path that
+   reaches it: keep the editor's pre-validation (`validateSavedHost`) and record
+   a rename+write-failure test as a Plan 5 candidate.
+6. **Surface only.** No plaintext on the record or in `localStorage` (ids only);
+   password field `type="password"` `autocomplete="new-password"`; tokens only,
+   Chinese labels, ≥48px targets, `data-testid` as listed in Task 4b;
+   `tests/unit/connectionEditorAuth.test.ts` keeps exactly ONE flat top-level
+   `describe` (R14.5) and is registered in the manifest from a fresh report.
+
+---
+
 ### Task 4a: Store wiring — credential, forget-on-save, forget-on-delete
 
 **Files:**
@@ -525,6 +572,12 @@ git commit -m "feat(connections): dial with a remembered credential"
 ---
 
 ### Task 4b: The editor and the list
+
+**Contract: R30 above is authoritative** — a secret is emitted only while the
+remember toggle is on, `save` is awaited with the editor closing only on
+success, clearing a saved password goes through `forgetSecrets`, and an explicit
+forget failure is shown rather than swallowed. Each R30 clause needs its test in
+`tests/unit/connectionEditorAuth.test.ts`.
 
 **Files:**
 - Modify: `src/components/connections/ConnectionEditor.vue`, `src/components/connections/ConnectionsList.vue`
