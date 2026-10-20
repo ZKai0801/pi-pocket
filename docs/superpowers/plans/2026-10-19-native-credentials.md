@@ -70,8 +70,35 @@ Capacitor 8, Vue 3 + Pinia, core `SshCredential`.
 
 ---
 
-### Task 1: `buildSshCredential` — one tested credential shape
+### R27 — Plan 4 preflight ruling (authoritative, resolved 2026-10-19)
+The plan's premises that do not match `main` (`350136a`):
+1. **No `SavedHostV2`.** The type is `SavedHost` in
+   `src/platform/android/hostStore.ts:25-42`; Plan 2 added the optional
+   `auth?: HostAuth` field **in place** and there is still one storage key
+   (`pocketshell.android.hosts.v1`). Do **not** add a v2 key or a migration in
+   this plan.
+2. **`HostAuth` has no remember/secret fields yet.** Extend the key variant to
+   `{ kind: 'key'; keyHandleId: string; rememberPassphrase?: boolean; secretId?: string }`
+   (spec §7.1's `rememberPassphrase` stays optional so every v1 record — and every
+   `{kind:'key', keyHandleId}` written by Plan 2 — remains valid; absence = not
+   remembering). Teach `isHostAuth` the two optional fields (boolean / non-empty
+   string) and leave `validateSavedHost` semantics unchanged.
+3. **`tests/unit/hostStoreV2.test.ts` does not exist.** Extend
+   `tests/unit/hostStoreAuth.test.ts` (suite "SavedHost auth", 5 titles today)
+   for the added field instead.
+4. **`buildSshCredential` calls `lookup` only when the record actually asks for a
+   remembered secret**: key → `rememberPassphrase === true` **and** a non-empty
+   `secretId`; a stale `secretId` with remember off is **not** looked up (and is
+   what Task 4's save-time cleanup deletes).
+5. A password credential is resolved from `passwordCredentialId`; a `null` **or
+   throwing** lookup is the same actionable hard error (`/password/i`), never a
+   dial with an empty secret (Review Focus 1).
+6. No pnpm on this box: `npx vitest run <file>`; register every new/edited title
+   in `scripts/js-unit-test-manifest.json` from a fresh JSON report (R18.5).
 
+---
+
+### Task 1: `buildSshCredential` — one tested credential shape
 **Files:**
 - Create: `src/credentials/buildSshCredential.ts`
 - Test: `tests/unit/buildSshCredential.test.ts`
