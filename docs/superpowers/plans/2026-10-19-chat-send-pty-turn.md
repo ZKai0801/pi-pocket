@@ -297,6 +297,26 @@ send after completion works; (h) `dispose` closes + unsubscribes + refuses later
 sends. Inject `sleep` (instant), `now` (advanced by the test) and
 `submitDelayMs: 0` so no real timer or wall-clock dependency exists.
 
+### R21 — Task 4 hardening (authoritative, resolved 2026-10-19)
+The Task 4 review approved the module but proved one gap the runner owns: every
+`readSession` is raced only against disposal, so a read that **never settles**
+keeps `send` alive past `turnTimeoutMs` with `busy` still set (only `dispose()`
+escapes). `turnTimeoutMs` is the runner's contract, so fix it here, not in Task 5:
+- A read that has not settled by the turn deadline must yield the same typed
+  timeout result as an unchanged session — busy cleared, listener unsubscribed.
+  Bound it with the injected `sleep`/`now` only (no real `setTimeout` left
+  dangling, no `setInterval`, no wall-clock dependence in tests); add a test with
+  a `readSession` that returns a never-resolving promise.
+- Collapse the two duplicated deadline guards in `pollForAssistant` into one
+  checkable place (the review found each branch individually mutation-uncovered).
+- Refuse an **empty** message before opening the PTY and before the delivery
+  controller sees it (`toTurnLine('') === ''`), with a plain typed error — today
+  it opens a PTY just to get `not-sent (empty-payload)` printed at the user.
+Unchanged: the English typed error strings stay (the plan's tests pin them); Task 5
+localises at display time. Geometry, `decodeUtf8` and the readiness model are out
+of scope.
+
+
 
 ---
 
