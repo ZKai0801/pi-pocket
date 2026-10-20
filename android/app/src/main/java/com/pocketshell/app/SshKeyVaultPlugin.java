@@ -33,6 +33,7 @@ import org.json.JSONObject;
 public final class SshKeyVaultPlugin extends Plugin {
     private static final long MAX_DOCUMENT_BYTES = CredentialHandleVault.MAX_KEY_BYTES;
     private final Map<String, PickedKeyDocument> pickedDocuments = new LinkedHashMap<>();
+    private RememberedSecretStore rememberedSecrets;
 
     @PluginMethod
     public void listKeys(PluginCall call) {
@@ -281,6 +282,76 @@ public final class SshKeyVaultPlugin extends Plugin {
         }
     }
 
+    /**
+     * Seal a passphrase or password for later dials. The plaintext leaves the
+     * bridge here, is consumed as a {@code char[]}, and is never logged or
+     * echoed back; the reply only carries the id it is stored under.
+     */
+    @PluginMethod
+    public void rememberSecret(PluginCall call) {
+        JSObject request = call.getData();
+        String kind = request.getString("kind");
+        String secretId = request.getString("secretId");
+        String rawSecret = request.getString("secret");
+        request.remove("secret");
+        char[] secret = rawSecret == null ? null : rawSecret.toCharArray();
+        rawSecret = null;
+        try {
+            if (!"key-passphrase".equals(kind) && !"password".equals(kind)) {
+                reject(call, "REMEMBERED_SECRET_KIND_INVALID", "Remembered secret kind must be key-passphrase or password.");
+                return;
+            }
+            String requestedId = secretId == null || secretId.trim().isEmpty() ? null : secretId;
+            if (requestedId != null && !RememberedSecretStore.isValidSecretId(requestedId)) {
+                reject(call, "REMEMBERED_SECRET_ID_INVALID", "The remembered secret id is malformed.");
+                return;
+            }
+            if (secret == null || secret.length == 0) {
+                reject(call, "REMEMBERED_SECRET_MISSING", "A secret is required.");
+                return;
+            }
+            call.resolve(new JSObject().put("secretId", secretStore().put(requestedId, secret)));
+        } catch (Exception error) {
+            reject(call, "REMEMBERED_SECRET_SAVE_FAILED", "The secret could not be remembered safely.");
+        } finally {
+            if (secret != null) java.util.Arrays.fill(secret, '\0');
+        }
+    }
+
+    /** The remembered plaintext, or {@code null} when it is absent or unreadable. */
+    @PluginMethod
+    public void resolveSecret(PluginCall call) {
+        String secretId = call.getString("secretId");
+        if (!RememberedSecretStore.isValidSecretId(secretId)) {
+            reject(call, "REMEMBERED_SECRET_ID_INVALID", "The remembered secret id is malformed.");
+            return;
+        }
+        char[] secret = null;
+        try {
+            secret = secretStore().resolve(secretId);
+            call.resolve(new JSObject().put("secret", secret == null ? JSONObject.NULL : new String(secret)));
+        } catch (Exception error) {
+            reject(call, "REMEMBERED_SECRET_RESOLVE_FAILED", "The remembered secret could not be read safely.");
+        } finally {
+            if (secret != null) java.util.Arrays.fill(secret, '\0');
+        }
+    }
+
+    /** Idempotent: {@code deleted} is true only when this call removed the record. */
+    @PluginMethod
+    public void forgetSecret(PluginCall call) {
+        String secretId = call.getString("secretId");
+        if (!RememberedSecretStore.isValidSecretId(secretId)) {
+            reject(call, "REMEMBERED_SECRET_ID_INVALID", "The remembered secret id is malformed.");
+            return;
+        }
+        try {
+            call.resolve(new JSObject().put("deleted", secretStore().delete(secretId)));
+        } catch (Exception error) {
+            reject(call, "REMEMBERED_SECRET_FORGET_FAILED", "The remembered secret could not be forgotten safely.");
+        }
+    }
+
     @PluginMethod
     public void importLegacyKeys(PluginCall call) {
         try {
@@ -365,6 +436,11 @@ public final class SshKeyVaultPlugin extends Plugin {
 
     private CredentialHandleVault vault() throws IOException {
         return CredentialHandleVault.forContext(getContext());
+    }
+
+    private synchronized RememberedSecretStore secretStore() throws IOException {
+        if (rememberedSecrets == null) rememberedSecrets = RememberedSecretStore.forContext(getContext());
+        return rememberedSecrets;
     }
 
     private static String requiredString(PluginCall call, String key) throws IOException {
