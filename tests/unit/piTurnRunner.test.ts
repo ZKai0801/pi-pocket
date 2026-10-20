@@ -53,11 +53,13 @@ function harness(options: {
   autoReady?: boolean;
   writeError?: Error;
   reads: Array<ParsedPiSession | Error>;
+  neverSettles?: boolean;
 }) {
   const handle = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
   const reads = [...options.reads];
   const openPty = vi.fn(async (_command: string, _geometry: { cols: number; rows: number }) => handle);
   const readSession = vi.fn(async (_path: string) => {
+    if (options.neverSettles) return new Promise<ParsedPiSession>(() => {});
     const next = reads.length > 1 ? reads.shift()! : reads[0]!;
     if (next instanceof Error) throw next;
     return next;
@@ -151,6 +153,33 @@ describe('createPiTurnRunner', () => {
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.error).toMatch(/timed out/i);
     expect(h.readSession.mock.calls.length).toBeGreaterThan(1);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('times out when a session read never settles', async () => {
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0)],
+      neverSettles: true,
+    });
+
+    const result = await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/timed out/i);
+    expect(h.runner.isBusy()).toBe(false);
+    expect(h.handle.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('refuses an empty message without opening a PTY', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.send('/r/a.jsonl', ' \n\t ');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/empty/i);
+    expect(h.openPty).not.toHaveBeenCalled();
+    expect(h.readSession).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
   });
 

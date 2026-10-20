@@ -15,8 +15,10 @@ const BUSY_ERROR = 'A turn is already running in this chat.';
 const DISPOSED_ERROR = 'This turn runner has been disposed.';
 const READINESS_ERROR = 'Pi did not become ready before the timeout.';
 const TURN_TIMEOUT_ERROR = 'The turn timed out before Pi wrote a new assistant reply.';
+const EMPTY_MESSAGE_ERROR = 'The message is empty.';
 
 const DISPOSED = Symbol('disposed');
+const TURN_DEADLINE = Symbol('turn deadline');
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,11 +86,6 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   let activeUnsubscribe: (() => void) | null = null;
   let wakeCurrentWait: (() => void) | null = null;
   let nextOperationId = 0;
-  let signalDisposed: (() => void) | null = null;
-
-  const disposedSignal = new Promise<typeof DISPOSED>((resolve) => {
-    signalDisposed = () => resolve(DISPOSED);
-  });
 
   function wait(ms: number): Promise<void> {
     if (disposed) return Promise.resolve();
@@ -123,8 +120,36 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
 
   async function readAbortable(
     sessionFile: string,
-  ): Promise<ParsedPiSession | typeof DISPOSED> {
-    return Promise.race([deps.readSession(sessionFile), disposedSignal]);
+    deadline: number,
+  ): Promise<ParsedPiSession | typeof DISPOSED | typeof TURN_DEADLINE> {
+    let settled = false;
+    let session: ParsedPiSession | undefined;
+    let readFailed = false;
+    let failure: unknown;
+    const read = deps.readSession(sessionFile).then(
+      (result) => {
+        session = result;
+        settled = true;
+      },
+      (error: unknown) => {
+        readFailed = true;
+        failure = error;
+        settled = true;
+      },
+    );
+
+    while (!settled) {
+      if (disposed) return DISPOSED;
+      const remaining = deadline - now();
+      if (remaining <= 0) return TURN_DEADLINE;
+      await Promise.resolve();
+      if (settled) break;
+      await wait(Math.min(pollIntervalMs, remaining));
+    }
+
+    await read;
+    if (readFailed) throw failure;
+    return session as ParsedPiSession;
   }
 
   async function ensureOpen(
@@ -184,30 +209,30 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   async function pollForAssistant(
     sessionFile: string,
     baseline: number,
+    deadline: number,
   ): Promise<PiTurnSendResult> {
-    const deadline = now() + turnTimeoutMs;
     while (true) {
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
-      const remaining = deadline - now();
-      if (remaining <= 0) return { ok: false, error: TURN_TIMEOUT_ERROR };
-      await wait(Math.min(pollIntervalMs, remaining));
-      if (disposed) return { ok: false, error: DISPOSED_ERROR };
-      if (now() >= deadline) return { ok: false, error: TURN_TIMEOUT_ERROR };
       try {
-        const session = await readAbortable(sessionFile);
+        const session = await readAbortable(sessionFile, deadline);
         if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
+        if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
         if (assistantTurnCount(session) > baseline) return { ok: true, session };
       } catch {
         // A transient read failure is retried until the deadline.
       }
+      await wait(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
     }
   }
 
   async function send(sessionFile: string, message: string): Promise<PiTurnSendResult> {
     if (disposed) return { ok: false, error: DISPOSED_ERROR };
     if (busy) return { ok: false, error: BUSY_ERROR };
+    const line = toTurnLine(message);
+    if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
     busy = true;
     try {
+      const deadline = now() + turnTimeoutMs;
       const opened = await ensureOpen(sessionFile);
       if (!opened.ok) return opened;
       const state = open;
@@ -220,8 +245,10 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
 
       let baseline = 0;
       try {
-        const session = await readAbortable(sessionFile);
-        if (session !== DISPOSED) baseline = assistantTurnCount(session);
+        const session = await readAbortable(sessionFile, deadline);
+        if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
+        if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
+        baseline = assistantTurnCount(session);
       } catch {
         // A brand-new conversation may not exist yet.
       }
@@ -233,7 +260,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       try {
         result = await state.delivery.deliver({
           operationId,
-          payload: toTurnLine(message),
+          payload: line,
           intent: 'submit',
         });
       } catch (error) {
@@ -243,7 +270,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       if (result.status !== 'delivered') {
         return { ok: false, error: deliveryError(result) };
       }
-      return await pollForAssistant(sessionFile, baseline);
+      return await pollForAssistant(sessionFile, baseline, deadline);
     } finally {
       unsubscribeActive();
       busy = false;
@@ -257,7 +284,6 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    signalDisposed?.();
     const state = open;
     open = null;
     unsubscribeActive();
