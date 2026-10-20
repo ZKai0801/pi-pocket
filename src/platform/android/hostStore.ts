@@ -19,7 +19,14 @@ export const ANDROID_HOSTS_STORAGE_KEY = 'pocketshell.android.hosts.v1';
 
 /** How a saved host authenticates. Only opaque ids ever reach storage. */
 export type HostAuth =
-  | { kind: 'key'; keyHandleId: string }
+  | {
+    kind: 'key';
+    keyHandleId: string;
+    /** User asked for the passphrase to survive the process (Plan 4). */
+    rememberPassphrase?: boolean;
+    /** The sealed secret this host's remembered passphrase lives under. */
+    secretId?: string;
+  }
   | { kind: 'password'; passwordCredentialId: string };
 
 export interface SavedHost {
@@ -82,7 +89,11 @@ function toEntry(host: Omit<SavedHost, 'keyHandleId'>): HostEntry {
 function isHostAuth(value: unknown): value is HostAuth {
   if (typeof value !== 'object' || value === null) return false;
   const auth = value as Record<string, unknown>;
-  if (auth.kind === 'key') return typeof auth.keyHandleId === 'string';
+  if (auth.kind === 'key') {
+    return typeof auth.keyHandleId === 'string'
+      && (auth.rememberPassphrase === undefined || typeof auth.rememberPassphrase === 'boolean')
+      && (auth.secretId === undefined || (typeof auth.secretId === 'string' && auth.secretId.length > 0));
+  }
   if (auth.kind === 'password') return typeof auth.passwordCredentialId === 'string';
   return false;
 }

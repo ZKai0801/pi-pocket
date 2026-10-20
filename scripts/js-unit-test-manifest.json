@@ -951,7 +951,24 @@
         "round-trips a password host under the same storage key",
         "still requires a key for a key host",
         "keeps piSessionsDir and piCommand through a save",
+        "loads a key auth record saved before remember fields existed",
+        "round-trips rememberPassphrase and secretId through a save",
+        "drops a key auth with a malformed remember flag or secret id",
         "refuses to dial a password host until Plan 4 wires the secret"
+      ]
+    },
+    "tests/unit/buildSshCredential.test.ts": {
+      "suite": "buildSshCredential",
+      "tests": [
+        "returns a bare key-handle when nothing is remembered",
+        "attaches the remembered passphrase",
+        "does not send a passphrase when the remembered secret is gone",
+        "builds a password credential from the store",
+        "refuses to build a password credential without a stored password",
+        "treats an undecryptable secret as absent",
+        "does not call lookup when the key passphrase is not remembered",
+        "does not look up a stale secret id when remembering is off",
+        "rejects a password lookup that throws"
       ]
     },
     "tests/unit/phoneShellSingleEntry.test.ts": {

@@ -44,6 +44,32 @@ describe('SavedHost auth', () => {
     });
   });
 
+  it('loads a key auth record saved before remember fields existed', () => {
+    const seed = JSON.stringify([{ name: 'kai', hostname: 'h', port: 22, user: 'kai', keyHandleId: 'h-1',
+      auth: { kind: 'key', keyHandleId: 'h-1' } }]);
+    expect(make(seed).savedHosts()[0]!.auth).toEqual({ kind: 'key', keyHandleId: 'h-1' });
+  });
+
+  it('round-trips rememberPassphrase and secretId through a save', () => {
+    const store = make();
+    const host: SavedHost = { name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: 'h-1',
+      auth: { kind: 'key', keyHandleId: 'h-1', rememberPassphrase: true, secretId: 's-1' } };
+    store.save(host);
+    expect(store.savedHosts()[0]!.auth).toEqual({
+      kind: 'key', keyHandleId: 'h-1', rememberPassphrase: true, secretId: 's-1',
+    });
+  });
+
+  it('drops a key auth with a malformed remember flag or secret id', () => {
+    const seed = JSON.stringify([
+      { name: 'a', hostname: 'h', port: 22, user: 'u', keyHandleId: 'h-1',
+        auth: { kind: 'key', keyHandleId: 'h-1', rememberPassphrase: 'yes' } },
+      { name: 'b', hostname: 'h', port: 22, user: 'u', keyHandleId: 'h-2',
+        auth: { kind: 'key', keyHandleId: 'h-2', rememberPassphrase: true, secretId: '' } },
+    ]);
+    expect(make(seed).savedHosts()).toEqual([]);
+  });
+
   it('refuses to dial a password host until Plan 4 wires the secret', async () => {
     const seed = JSON.stringify([{ name: 'p', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
       auth: { kind: 'password', passwordCredentialId: 's-1' } }]);
