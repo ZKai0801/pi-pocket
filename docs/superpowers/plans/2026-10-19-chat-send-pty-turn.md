@@ -371,6 +371,41 @@ do not keep both):
 `'sent'`, retain on `'error'`, inline error rendered, empty disables send). Both
 **one flat top-level `describe`**, registered in the manifest from a fresh report.
 
+### R23 — Task 5 fix round (authoritative, resolved 2026-10-19)
+The Task 5 review found the R22 behaviours correct but three real gaps:
+1. **Runner-build race (IMPORTANT).** `runnerFor` awaits the `piCommand` probe (up
+   to 15 s) before reading `store.open.cwd` and caching, and `disposeTurnRunner`
+   cannot invalidate a build in flight. First send on a connection → open another
+   chat → the runner is cached under chat A's key but opens `pi --session A` in
+   **chat B's cwd** and survives until the next dispose. Fix: capture **host, path
+   and cwd synchronously** at the start of the build, bump a `runnerGeneration`
+   counter in `disposeTurnRunner` (and on host/reconnect disposal), and re-check
+   `runnerGeneration`, `hostId()` and `store.openPath` after **every** await before
+   constructing/caching; a stale build must dispose what it opened (if anything)
+   and return the typed stale error, never cache.
+2. **D8 host branch is only pinned by `sendToken` (IMPORTANT).** A test must change
+   the `hostId` dep **without** calling `hostChanged()` and assert the write is
+   dropped (`open` untouched, `sendError` unchanged).
+3. **"Never throws" and "no runner" were inspection-only (IMPORTANT).** Add tests:
+   a runner whose `send` **rejects** → `'error'`, `sending === false`,
+   `sendError` set, no throw; and `runner` absent → `'error'` with its own copy.
+Also in this round:
+- **Clear `sendError` with the rest of the switched state** (`hostChanged()`, the
+  wrapper's host watch, and a project switch in `load()`), so a new chat never
+  shows the previous host's/project's error.
+- **Reject a relative `piCommand` override** (R19 deferred it here): a non-absolute
+  override is an actionable `{ ok: false }` in `resolvePiCommand` (Chinese copy),
+  with a test — a relative path probes in the login cwd but the turn runs after
+  `cd '<project>'`, so it would "resolve" then time out at readiness.
+- **Pin the localisation order** with the runner's literal strings ("did not become
+  ready" must not fall into the timeout copy; busy/disposed/not-sent likewise).
+- Make the poll clamp a **pure exported helper** with a test instead of an inert
+  `Math.max(250, 500)` constant.
+Deferred (Plan 5 / Task 6): the opener swallows async write rejections (they surface
+as the turn timeout) and its read pump stops on EOF/sequence gap without closing the
+channel or notifying the runner — the seam's `void` write cannot report either.
+
+
 
 
 
