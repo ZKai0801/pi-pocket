@@ -213,6 +213,91 @@ after `cd '<project>'` (Task 5 normalises or rejects); the
 spec-prescribed). Plan Step 4's "6 + 6" is stale — `piCommands.test.ts` was already
 6 before this task.
 
+### R20 — Task 4 design (authoritative, resolved 2026-10-19)
+The plan's Task 4 harness (`pty` double, `transport`, `buildPiTurnCommand`,
+`isTurnComplete`, `timeoutMs`) is superseded by R18.2/R18.3 + these decisions. The
+plan's **four test intents stay**; its literal code does not.
+
+**Seam (`src/session/turnPty.ts`, no production wiring here).**
+```ts
+export interface TurnPtyGeometry { cols: number; rows: number }
+export interface TurnPtyHandle {
+  onData(cb: (chunk: string) => void): () => void;
+  write(data: string): void;
+  close(): void;
+}
+export interface TurnPtyOpener {
+  open(command: string, geometry: TurnPtyGeometry): Promise<TurnPtyHandle>;
+}
+export function installTurnPtyOpener(opener: TurnPtyOpener | null): void;
+export function turnPtyOpener(): TurnPtyOpener; // throws when uninstalled
+```
+The `PhoneApp.vue` implementation over `sshCapability.openPty`/`readPty`/`writePty`/
+`closePty` and the runner's construction are **Task 5's** wiring, not Task 4's.
+
+**`src/pi/piTurnRunner.ts`.**
+```ts
+export interface PiTurnRunnerDeps {
+  openPty(command: string, geometry: TurnPtyGeometry): Promise<TurnPtyHandle>;
+  piCommand: string;                // resolved by Task 3's resolvePiCommand
+  projectPath: string;              // the chat's project cwd
+  readSession(path: string): Promise<ParsedPiSession>;   // injected, one arg
+  sleep?(ms: number): Promise<void>;
+  now?(): number;
+  readyTimeoutMs?: number;          // default 20_000  (Pi never printed a prompt)
+  turnTimeoutMs?: number;           // default 120_000 (a turn that never lands)
+  pollIntervalMs?: number;          // default 1000
+  submitDelayMs?: number;           // default composerTiming.submitDelayMs
+}
+export function createPiTurnRunner(deps: PiTurnRunnerDeps): {
+  send(sessionFile: string, message: string):
+    Promise<{ ok: true; session: ParsedPiSession } | { ok: false; error: string }>;
+  isBusy(): boolean;
+  dispose(): void;
+};
+```
+`send` order (each step's failure is a typed `{ ok: false }`, never a throw):
+1. `isBusy()` → refuse with an error matching `/running/i` (D10, one turn at a time).
+2. busy = `true`; `try/finally` clears it. **Every** exit path also unsubscribes.
+3. Open the PTY **once per runner**: `openPty(buildPiOpenCommand(piCommand,
+   projectPath, sessionFile), { cols: 80, rows: 24 })` on the first send; later sends
+   reuse the same handle (R18.2: keep the PTY across turns). Geometry is a constant
+   here; Task 5/6 may pass the real size.
+4. Fresh `createConsoleTracker()` per open; every `onData` chunk pushes into it and
+   readiness is **latched** when `isPiReady(tracker.text())` first answers true
+   (Task 2 carry-forward). A PTY that never prints a prompt fails after
+   `readyTimeoutMs` with a readiness-specific error.
+5. Read a **baseline** before writing: `readSession(sessionFile)` with failures
+   ignored (a brand-new conversation may not exist yet) → count of `assistant` turns.
+6. Deliver `toTurnLine(message)` with `intent: 'submit'` — the CR is the controller's
+   separate submit write (R18.2 step 3). Use `createComposerDeliveryController`
+   from `src/session/composerDelivery.ts`, extended with a third optional
+   `{ submitDelayMs?, pasteGapMs? }` argument (backward compatible) so the injected
+   `sleep`/`submitDelayMs` reach the controller; the write effect adapts
+   `handle.write(decodeUtf8(bytes))` to `PtyWriteAcknowledgement` and reports a
+   thrown write as `{ ok: false, message }`. Map a non-`delivered` result to
+   `{ ok: false, error }` — the message text is the error copy.
+7. On `delivered`, poll `readSession(sessionFile)` every `pollIntervalMs` until a
+   re-read has **more assistant turns than the baseline**, or `now()` passes
+   `turnTimeoutMs` → a `timed out`-matching error (never thrown). A `readSession`
+   failure mid-poll is retried; only the deadline ends the loop. Recursive
+   `setTimeout` via the injected `sleep`; **no `setInterval`**, no unbounded spin.
+8. Success returns `{ ok: true, session: <the re-read that completed> }`.
+9. `dispose()` closes the handle, unsubscribes, refuses later sends, and makes an
+   in-flight `send` resolve `{ ok: false, error }` (D10: abandon, never replay).
+
+**Tests (`tests/unit/piTurnRunner.test.ts`, one flat top-level `describe`)** — the
+plan's four intents plus R18.4's: (a) opens with the built command, delivers the
+line + CR, polls, and returns the polled session; (b) busy refusal; (c) write
+failure → error carries the double's message, busy cleared, **no poll**; (d)
+never-ready PTY → readiness timeout; (e) a poll that never completes → turn
+timeout; (f) a `readSession` that fails then recovers → returns when the assistant
+turn appears; (g) a second send reuses the handle (opener called once) and a later
+send after completion works; (h) `dispose` closes + unsubscribes + refuses later
+sends. Inject `sleep` (instant), `now` (advanced by the test) and
+`submitDelayMs: 0` so no real timer or wall-clock dependency exists.
+
+
 ---
 
 ## Review Focus
