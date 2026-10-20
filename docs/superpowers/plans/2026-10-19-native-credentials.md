@@ -435,16 +435,23 @@ Written after the 4a review (`e149628`) so 4b cannot guess. These clauses are
    Keystore) keeps the editor open and shows a Chinese error. Required test:
    a rejected save ⇒ the editor is still mounted and the error is rendered, and
    `closeEditor` was not reached.
-3. **Clearing a saved password is an explicit forget, not an omission.**
-   `HostAuth`'s password variant has no remember flag and `withoutUnusedSecretId`
-   (`:120-125`) only strips the **key** branch, so "记住密码 off" on a host that
-   already holds a `passwordCredentialId` cannot be expressed by `save` alone —
-   without this clause the toggle would silently keep the old password. Contract:
-   when the stored record holds a password id and the toggle is now off (no new
-   password typed), the list calls `store.forgetSecrets(name)` **after** the
-   successful save; the resulting record must no longer reference the id.
-   Required test: `secrets.forget` called with that id and the written record
-   carries `passwordCredentialId: ''`.
+3. **Clearing a saved password must be an explicit act with an observable
+   outcome.** `HostAuth`'s password variant has no remember flag and
+   `withoutUnusedSecretId` (`:120-125`) only strips the **key** branch, so
+   "记住密码 off" on a host that already holds a `passwordCredentialId` cannot be
+   expressed by toggling a flag. Required outcome: after a successful save with
+   the toggle off, the written record carries `passwordCredentialId: ''` **and**
+   `secrets.forget` was called with the old id. Two routes are acceptable —
+   prefer (i), which needs no new store code:
+   (i) **record-driven.** The editor emits `auth: {kind:'password',
+   passwordCredentialId: ''}`; 4a's existing stale-id sweep
+   (`heldSecretIds(previous) − referencedSecretIds(record)`) already forgets the
+   previous id.
+   (ii) **action-driven.** The list calls `store.forgetSecrets(name)` after the
+   save.
+   A test must pin the outcome (`forget` called with the old id + the written
+   record's empty id), not the route.
+
 4. **An explicit forget action must not fail silently.** `forgetSecrets` is the
    one path that intentionally lets a rejection escape (4a report, "Limits"), so
    the list must `catch` it and show a Chinese error rather than leave an
