@@ -51,7 +51,7 @@ const SECRET_KEY_HOST: SavedHost = {
 };
 
 function fakeStore(hosts: SavedHost[] = []): FakeStore {
-  return {
+  return reactive({
     hosts,
     activeName: null,
     status: 'idle',
@@ -70,7 +70,7 @@ function fakeStore(hosts: SavedHost[] = []): FakeStore {
     applyConnectionSnapshot: vi.fn(),
     setPiSessionsDir: vi.fn(),
     statusFor: () => 'idle',
-  } as unknown as FakeStore;
+  }) as unknown as FakeStore;
 }
 
 let live: App[] = [];
@@ -303,6 +303,23 @@ describe('connection editor auth', () => {
     expect(record.auth).toEqual({ kind: 'password', passwordCredentialId: '' });
   });
 
+  it('emits no typed password when 记住密码 is off (R30.1)', async () => {
+    const editor = mountEditor();
+    await settle();
+    await fillBasics(editor.root);
+    (q(editor.root, 'auth-password') as HTMLButtonElement).click();
+    await settle();
+    await typeInto(input(editor.root, 'password-input'), 'pw-typed');
+    await setChecked(input(editor.root, 'remember-password'), false);
+    await pressSave(editor.root);
+
+    expect(editor.save).toHaveBeenCalledTimes(1);
+    const [record, secret] = editor.save.mock.calls[0] as [SavedHost, string | null];
+    expect(secret).toBeNull();
+    expect(record.auth).toEqual({ kind: 'password', passwordCredentialId: '' });
+    expect(JSON.stringify(record)).not.toContain('pw-typed');
+  });
+
   it('keeps the editor open and shows an error when the save rejects (R30.2)', async () => {
     const store = fakeStore([PASSWORD_HOST]);
     store.save.mockRejectedValue(new Error('the store is unavailable'));
@@ -379,6 +396,26 @@ describe('connection editor auth', () => {
     (q(editor.root, 'forget-credentials') as HTMLButtonElement).click();
     await settle();
     expect(editor.forget).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops 已保存 and disables save once a successful clear rewrites the record', async () => {
+    const store = fakeStore([PASSWORD_HOST]);
+    store.forgetSecrets.mockImplementation(async () => {
+      store.hosts[0] = { ...PASSWORD_HOST, auth: { kind: 'password', passwordCredentialId: '' } };
+    });
+    const list = mountList(store);
+    await settle();
+    await openEditorFor(list.root, PASSWORD_HOST);
+    expect(list.root.textContent).toContain('已保存');
+    expect(saveButton(list.root).disabled).toBe(false);
+
+    (q(list.root, 'forget-credentials') as HTMLButtonElement).click();
+    await settle();
+
+    expect(store.forgetSecrets).toHaveBeenCalledWith('pw');
+    expect(list.root.textContent).not.toContain('已保存');
+    expect(q(list.root, 'forget-credentials')).toBeNull();
+    expect(saveButton(list.root).disabled).toBe(true);
   });
 
   it('shows no saved marker for a host that holds no credential', async () => {

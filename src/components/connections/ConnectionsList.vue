@@ -96,7 +96,6 @@ async function forgetCredentials(): Promise<void> {
   if (updated) editing.value = { ...updated };
 }
 
-
 function removeHost(name: string): void {
   menuFor.value = null;
   void store.remove(name);
