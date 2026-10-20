@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
+import type {
+  PiTurnRunner,
+  PiTurnSendResult,
+  PiTurnStartNewResult,
+} from '../../src/pi/piTurnRunner';
 import type { ParsedPiSession } from '../../src/pi/types';
-import { createSessionsStore, localiseTurnError } from '../../src/stores/sessions';
+import {
+  createSessionsStore,
+  createTurnRunnerFacade,
+  localiseTurnError,
+} from '../../src/stores/sessions';
 
 const session: ParsedPiSession = {
   version: 3,
@@ -19,13 +28,13 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 function runnerWith(
-  send: (path: string, text: string) => Promise<unknown>,
+  send: (path: string, text: string) => Promise<PiTurnSendResult>,
   busy = false,
-  startNew: (projectPath: string, text: string) => Promise<unknown> = async () => ({
+  startNew: (projectPath: string, text: string) => Promise<PiTurnStartNewResult> = async () => ({
     ok: false,
     error: 'unused',
   }),
-) {
+): PiTurnRunner {
   return {
     send: vi.fn(send),
     startNew: vi.fn(startNew),
@@ -229,6 +238,83 @@ describe('sessions store send', () => {
     expect(store.startingNew).toBe(false);
   });
 
+  it('clears a previous list error when a draft chat opens', () => {
+    const runner = runnerWith(async () => ({ ok: true, session }));
+    const store = storeWith(runner);
+    const existing = [
+      {
+        path: '/r/old.jsonl',
+        id: 'old',
+        name: null,
+        updatedAtMs: 5,
+        preview: 'old',
+        turnCount: 1,
+      },
+    ];
+    store.state = 'error';
+    store.error = '加载失败';
+    store.sessions = existing;
+
+    store.newConversation({ path: '/p/a', name: 'a' });
+
+    expect(store.state).toBe('idle');
+    expect(store.error).toBeNull();
+    expect(store.sessions).toEqual(existing);
+  });
+
+  it('prepends the adopted conversation and keeps it after closeChat', async () => {
+    const adopted = {
+      ...session,
+      id: 'new',
+      cwd: '/p/a',
+      turns: [
+        { role: 'user' as const, text: 'hi', timestampMs: 1 },
+        { role: 'assistant' as const, text: 'ok', timestampMs: 2 },
+      ],
+    };
+    const runner = runnerWith(
+      async () => ({ ok: true, session }),
+      false,
+      async () => ({ ok: true, sessionFile: '/r/new.jsonl', session: adopted }),
+    );
+    const store = storeWith(runner);
+    store.sessions = [
+      {
+        path: '/r/new.jsonl',
+        id: 'stale',
+        name: 'stale',
+        updatedAtMs: 1,
+        preview: 'stale',
+        turnCount: 1,
+      },
+      {
+        path: '/r/other.jsonl',
+        id: 'other',
+        name: null,
+        updatedAtMs: 5,
+        preview: 'old',
+        turnCount: 1,
+      },
+    ];
+    store.newConversation({ path: '/p/a', name: 'a' });
+
+    expect(await store.send('hi')).toBe('sent');
+
+    expect(store.sessions).toHaveLength(2);
+    expect(store.sessions[0]).toEqual({
+      path: '/r/new.jsonl',
+      id: 'new',
+      name: null,
+      updatedAtMs: 2,
+      preview: 'ok',
+      turnCount: 2,
+    });
+    expect(store.sessions.filter((meta) => meta.path === '/r/new.jsonl')).toHaveLength(1);
+
+    store.closeChat();
+    expect(store.sessions[0]?.path).toBe('/r/new.jsonl');
+  });
+
   it('sends the first draft message through startNew and adopts the new file', async () => {
     const replied = {
       ...session,
@@ -253,6 +339,54 @@ describe('sessions store send', () => {
     expect(store.startingNew).toBe(false);
     expect(store.sending).toBe(false);
     expect(store.sendError).toBeNull();
+  });
+
+  it('routes the turn after adoption to the adopted path through the real facade', async () => {
+    const adopted = {
+      ...session,
+      id: 'new',
+      cwd: '/p/a',
+      turns: [
+        { role: 'user' as const, text: 'hi', timestampMs: 1 },
+        { role: 'assistant' as const, text: 'ok', timestampMs: 2 },
+      ],
+    };
+    const draft = runnerWith(
+      async () => ({ ok: true, session }),
+      false,
+      async () => ({ ok: true, sessionFile: '/r/new.jsonl', session: adopted }),
+    );
+    const normal = runnerWith(async () => ({ ok: true, session: adopted }));
+    const runnerFor = vi.fn(async (sessionFile: string) =>
+      sessionFile === '' ? draft : normal,
+    );
+    const disposeChat = vi.fn();
+    let store!: ReturnType<typeof createSessionsStore>;
+    const facade = createTurnRunnerFacade({
+      runnerFor,
+      disposeChat,
+      dispose: vi.fn(),
+      isBusy: () => false,
+      openPath: () => store.openPath,
+      startingNew: () => store.startingNew,
+    });
+    store = createSessionsStore({
+      listSessions: vi.fn(async () => []),
+      readSession: vi.fn(async () => session),
+      runner: facade,
+      hostId: () => 'A',
+    });
+    store.newConversation({ path: '/p/a', name: 'a' });
+
+    expect(await store.send('hi')).toBe('sent');
+    expect(await store.send('next')).toBe('sent');
+
+    expect(runnerFor.mock.calls.map(([sessionFile]) => sessionFile)).toEqual([
+      '',
+      '/r/new.jsonl',
+    ]);
+    expect(disposeChat).toHaveBeenCalledTimes(1);
+    expect(normal.send).toHaveBeenCalledWith('/r/new.jsonl', 'next');
   });
 
   it('keeps the draft chat when startNew fails', async () => {
@@ -307,6 +441,7 @@ describe('sessions store send', () => {
     const cases: Array<[string, string]> = [
       ['A turn is already running in this chat.', '上一条消息仍在处理中，请稍候。'],
       ['This turn runner has been disposed.', '当前会话已断开，请重新打开。'],
+      ['This runner is already attached to a session.', '该会话已打开，无法新建会话。'],
       ['The message was not sent (unknown).', '消息未发送成功，请重试。'],
       ['The message is empty.', '消息为空。'],
       ['Pi did not become ready before the timeout.', 'Pi 尚未准备好，请稍后重试。'],

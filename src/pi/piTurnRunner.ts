@@ -16,6 +16,7 @@ const DISPOSED_ERROR = 'This turn runner has been disposed.';
 const READINESS_ERROR = 'Pi did not become ready before the timeout.';
 const TURN_TIMEOUT_ERROR = 'The turn timed out before Pi wrote a new assistant reply.';
 const NEW_SESSION_TIMEOUT_ERROR = 'No new session file appeared before the timeout.';
+export const SESSION_ALREADY_OPEN_ERROR = 'This runner is already attached to a session.';
 const EMPTY_MESSAGE_ERROR = 'The message is empty.';
 
 const DISPOSED = Symbol('disposed');
@@ -90,6 +91,9 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   let busy = false;
   let disposed = false;
   let open: OpenTurn | null = null;
+  // `null` means the open PTY is the sessionless draft process; a string is
+  // the session it was opened with. `startNew` may only reuse a draft.
+  let openSessionFile: string | null = null;
   let activeUnsubscribe: (() => void) | null = null;
   let wakeCurrentWait: (() => void) | null = null;
   let nextOperationId = 0;
@@ -222,6 +226,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     );
     delivery.setTransportState('connected');
     open = { handle, tracker, delivery, ready: false };
+    openSessionFile = sessionFile;
     return { ok: true };
   }
 
@@ -345,6 +350,9 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   ): Promise<PiTurnStartNewResult> {
     if (disposed) return { ok: false, error: DISPOSED_ERROR };
     if (busy) return { ok: false, error: BUSY_ERROR };
+    if (open !== null && openSessionFile !== null) {
+      return { ok: false, error: SESSION_ALREADY_OPEN_ERROR };
+    }
     const line = toTurnLine(message);
     if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
     busy = true;
@@ -411,6 +419,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     disposed = true;
     const state = open;
     open = null;
+    openSessionFile = null;
     unsubscribeActive();
     if (state) {
       state.delivery.setTransportState('closed');

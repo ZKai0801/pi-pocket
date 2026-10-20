@@ -23,6 +23,7 @@
 import { reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { PiRepository, type PiProject, type PiSessionMeta } from '../pi/piRepository';
+import { sessionPreview } from '../pi/parsePiSession';
 import {
   createPiTurnRunner,
   type PiTurnRunner,
@@ -116,6 +117,7 @@ const TURN_ERROR_COPY: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bchat changed\b|\bsuperseded\b/, '会话已切换，请重新发送。'],
   [/already running|already in progress|\brunning\b/i, '上一条消息仍在处理中，请稍候。'],
   [/disposed/i, '当前会话已断开，请重新打开。'],
+  [/already attached to a session/i, '该会话已打开，无法新建会话。'],
   [/not-sent|not sent/i, '消息未发送成功，请重试。'],
   [/empty/i, '消息为空。'],
   [/not become ready|\bready\b/i, 'Pi 尚未准备好，请稍后重试。'],
@@ -137,6 +139,28 @@ export function localiseTurnError(error: string): string {
 export function projectBasename(path: string): string {
   const index = path.lastIndexOf('/');
   return index === -1 ? path : path.slice(index + 1);
+}
+
+/** The session id fallback, matching `PiRepository`'s file-name derivation. */
+function sessionIdFromPath(path: string): string {
+  const file = projectBasename(path);
+  const afterLastUnderscore = file.slice(file.lastIndexOf('_') + 1);
+  return afterLastUnderscore.endsWith('.jsonl')
+    ? afterLastUnderscore.slice(0, -'.jsonl'.length)
+    : afterLastUnderscore;
+}
+
+/** The list row for a conversation the draft turn just created. */
+function adoptedSessionMeta(path: string, session: ParsedPiSession): PiSessionMeta {
+  const lastTurn = session.turns[session.turns.length - 1];
+  return {
+    path,
+    id: session.id ?? sessionIdFromPath(path),
+    name: session.name,
+    updatedAtMs: lastTurn?.timestampMs ?? Date.now(),
+    preview: sessionPreview(session),
+    turnCount: session.turns.length,
+  };
 }
 
 const MINUTE_MS = 60_000;
@@ -295,6 +319,9 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.open = { version: 3, id: '', cwd: project.path, name: null, turns: [] };
     state.openPath = null;
     state.sendError = null;
+    // A draft is not a list load failure: never show the old error/retry.
+    state.state = 'idle';
+    state.error = null;
   }
 
   async function refresh(): Promise<void> {
@@ -305,6 +332,15 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     if (state.lastProject !== null) {
       await load(state.lastProject);
     }
+  }
+
+  /** Keep the just-created conversation at the top of the project's list. */
+  function rememberAdoptedSession(sessionFile: string, session: ParsedPiSession): void {
+    const meta = adoptedSessionMeta(sessionFile, session);
+    state.sessions = [
+      meta,
+      ...state.sessions.filter((existing) => existing.path !== sessionFile),
+    ];
   }
 
   // One turn at a time in the open chat (D10). The claim carries the host and
@@ -368,6 +404,9 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
         if (startingNew) {
           state.openPath = adoptedFile;
           state.startingNew = false;
+          if (adoptedFile !== null) {
+            rememberAdoptedSession(adoptedFile, result.session);
+          }
         }
         return 'sent';
       }
@@ -611,6 +650,90 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
   };
 }
 
+export interface TurnRunnerFacadeDeps {
+  runnerFor(sessionFile: string): Promise<PiTurnRunner>;
+  disposeChat(): void;
+  dispose(): void;
+  isBusy(): boolean;
+  openPath(): string | null;
+  startingNew(): boolean;
+}
+
+/**
+ * Serialises build + turn before a runner exists (D10) and owns the one
+ * draft-specific lifecycle rule: the sessionless `host \n ''` runner is
+ * disposed the moment `startNew` adopts its file, so the next turn builds the
+ * normal `--session <adopted>` runner. A failed `startNew` keeps the draft
+ * runner for a retry.
+ */
+export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner {
+  let pendingTurn: Promise<PiTurnSendResult | PiTurnStartNewResult> | null = null;
+
+  function track<T extends PiTurnSendResult | PiTurnStartNewResult>(
+    run: Promise<T>,
+  ): Promise<T> {
+    pendingTurn = run;
+    const clear = (): void => {
+      if (pendingTurn === run) pendingTurn = null;
+    };
+    void run.then(clear, clear);
+    return run;
+  }
+
+  function failure(error: unknown): { ok: false; error: string } {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  function send(sessionFile: string, message: string): Promise<PiTurnSendResult> {
+    if (pendingTurn !== null) {
+      return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
+    }
+    // Only a non-draft chat can send directly; a draft's first turn must go
+    // through startNew so its file is adopted.
+    if (deps.startingNew() || deps.openPath() !== sessionFile) {
+      return Promise.resolve({ ok: false, error: STALE_TURN_ERROR });
+    }
+    const run = (async (): Promise<PiTurnSendResult> => {
+      try {
+        const runner = await deps.runnerFor(sessionFile);
+        return await runner.send(sessionFile, message);
+      } catch (error) {
+        return failure(error);
+      }
+    })();
+    return track(run);
+  }
+
+  function startNew(projectPath: string, message: string): Promise<PiTurnStartNewResult> {
+    if (pendingTurn !== null) {
+      return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
+    }
+    if (!deps.startingNew() || deps.openPath() !== null) {
+      return Promise.resolve({ ok: false, error: STALE_TURN_ERROR });
+    }
+    const run = (async (): Promise<PiTurnStartNewResult> => {
+      try {
+        const runner = await deps.runnerFor('');
+        const result = await runner.startNew(projectPath, message);
+        // Adoption is the one moment the bare sessionless runner must die;
+        // a failure keeps it cached so the draft can be retried.
+        if (result.ok) deps.disposeChat();
+        return result;
+      } catch (error) {
+        return failure(error);
+      }
+    })();
+    return track(run);
+  }
+
+  return {
+    send,
+    startNew,
+    isBusy: () => pendingTurn !== null || deps.isBusy(),
+    dispose: () => deps.dispose(),
+  };
+}
+
 export const useSessionsStore = defineStore('sessions', () => {
   const connections = useConnectionsStore();
 
@@ -648,58 +771,17 @@ export const useSessionsStore = defineStore('sessions', () => {
     turnRunners.dispose();
   }
 
-  let pendingTurn: Promise<PiTurnSendResult | PiTurnStartNewResult> | null = null;
-
   // Serializes the build + turn before a runner exists: two taps in the same
-  // tick must not open two turn PTYs (D10). The draft runner is built under the
-  // host + '' key and disposed as soon as it adopts a file: the next turn uses
-  // the normal `--session <adopted>` runner.
-  const runnerFacade: PiTurnRunner = {
-    isBusy: () => pendingTurn !== null || turnRunners.isBusy(),
-    send(sessionFile, message) {
-      if (pendingTurn !== null) {
-        return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
-      }
-      const run = (async (): Promise<PiTurnSendResult> => {
-        try {
-          const runner = await turnRunners.runnerFor(sessionFile);
-          return await runner.send(sessionFile, message);
-        } catch (error) {
-          return { ok: false, error: error instanceof Error ? error.message : String(error) };
-        }
-      })();
-      pendingTurn = run;
-      void run.then(() => {
-        if (pendingTurn === run) pendingTurn = null;
-      });
-      return run;
-    },
-    startNew(projectPath, message) {
-      if (pendingTurn !== null) {
-        return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
-      }
-      const run = (async (): Promise<PiTurnStartNewResult> => {
-        try {
-          const runner = await turnRunners.runnerFor('');
-          try {
-            return await runner.startNew(projectPath, message);
-          } finally {
-            // A failed draft attempt must not leave a sessionless PTY cached:
-            // a retry has to start a fresh session, not reuse the failed one.
-            turnRunners.disposeChat();
-          }
-        } catch (error) {
-          return { ok: false, error: error instanceof Error ? error.message : String(error) };
-        }
-      })();
-      pendingTurn = run;
-      void run.then(() => {
-        if (pendingTurn === run) pendingTurn = null;
-      });
-      return run;
-    },
-    dispose: disposeTurnRunner,
-  };
+  // tick must not open two turn PTYs (D10). The factory owns the draft
+  // runner's dispose-after-adoption rule.
+  const runnerFacade = createTurnRunnerFacade({
+    runnerFor: (sessionFile) => turnRunners.runnerFor(sessionFile),
+    disposeChat: () => turnRunners.disposeChat(),
+    dispose: () => disposeTurnRunner(),
+    isBusy: () => turnRunners.isBusy(),
+    openPath: () => store.openPath,
+    startingNew: () => store.startingNew,
+  });
 
   const store = createSessionsStore({
     // Bound lazily at call time through the shell's live seam, root re-probed

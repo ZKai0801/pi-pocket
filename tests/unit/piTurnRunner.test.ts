@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPiTurnRunner } from '../../src/pi/piTurnRunner';
+import {
+  createPiTurnRunner,
+  SESSION_ALREADY_OPEN_ERROR,
+} from '../../src/pi/piTurnRunner';
 import { buildPiOpenCommand } from '../../src/pi/piTurn';
 import type { ParsedPiSession } from '../../src/pi/types';
 import type { TurnPtyHandle } from '../../src/session/turnPty';
@@ -56,6 +59,7 @@ function harness(options: {
   reads: Array<ParsedPiSession | Error>;
   neverSettles?: boolean;
   newest?: Array<string | null | Error>;
+  turnTimeoutMs?: number;
 }) {
   const handle = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
   const reads = [...options.reads];
@@ -85,11 +89,11 @@ function harness(options: {
     sleep,
     now: () => nowMs,
     readyTimeoutMs: 20_000,
-    turnTimeoutMs: 120_000,
+    turnTimeoutMs: options.turnTimeoutMs ?? 120_000,
     pollIntervalMs: 1_000,
     submitDelayMs: 0,
   });
-  return { handle, openPty, reads, newest, readSession, newestSessionFile, runner };
+  return { handle, openPty, reads, readSession, newestSessionFile, runner };
 }
 
 describe('createPiTurnRunner', () => {
@@ -301,6 +305,58 @@ describe('createPiTurnRunner', () => {
     expect(h.readSession).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
     expect(h.handle.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('startNew times out when the adopted file never gains an assistant turn', async () => {
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl', '/r/old.jsonl', '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0)],
+      turnTimeoutMs: 3_000,
+    });
+
+    const result = await h.runner.startNew('/home/kai/project', 'hi');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/timed out/i);
+    expect(result.ok === false && result.error).not.toMatch(/new session file/i);
+    expect(h.readSession).toHaveBeenCalledWith('/r/new.jsonl');
+    expect(h.readSession.mock.calls.length).toBeGreaterThan(1);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('startNew gives the assistant poll the same deadline as the file poll', async () => {
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl', '/r/old.jsonl', '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+      turnTimeoutMs: 2_000,
+    });
+
+    // The file is adopted at 1s; the assistant reply would arrive on the next
+    // 1s poll, exactly at the turn's 2s deadline. A fresh budget would return
+    // this reply after 2s, so only a shared deadline times out here.
+    const result = await h.runner.startNew('/home/kai/project', 'hi');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/timed out/i);
+    expect(h.readSession).toHaveBeenCalledTimes(2);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('startNew refuses to reuse a runner already attached to a session', async () => {
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    await expect(h.runner.send('/r/a.jsonl', 'hi')).resolves.toMatchObject({ ok: true });
+    const result = await h.runner.startNew('/home/kai/project', 'new');
+
+    expect(result).toEqual({ ok: false, error: SESSION_ALREADY_OPEN_ERROR });
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+    expect(h.newestSessionFile).not.toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
   });
 
   it('startNew refuses an empty message without opening a PTY', async () => {
