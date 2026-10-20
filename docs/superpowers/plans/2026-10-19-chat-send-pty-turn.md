@@ -457,6 +457,35 @@ project, enabled with one, calls `newConversation`. All one flat top-level
 `pi` writes its session file on the first message, and that it lands in the
 project's encoded dir) stays UNVERIFIED until the Plan 5 device run.**
 
+### R25 — Task 6 fix round (authoritative, resolved 2026-10-19)
+The Task 6 review verified the runner/store/UI behaviours but found one acceptance
+criterion with **no triggering test**:
+1. **The bare runner is not provably disposed after adoption (IMPORTANT).** Deleting
+   the facade's `finally { disposeChat() }` leaves 46/46 green, so a sessionless
+   `pi` + PTY can linger in the `host \n ''` slot and hold a D10 channel, and
+   "the next turn builds the `--session` runner for the adopted path" is
+   unexercised. **Extract the facade** into an exported factory (e.g.
+   `createTurnRunnerFacade({ runnerFor, disposeChat, isBusy, openPath, startingNew })`)
+   and unit-test it with fakes: `startNew` → adoption → `disposeChat` called
+   **once**; the next `send` asks `runnerFor` for the **adopted** path (not `''`).
+   Re-run the mutation: removing the disposal must now fail.
+Also in this round (review minors, cheap and user-visible):
+- `newConversation` clears `state`/`error` so a draft never shows the previous
+  chat's error box / 重试 above an empty transcript.
+- On successful adoption, insert the adopted conversation's `PiSessionMeta` at the
+  **front** of `state.sessions` (dedupe by path) and keep it after `closeChat()`,
+  so backing out of a brand-new chat shows the conversation you just created.
+- `startNew` on a runner that already holds a **session** PTY is refused with a
+  typed error (unreachable through the facade, but the API must be honest).
+- Tests the review proved missing: a file that appears but never gains an
+  assistant turn still times out; the second poll shares the **same**
+  `turnTimeoutMs` deadline (a fresh budget must fail the test); drop the harness's
+  unused `newest` fixture.
+Deferred (Plan 5, device only): Pi's session-file timing/location, the `pgrep`
+check for the leftover sessionless process, adoption latency, the "another
+interactive `pi` on the same project" heuristic risk, and the draft-title UI.
+
+
 
 
 
