@@ -47,7 +47,7 @@ function projectNameFromPath(path: string): string {
   return index === -1 ? path : path.slice(index + 1);
 }
 
-function sessionIdFromPath(path: string): string {
+export function sessionIdFromPath(path: string): string {
   const file = path.slice(path.lastIndexOf('/') + 1);
   const afterLastUnderscore = file.slice(file.lastIndexOf('_') + 1);
   return afterLastUnderscore.endsWith('.jsonl')

@@ -28,9 +28,13 @@ function fakeRunner(overrides: Partial<PiTurnRunner> = {}): PiTurnRunner {
   };
 }
 
-function harness(draft: PiTurnRunner = fakeRunner(), adopted: PiTurnRunner = fakeRunner()) {
+function harness(
+  draft: PiTurnRunner | (() => PiTurnRunner) = fakeRunner(),
+  adopted: PiTurnRunner = fakeRunner(),
+) {
+  const draftFor = typeof draft === 'function' ? draft : () => draft;
   const runnerFor = vi.fn(async (sessionFile: string) =>
-    sessionFile === '' ? draft : adopted,
+    sessionFile === '' ? draftFor() : adopted,
   );
   const disposeChat = vi.fn();
   const dispose = vi.fn();
@@ -84,22 +88,28 @@ describe('turn runner facade', () => {
     ]);
   });
 
-  it('keeps the draft runner usable and does not dispose it when startNew fails', async () => {
-    const startNew = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, error: 'No new session file appeared.' })
-      .mockResolvedValueOnce({ ok: true, sessionFile: '/r/new.jsonl', session });
-    const h = harness(fakeRunner({ startNew }));
+  it('disposes the bare runner and retries with a fresh runner when startNew fails', async () => {
+    const failedDraft = fakeRunner({
+      startNew: vi.fn(async () => ({
+        ok: false as const,
+        error: 'No new session file appeared.',
+      })),
+    });
+    const retryDraft = fakeRunner();
+    let builds = 0;
+    const h = harness(() => (builds++ === 0 ? failedDraft : retryDraft));
 
     await expect(h.facade.startNew('/p/a', 'hi')).resolves.toEqual({
       ok: false,
       error: 'No new session file appeared.',
     });
-    expect(h.disposeChat).not.toHaveBeenCalled();
+    expect(h.disposeChat).toHaveBeenCalledTimes(1);
     expect(h.facade.isBusy()).toBe(false);
 
     await expect(h.facade.startNew('/p/a', 'again')).resolves.toMatchObject({ ok: true });
-    expect(h.runnerFor.mock.calls.map(([sessionFile]) => sessionFile)).toEqual(['', '']);
-    expect(h.disposeChat).toHaveBeenCalledTimes(1);
+    expect(h.runnerFor).toHaveBeenCalledTimes(2);
+    expect(failedDraft.startNew).toHaveBeenCalledTimes(1);
+    expect(retryDraft.startNew).toHaveBeenCalledTimes(1);
+    expect(h.disposeChat).toHaveBeenCalledTimes(2);
   });
 });

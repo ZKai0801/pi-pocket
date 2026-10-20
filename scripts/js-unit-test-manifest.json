@@ -1247,6 +1247,7 @@
         "newConversation opens an empty draft chat for the selected project",
         "clears a previous list error when a draft chat opens",
         "prepends the adopted conversation and keeps it after closeChat",
+        "does not prepend adopted metadata to another project's list",
         "sends the first draft message through startNew and adopts the new file",
         "routes the turn after adoption to the adopted path through the real facade",
         "keeps the draft chat when startNew fails",
@@ -1293,7 +1294,7 @@
       "tests": [
         "disposes the bare runner exactly once after startNew adopts a file",
         "sends the following turn to the adopted path, not the draft slot",
-        "keeps the draft runner usable and does not dispose it when startNew fails"
+        "disposes the bare runner and retries with a fresh runner when startNew fails"
       ]
     }
   }

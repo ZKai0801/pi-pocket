@@ -22,7 +22,12 @@
  */
 import { reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
-import { PiRepository, type PiProject, type PiSessionMeta } from '../pi/piRepository';
+import {
+  PiRepository,
+  sessionIdFromPath,
+  type PiProject,
+  type PiSessionMeta,
+} from '../pi/piRepository';
 import { sessionPreview } from '../pi/parsePiSession';
 import {
   createPiTurnRunner,
@@ -139,15 +144,6 @@ export function localiseTurnError(error: string): string {
 export function projectBasename(path: string): string {
   const index = path.lastIndexOf('/');
   return index === -1 ? path : path.slice(index + 1);
-}
-
-/** The session id fallback, matching `PiRepository`'s file-name derivation. */
-function sessionIdFromPath(path: string): string {
-  const file = projectBasename(path);
-  const afterLastUnderscore = file.slice(file.lastIndexOf('_') + 1);
-  return afterLastUnderscore.endsWith('.jsonl')
-    ? afterLastUnderscore.slice(0, -'.jsonl'.length)
-    : afterLastUnderscore;
 }
 
 /** The list row for a conversation the draft turn just created. */
@@ -404,7 +400,9 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
         if (startingNew) {
           state.openPath = adoptedFile;
           state.startingNew = false;
-          if (adoptedFile !== null) {
+          // Only the project whose list is loaded may receive the new row;
+          // never prepend it to another project's conversations.
+          if (adoptedFile !== null && state.lastProject?.path === projectPath) {
             rememberAdoptedSession(adoptedFile, result.session);
           }
         }
@@ -662,9 +660,9 @@ export interface TurnRunnerFacadeDeps {
 /**
  * Serialises build + turn before a runner exists (D10) and owns the one
  * draft-specific lifecycle rule: the sessionless `host \n ''` runner is
- * disposed the moment `startNew` adopts its file, so the next turn builds the
- * normal `--session <adopted>` runner. A failed `startNew` keeps the draft
- * runner for a retry.
+ * disposed on every `startNew` exit. A failed attempt may already be attached
+ * to a file Pi wrote, so reusing it would wait for a different file forever;
+ * the store keeps the draft, while the runner never survives an attempt.
  */
 export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner {
   let pendingTurn: Promise<PiTurnSendResult | PiTurnStartNewResult> | null = null;
@@ -714,13 +712,14 @@ export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner
     const run = (async (): Promise<PiTurnStartNewResult> => {
       try {
         const runner = await deps.runnerFor('');
-        const result = await runner.startNew(projectPath, message);
-        // Adoption is the one moment the bare sessionless runner must die;
-        // a failure keeps it cached so the draft can be retried.
-        if (result.ok) deps.disposeChat();
-        return result;
+        return await runner.startNew(projectPath, message);
       } catch (error) {
         return failure(error);
+      } finally {
+        // A failure can happen after Pi wrote the file: that sessionless PTY
+        // must not survive the attempt, or the retry would wait for another
+        // file while Pi stays attached to the adopted one.
+        deps.disposeChat();
       }
     })();
     return track(run);

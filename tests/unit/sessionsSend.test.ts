@@ -315,6 +315,42 @@ describe('sessions store send', () => {
     expect(store.sessions[0]?.path).toBe('/r/new.jsonl');
   });
 
+  it('does not prepend adopted metadata to another project\'s list', async () => {
+    const adopted = {
+      ...session,
+      id: 'new',
+      cwd: '/p/a',
+      turns: [
+        { role: 'user' as const, text: 'hi', timestampMs: 1 },
+        { role: 'assistant' as const, text: 'ok', timestampMs: 2 },
+      ],
+    };
+    const runner = runnerWith(
+      async () => ({ ok: true, session }),
+      false,
+      async () => ({ ok: true, sessionFile: '/r/new.jsonl', session: adopted }),
+    );
+    const store = storeWith(runner);
+    const otherProjectList = [
+      {
+        path: '/r/other-project.jsonl',
+        id: 'other-project',
+        name: null,
+        updatedAtMs: 5,
+        preview: 'other',
+        turnCount: 1,
+      },
+    ];
+    store.newConversation({ path: '/p/a', name: 'a' });
+    store.lastProject = { path: '/p/b', name: 'b' };
+    store.sessions = otherProjectList;
+
+    expect(await store.send('hi')).toBe('sent');
+
+    expect(store.openPath).toBe('/r/new.jsonl');
+    expect(store.sessions).toEqual(otherProjectList);
+  });
+
   it('sends the first draft message through startNew and adopts the new file', async () => {
     const replied = {
       ...session,
