@@ -177,8 +177,13 @@ try {
     # --- 5: gradle ----------------------------------------------------------
     $task = 'assembleDebug'
     if ($Configuration -eq 'release') { $task = 'assembleRelease' }
+    # Hand the derived pair to Gradle (android/app/build.gradle prefers these
+    # properties over shelling out to derive-version.sh, which needs bash). The
+    # APK then carries exactly the version this script printed.
     Invoke-Step ("gradle {0}" -f $task) {
-        & (Join-Path $repoRoot 'android\gradlew.bat') '-p' 'android' $task '--console=plain'
+        & (Join-Path $repoRoot 'android\gradlew.bat') '-p' 'android' $task '--console=plain' `
+            ("-PpocketshellVersionCode={0}" -f $versionCode) `
+            ("-PpocketshellVersionName={0}" -f $versionName)
     }
 } finally {
     Pop-Location
@@ -193,10 +198,35 @@ if (-not (Test-Path $apk)) {
 $hash = (Get-FileHash -Path $apk -Algorithm SHA256).Hash.ToLower()
 $sizeMb = [math]::Round((Get-Item $apk).Length / 1MB, 1)
 
+# Read the version out of the APK itself (Review Focus 1): the fallback must
+# still be a legal Android version, so assert on the packaged manifest rather
+# than on what Gradle was asked for.
+$aapt2 = $null
+$buildToolsRoot = Join-Path $sdkRoot 'build-tools'
+if (Test-Path $buildToolsRoot) {
+    $candidate = Get-ChildItem -Path $buildToolsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($candidate) { $aapt2 = Join-Path $candidate.FullName 'aapt2.exe' }
+}
+$apkVersionCode = $null
+$apkVersionName = $null
+if ($aapt2) {
+    $badging = (& $aapt2 'dump' 'badging' $apk 2>&1 | Out-String)
+    if ($badging -match "versionCode='([0-9]+)'") { $apkVersionCode = [int]$Matches[1] }
+    if ($badging -match "versionName='([^']*)'") { $apkVersionName = $Matches[1] }
+}
+if ($null -eq $apkVersionCode -or $apkVersionCode -lt 1) {
+    Fail ("the packaged APK does not carry a legal versionCode (got '{0}'); aapt2='{1}'" -f $apkVersionCode, $aapt2)
+}
+if ($apkVersionName -ne $versionName) {
+    Fail ("the packaged APK says versionName='{0}' but this build derived '{1}'" -f $apkVersionName, $versionName)
+}
+
 Write-Host ''
 Write-Host 'BUILD SUCCESSFUL' -ForegroundColor Green
 Write-Host ("APK:      {0}" -f $apk)
 Write-Host ("size:     {0} MB" -f $sizeMb)
 Write-Host ("sha256:   {0}" -f $hash)
-Write-Host ("version:  {0} ({1})" -f $versionName, $versionCode)
+Write-Host ("version:  {0} ({1})" -f $apkVersionName, $apkVersionCode)
 exit 0

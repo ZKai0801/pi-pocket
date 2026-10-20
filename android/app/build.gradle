@@ -37,7 +37,28 @@ def derivePocketShellVersion = {
     }
 }
 
-def pocketShellVersion = derivePocketShellVersion()
+// A caller that has already derived the version can hand it over instead of
+// letting this block shell out. scripts/build-android-debug.ps1 does exactly
+// that: it derives with scripts/derive-version.mjs (no bash on Windows) and
+// passes -PpocketshellVersionCode/-PpocketshellVersionName, so the APK cannot
+// silently fall back to 0.0.0-dev/1 while the build log claims a tagged
+// version. Both values are validated here; a partial or malformed pair is a
+// hard failure, never a quiet fallback.
+def pocketShellVersionFromProperties = {
+    def rawCode = project.findProperty('pocketshellVersionCode')
+    def rawName = project.findProperty('pocketshellVersionName')
+    if (rawCode == null && rawName == null) return null
+    if (rawCode == null || rawName == null) {
+        throw new GradleException('pocketshellVersionCode and pocketshellVersionName must be passed together')
+    }
+    def code = rawCode.toString().trim().toInteger()
+    def name = rawName.toString().trim()
+    if (code < 1) throw new GradleException("pocketshellVersionCode must be >= 1, got ${code}")
+    if (name.isEmpty()) throw new GradleException('pocketshellVersionName must not be empty')
+    return [code: code, name: name]
+}
+
+def pocketShellVersion = pocketShellVersionFromProperties() ?: derivePocketShellVersion()
 
 // Release material resolves from the same two places documented by
 // docs/release.md: a root keystore.properties file or the four CI variables.
