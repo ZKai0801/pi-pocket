@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildSshCredential } from '../../src/credentials/buildSshCredential';
+import { buildSshCredential, UnsupportedHostAuth } from '../../src/credentials/buildSshCredential';
+import type { HostAuth } from '../../src/platform/android/hostStore';
 
 describe('buildSshCredential', () => {
   it('returns a bare key-handle when nothing is remembered', async () => {
@@ -51,5 +52,12 @@ describe('buildSshCredential', () => {
     const lookup = vi.fn(async () => { throw new Error('keystore reset'); });
     await expect(buildSshCredential({ kind: 'password', passwordCredentialId: 's-2' }, lookup))
       .rejects.toThrow(/password/i);
+  });
+
+  it('rejects an unknown auth kind without touching the lookup', async () => {
+    const lookup = vi.fn(async () => 'secret');
+    await expect(buildSshCredential({ kind: 'agent' } as unknown as HostAuth, lookup))
+      .rejects.toBeInstanceOf(UnsupportedHostAuth);
+    expect(lookup).not.toHaveBeenCalled();
   });
 });

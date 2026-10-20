@@ -968,7 +968,8 @@
         "treats an undecryptable secret as absent",
         "does not call lookup when the key passphrase is not remembered",
         "does not look up a stale secret id when remembering is off",
-        "rejects a password lookup that throws"
+        "rejects a password lookup that throws",
+        "rejects an unknown auth kind without touching the lookup"
       ]
     },
     "tests/unit/phoneShellSingleEntry.test.ts": {
