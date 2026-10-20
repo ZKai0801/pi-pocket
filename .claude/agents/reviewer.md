@@ -112,7 +112,7 @@ infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
    - `scripts/run-js-unit-gate.sh` for the exact registered Vitest suite (count must be > 0 and match `scripts/js-unit-test-manifest.json`)
    - `pnpm typecheck`
    - `scripts/assemble-debug.sh` for the debug APK / compile check (see `process.md` § Local debug APK); there is no root `./gradlew` on `main`
-   - the result-guard self-tests the diff touches (`scripts/check-js-*-results.py --self-test`, `scripts/check-test-validity.sh --j1-only`)
+   - the result-guard self-tests the diff touches (`scripts/check-js-*-results.py --self-test`). The J1 dispatch check is **retired** in this fork — there is no packaged lane left for it to check, its entry point now exits 3 with a retirement notice rather than running, and `docs/fork-gate-posture.md` records why — so it is not a gate to require. `scripts/check-test-validity.sh` itself scans no test source on this checkout (no `.kt` tree), so its exit 0 is not evidence either.
    - `scripts/test-agents-fixture-aplexer.sh --docker` when host/fixture behaviour is involved
    - Capture exit codes and the last 15–20 lines of output
    - On `release/0.5.x` only: `./gradlew :module:test` / `:module:check`, with that branch's `scripts/assemble-debug.sh`.

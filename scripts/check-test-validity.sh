@@ -158,16 +158,19 @@
 # test was converted to the deterministic / fault-covering model) is the
 # intended direction of travel; a stale baseline entry is pruned + noted.
 #
-# Usage:
-#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/A5L/C1/J1/TIMING1/SEAM1 hard-fail smell
+# Usage (a second argument is a usage error, exit 2):
+#   scripts/check-test-validity.sh            # guard mode: exit 1 on a NEW A5/A5L/C1/TIMING1/SEAM1/V1 hard-fail smell
 #   scripts/check-test-validity.sh --report   # report ALL findings incl. baseline; never fails
 #   scripts/check-test-validity.sh --self-test # run the synthetic red->green proof (delegates to check-test-validity-selftest.sh)
+#   scripts/check-test-validity.sh --j1-only  # RETIRED: prints a notice and exits 3; it is not a check any more
 #
 # REVIEWER FAST-CHECK: run this (and scripts/check-test-validity-selftest.sh)
 # locally before approving any test change — it is the machine sibling of
 # process.md's "Regression-proof validity rules" (F2/F3) and catches the
 # synthetic-masks-reality state-injection cheat class (SEAM1, #1430) that a code
-# read can miss.
+# read can miss. On THIS checkout it scans no test source at all (there is no
+# `*.kt` test tree): an exit 0 here means "nothing to scan", not "no smells" —
+# docs/fork-gate-posture.md §2.1 records that measurement.
 #
 # This is intentionally a grep-guard, not a custom lint rule, for affordability
 # (it runs in the cheap Unit job in .github/workflows/tests.yml before the
@@ -251,14 +254,54 @@ mapfile -t ANDROID_TEST_FILES < <(collect_android_test_files)
 # fixtures for every detector — including the #1430 SEAM1 cheat — and asserts the
 # guard flags the bad ones / spares the good ones). Kept as a separate script for
 # affordability, but exposed here so `check-test-validity.sh --self-test` works.
-if [[ "${1:-}" == "--self-test" ]]; then
-  exec "$REPO_ROOT/scripts/check-test-validity-selftest.sh"
-fi
+#
+# Argument contract: exactly one argument, from the list below. Anything else is
+# an error rather than a silent no-op — a retired flag that quietly ran the whole
+# guard printed a PASS line claiming J1 coverage, which is the exact class of
+# vacuous green this guard exists to catch.
+usage() {
+  cat >&2 <<'USAGE'
+usage: scripts/check-test-validity.sh [--self-test | --report]
+  (no argument)  guard mode: exit 1 on a NEW A5/A5L/C1/TIMING1/SEAM1/V1 hard-fail smell
+  --report       report ALL findings including the baselines; never fails
+  --self-test    run the synthetic red->green proof (delegates to check-test-validity-selftest.sh)
+`--j1-only` is RETIRED and exits 3: this fork has no packaged JS journey lane to
+dispatch, so a J1-only run has nothing to check. See docs/fork-gate-posture.md.
+USAGE
+}
 
 REPORT_MODE=0
-if [[ "${1:-}" == "--report" ]]; then
-  REPORT_MODE=1
-fi
+case "${1:-}" in
+  "") ;;
+  --self-test)
+    [[ "$#" -eq 1 ]] || { usage; exit 2; }
+    exec "$REPO_ROOT/scripts/check-test-validity-selftest.sh"
+    ;;
+  --report)
+    [[ "$#" -eq 1 ]] || { usage; exit 2; }
+    REPORT_MODE=1
+    ;;
+  --j1-only)
+    {
+      echo "RETIRED: scripts/check-test-validity.sh --j1-only no longer runs a check, and this run did NOT pass."
+      echo "  Why: the J1 dispatch rule checked that each of the fifteen packaged JS journeys was"
+      echo "  selected by its lane and asserted by an exact-result guard. Those journeys and their"
+      echo "  androidTest classes were deleted with the pre-#2936 shared shell (Plan 5 Task 3), and the"
+      echo "  JS-first dispatch checker went with them (Plan 5 Task 6). This fork has no packaged lane,"
+      echo "  so there is no dispatch to verify and no method contract to compare against."
+      echo "  Do not present this flag as a runnable local check. Retained J1 behaviour: the app2"
+      echo "  wholesale-root rule, which this checkout cannot reach (app2/ is 0.5.x history)."
+      echo "  Record and rationale: docs/fork-gate-posture.md (§2.1, §3)."
+      echo "  Run this script with no arguments (or --report / --self-test) instead."
+    } >&2
+    exit 3
+    ;;
+  *)
+    echo "error: unknown argument: $1" >&2
+    usage
+    exit 2
+    ;;
+esac
 
 # --------------------------------------------------------------------------
 # BASELINE — A5 offenders the #657 audit catalogued (file:issue). These still
@@ -1922,7 +1965,11 @@ echo " Test-validity guard (issue #657 / F4; extended #848 / #850 / #1048 / #185
 echo " Scanned test roots:"
 for r in "${TEST_ROOTS[@]}"; do echo "   - $r/**/*.kt"; done
 echo " Connect-path RPC sources: $RPC_SOURCE_ROOT/**/*RemoteSource.kt (+ FolderListViewModel.kt)"
-echo " CI journey dispatch: ${J1_JOURNEY_ROOT:-?} (${#J1_WIRED_ANDROID_TEST_CLASSES[@]} dispatched androidTest class(es))"
+if [[ -n "$J1_JOURNEY_ROOT" ]]; then
+  echo " J1 journey dispatch: $J1_JOURNEY_ROOT (${#J1_WIRED_ANDROID_TEST_CLASSES[@]} dispatched androidTest class(es)) — app2 rule, run only by the self-test"
+else
+  echo " J1 journey dispatch: NOT APPLICABLE — no packaged lane and no J1 dispatch subject in this fork; the rule is retired (docs/fork-gate-posture.md)"
+fi
 echo " Vetted state-injection seam registry: $VETTED_SEAM_REGISTRY (${#SEAM1_REGISTRY_NAMES[@]} seam(s) vetted)"
 echo "=============================================================="
 
@@ -1961,7 +2008,7 @@ print_list "FAKE1 — NEW connect-path test with an always-answering fake (no fa
 print_list "FAKE1 — KNOWN baseline (always-answering connect fake; #847/#849) [advisory]" "${FAKE1_KNOWN[@]:-}"
 print_list "AWAIT1 — NEW unbounded connect-path RPC await (no withTimeout) [advisory]" "${AWAIT1_FINDINGS[@]:-}"
 print_list "AWAIT1 — KNOWN baseline (unbounded connect RPC; #847) [advisory]" "${AWAIT1_KNOWN[@]:-}"
-print_list "J1 — WIRED androidTest journey classes (selected package lane or app2 wholesale suite) [advisory]" "${J1_WIRED[@]:-}"
+print_list "J1 — WIRED androidTest journey classes (app2 wholesale suite only; no packaged lane exists in this fork) [advisory]" "${J1_WIRED[@]:-}"
 print_list "J1 — NEW androidTest journey class missing dispatched coverage or local justification [HARD FAIL]" "${J1_NEW[@]:-}"
 print_list "J1 — KNOWN unwired androidTest E2e/Docker baseline (#848 follow-up) [advisory]" "${J1_KNOWN[@]:-}"
 print_list "J1 — JUSTIFIED local CI_JOURNEY_SUITE_JUSTIFIED exemption [advisory]" "${J1_JUSTIFIED[@]:-}"
@@ -2025,7 +2072,7 @@ echo "        opt-out). This is"
 echo "        the #1158 forceActivePaneAltBufferForTest cheat class (#1430/#848)."
 echo "--------------------------------------------------------------"
 
-# Collect the HARD-FAIL categories (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1).
+# Collect the HARD-FAIL categories (A5 + A5L + C1 + J1[app2 mode only] + TIMING1 + SEAM1 + V1).
 real_hard_fail=()
 for x in \
   "${A5_NEW[@]:-}" \
@@ -2054,12 +2101,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857/#2026)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, hand-rolled portfwd/prefs wall-clock deadline pump, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), J1 must dispatch each JS-first journey through the selected packaged lane and exact result-method contract while app2 retains its historical wholesale-root rule; intentionally local journeys need a nearby issue-backed // CI_JOURNEY_SUITE_JUSTIFIED: reason. A connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or the audited drainMainLooperUntil helper per #1048/#2026). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857/#2026)::A NEW load-bearing self-skip, fixed-sleep-before-assert, hand-rolled portfwd/prefs wall-clock deadline pump, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), J1's JS-first lane-dispatch rule is retired in this fork: the fifteen packaged lanes and the androidTest journey classes they selected are gone, so there is no dispatch subject left to check (its retained app2 wholesale-root rule applies only where app2/ exists, which is 0.5.x history and not this checkout — docs/fork-gate-posture.md). A connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or the audited drainMainLooperUntil helper per #1048/#2026). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
   echo
-  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
+  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + A5L + C1 + J1[app2-only] + TIMING1 + SEAM1 + V1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep or hand-rolled deadline-pump flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
+echo "PASS: no new unjustified load-bearing self-skips, fixed-sleep or hand-rolled deadline-pump flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + A5L + C1 + TIMING1 + SEAM1 + V1). J1 journey dispatch is NOT covered by this run: its subject (the fifteen packaged lanes) was deleted and the retained app2 wholesale-root rule is unreachable here (docs/fork-gate-posture.md). This checkout has no *.kt test tree, so read this line as 'the scanned set is clean' only after checking the 'Scanned test roots' list above."
 exit 0

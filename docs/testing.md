@@ -113,15 +113,21 @@ removes stale JUnit XML before instrumentation, and checks the report from that
 run. Provide a new suffix for each worktree so parallel APK installs have
 distinct package IDs.
 
-The J1 dispatch guard is `scripts/check-test-validity.sh --j1-only`. On this
-rewrite tree it verifies the eight packaged contracts: smoke selects the exact
-nine methods in `JsShellPackagedSmokeTest`; lifecycle selects
+The J1 dispatch guard was `scripts/check-test-validity.sh`, run in its J1-only
+mode. **That entry point is retired** and is not a runnable local check: it now
+prints a retirement notice and exits 3, because the fifteen lanes and their
+journey classes — the rule's whole subject — were deleted (Plan 5 Task 3/6,
+[fork-gate-posture.md](fork-gate-posture.md)). It also never measured anything
+on this tree: the checker collects `*.kt` files under the legacy Kotlin roots,
+and this checkout tracks none. What it verified while the lanes existed — kept
+here as the record of the contracts a future lane must re-create — was: smoke
+selected the exact nine methods in `JsShellPackagedSmokeTest`; lifecycle selected
 `SshPtyDockerJourneyTest#sshSessionSwitchingGraceAndAbruptServerDropReconnectAgainstDockerFixture`;
-Usage and Ports selects
+Usage and Ports selected
 `UsagePortsDockerJourneyTest#usageAndPortForwardingPoliciesUseDockerAndNativePlugin`;
-Files selects
+Files selected
 `J10FilesBrowseEditJourneyTest#browseEditConflictAndTransferFilesWithinTheConfiguredRoot`;
-and composer selects
+and composer selected
 `JsComposerDockerJourneyTest#composerWritesUtf8AndMultilineInsertAndRetainsAfterDrop`.
 The durable-storage lane selects
 `DurableStorageRestartJourneyTest#userDataWritesSurviveForceStopShortlyAfterAcknowledgement`.
@@ -171,15 +177,21 @@ run directories are never overwritten. `scripts/check-js-signed-upgrade-results.
 checks the whole run: 3/3 exact tests with no skips, unchanged sources,
 migrated-key authentication, and APK provenance. The workflow runs that check
 again after the emulator step. Missing fixture arguments fail the test instead
-of skipping it. The J1 guard rejects removing the invocation, dropping a cycle,
-or restoring an opt-in exclusion marker. It also rejects any other undispatched
-`*SmokeTest`, `*JourneyTest`, `*DockerTest`, or `*E2eTest` source.
+of skipping it. The retired J1 guard used to reject removing the invocation,
+dropping a cycle, or restoring an opt-in exclusion marker, and any other
+undispatched `*SmokeTest`, `*JourneyTest`, `*DockerTest`, or `*E2eTest` source;
+nothing enforces that any more.
 
-Run its synthetic contract checks with
-`scripts/check-test-validity.sh --j1-only --self-test`. This verifies the JS
-selectors and exact result-checker method sets, rejects missing/extra dispatch
-and unjustified journey classes, and retains a synthetic `release/0.5.x` app2 whole-suite
-regression case. The Files result contract is also self-tested by
+Its synthetic contract checks ran through the same J1-only entry point and are
+retired with it: the JS selector checks and the exact result-checker method
+sets no longer exist, so that proof cannot be re-run, and it is not a local
+check to offer anyone. The surviving detector self-test is
+`scripts/check-test-validity-selftest.sh` — unverified on this box, where it
+aborts in a C1 fixture with a `'gbk' codec` `UnicodeDecodeError` before it
+reaches its J1 assertions (fork-gate-posture.md §2.1); it retains a synthetic
+`release/0.5.x` app2 whole-suite regression case for the J1 rule that only app2
+could reach (0.5.x history, unreachable on this checkout). The Files result
+contract is also self-tested by
 `scripts/check-js-files-results.py --self-test`. In hosted CI, an
 `if: always()` report step independently runs each lane's exact JUnit checker
 against that run's preserved smoke, lifecycle, Files, Usage/Ports, or Composer

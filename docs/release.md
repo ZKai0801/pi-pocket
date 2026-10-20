@@ -66,11 +66,18 @@ the old line, to be repointed or cut in #2863 follow-up slices (all inert on
 `main` today): `scripts/check-nightly-workflow.sh` and
 `scripts/check-nightly-fault-run.sh` still name `app2.yml`, and
 `scripts/check-test-execution-ledger-wiring.py --self-test` still expects
-deleted Kotlin trees and fails outside CI. The bare (non-`--j1-only`)
-`scripts/check-test-validity.sh --self-test` is green, not stale: it passes
-on `main` and with this diff (131 passed, 0 failed, in a git checkout); it
-fails only when run outside a git checkout (e.g. a git-archive extraction),
-because its fixture-repo probes require git.
+deleted Kotlin trees and fails outside CI. Neither `scripts/check-test-validity.sh`
+nor its self-test is evidence on this checkout: the guard collects `*.kt` files
+under `app2/src/**` and `shared/*/src/test`, Kotlin-era paths that are 0.5.x
+history and untracked here, so its exit 0 means "it scanned nothing"
+(`docs/fork-gate-posture.md` §2.1); the J1-only entry point is retired and exits
+3 instead of running; and `scripts/check-test-validity-selftest.sh` aborts on
+this box in a C1 fixture with a `'gbk' codec` `UnicodeDecodeError`, before it
+reaches its J1 assertions. The "131 passed, 0 failed" figure recorded here was
+measured on the pre-Task-6 tree in a git checkout; it is **unverified on this
+checkout** and must be re-measured before anyone cites it. (It fails outright
+outside a git checkout — e.g. a git-archive extraction — because its
+fixture-repo probes require git.)
 
 The legacy tag-triggered `Build` workflow on `main` builds the JS APKs, is
 artifact-only, and its GitHub workflow ID `280774562` remains disabled. Keep

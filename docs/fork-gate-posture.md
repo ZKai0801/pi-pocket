@@ -19,6 +19,7 @@ Read this before adding a workflow step, a `scripts/check-*` guard, or an
 | Decision | Means |
 |---|---|
 | **kept** | Invoked by a live entry point (a kept workflow step, `npm`, or the Windows gates) and still asserts something this fork ships. |
+| **kept — dormant** | The property the script asserts still holds for this fork and the script is *not* retired, but **no live entry point invokes it**, so it guards nothing today. It is a follow-up item, not a green: wire it into a kept step (or delete it deliberately) before anyone cites it, and say whether it was verified on this box. |
 | **trimmed** | The *workflow* stays and keeps guarding something real; the inapplicable steps were removed from it. |
 | **retired — gated** | The workflow file stays for its documentation value but every job is `if: false` with a pointer here. It can never run. |
 | **retired — dormant** | The script stays on disk (something else still names it: another dormant script, a `scripts/*.txt` meta-check or a doc), but no live entry point invokes it. Its subject is gone. |
@@ -59,6 +60,16 @@ A third, related fact: `devBrowserCapacitor.test.ts` "connects, asks for
 host-key trust…" takes ~4.9 s alone and hits vitest's 5000 ms default under
 full-suite parallel load. Serial execution also fixes that.
 
+**Task 6's Step 3 acceptance was not met, and is not claimed as met.** Step 3
+expected the JS unit gate to exit **0** on this box. It exits **1**, and the only
+failure is fact 2 above (`tests/unit/sshKeySetup.test.ts:392`, POSIX `0o600` vs
+Windows `0o666`). That is the recorded outcome: **acceptance not met — one
+documented Windows-only red**, never "green". The gate itself worked (it
+collected the exact 109-file / 835-test manifest set and reported 834 passed),
+so the red is the platform, not the change; it is not fixed here because the fix
+would be a platform-conditional assertion in a test that must keep asserting
+`0600` on CI Linux, which stays authoritative.
+
 ---
 
 ## 1. Workflows (`.github/workflows/`)
@@ -73,7 +84,7 @@ remote ever existed, and what a reader should believe when they see one.
 | `js-full-suite.yml` | The same battery on a nightly cron (`17 2 * * *`) so a red `main` cannot go unnoticed (D36) | **Partly**, identical split | **trimmed (kept)** — same trim as `js-first-rewrite.yml`, keeping the D37 wiring its header documents (cron, no path filter, one concurrency group, fail-closed lanes). |
 | `js-release-validation.yml` | Produced the exact-SHA "release validation" verdict artifact (24-journey qualification) that the tag-release authorization checker accepts as the only trusted release proof | **No.** It is a `workflow_run` consumer (needs a remote), it qualifies the 24 deleted journeys, and it exists to feed the 0.5.x tag-release chain | **retired — gated** (`if: false`). No remote, no tag line, and its journey subject was deleted. |
 | `publish-release.yml` | Authorised a `v*` tag against `main`, built + signed release APKs with Play-style keystore secrets, and created the GitHub Release | **No.** Needs `gh release create --repo PocketShell-io/pocketshell`, a pushed tag, and four signing secrets this checkout does not have; Play-style signing is explicitly out of scope | **retired — gated** (all three jobs `if: false`). The version derivation it used is **kept** — `derive-version` still feeds `versionCode`. |
-| `build.yml` | Legacy tag artifact build (`push: tags: v*`): derived version, debug + signed release APK, identity/signature validation, artifact upload. Already disabled in GitHub (workflow ID 280774562) | **No.** Its release half needs the same absent secrets; its debug half is duplicated by the two kept workflows | **retired — gated** (`if: false`). Kept on disk as the readable upstream release contract. |
+| `build.yml` | Legacy tag artifact build (`push: tags: v*`): derived version, debug + signed release APK, identity/signature validation, artifact upload. Reported as already disabled in GitHub (workflow ID 280774562) — that is an **inherited claim, unverified**: this checkout has no remote, so the live repository state cannot be read from here | **No.** Its release half needs the same absent secrets; its debug half is duplicated by the two kept workflows | **retired — gated** (`if: false`). Kept on disk as the readable upstream release contract. |
 
 Consequences a reader should expect:
 
@@ -93,8 +104,9 @@ Consequences a reader should expect:
 Every `scripts/check-*` and `scripts/run-*` that a workflow, another script or a
 `scripts/*.txt` / `scripts/*.json` meta-check still references appears **exactly
 once** below, grouped by area. Count: 58 referenced names — **12 kept, 46
-retired** (46 dormant unless a group says otherwise; 2 of them were deleted
-rather than left dormant, plus one lane-contract test, see §3).
+retired** (the kept total includes the five `kept — dormant` rows, which are not
+green; 46 dormant unless a group says otherwise; 2 of them were deleted rather
+than left dormant, plus two lane-contract tests, see §3).
 
 ### 2.1 JS unit gate and test validity (22)
 
@@ -103,8 +115,8 @@ rather than left dormant, plus one lane-contract test, see §3).
 | `run-js-unit-gate.sh` | Runs the whole manifest-registered Vitest suite and hands the JSON report to the checker; fails when `.nvmrc` and the workflow's `node-version` disagree | **kept** — the CI entry point both kept workflows call. |
 | `run-js-unit-gate.ps1` | The same gate with `npx`/`python` instead of `pnpm`/`bash`/`python3`, same checker and exit contract | **kept** — the only runnable form on this Windows box (Plan 5 Task 4). |
 | `check-js-unit-results.py` | Rejects any file or test title that is not in `scripts/js-unit-test-manifest.json`, in both directions | **kept** — invoked by both gates and `--self-test`ed in both workflows; this is what turns the dropped-file reporter bug into a red gate. |
-| `check-test-validity.sh` | Test-validity smells: load-bearing self-skips (A5/A5L/C1), ungated journeys (J1), `Thread.sleep`-as-sync and hand-rolled deadline pumps (TIMING1), unvetted state-injection seams (SEAM1), non-void `@Test` bodies (V1) | **kept, repaired** — its JS J1 delegation was removed with the deleted journeys and the checker behind it; the guard now exits **0** (before this task it exited 1, and the *only* finding was the retired J1 tree). |
-| `check-test-validity-selftest.sh` | Synthetic red→green proof of the detectors above, on a throwaway tree | **kept** — still proves the app2 J1 rule, which is 0.5.x history and only reachable from that self-test. Its own run aborts in a C1 fixture with `UnicodeDecodeError: 'gbk' codec …` on this box; that is pre-existing (reproduced from `HEAD`) and Windows-locale-only. |
+| `check-test-validity.sh` | Test-validity smells: load-bearing self-skips (A5/A5L/C1), `Thread.sleep`-as-sync and hand-rolled deadline pumps (TIMING1), unvetted state-injection seams (SEAM1), non-void `@Test` bodies (V1) | **kept — dormant; a vacuous green on this tree (measured).** The properties still apply, but the guard scans **nothing** here: `TEST_ROOTS` is `app2/src/androidTest`, `app2/src/test` plus any `shared/*/src/test` — `app2`/`shared` are 0.5.x history, `git ls-files app2 shared` is **empty** — and the collectors only match `*.kt`, while the seven surviving `androidTest` classes are `.java` under `android/app/src/androidTest/java`. Exit 0 therefore means "scanned nothing", not "no smells". Its JS J1 delegation was retired with the deleted journeys; the `--j1-only` entry point now prints a retirement notice and exits 3 and an unknown argument exits 2, so neither can silently pass any more. Nothing invokes it (Task 6 removed its workflow step) — do not cite an exit 0 from it until it is wired to a real `*.kt` tree. |
+| `check-test-validity-selftest.sh` | Synthetic red→green proof of the detectors above, on a throwaway tree | **kept — dormant; unverified here — on this box it proves nothing.** Its app2 J1 assertion sits at `:520-525`, but the run aborts earlier, in the C1 stale-baseline fixture at `:460` (`open(src).read()` with no `encoding=` → `UnicodeDecodeError: 'gbk' codec …` on this Windows locale), so that assertion — the only proof the app2 J1 rule ever had here — is **never reached**; and under this non-interactive shell it first stalls in the SIGTERM-cleanup probe, so no detector assertion was measured at all during the fix round. The rule it would prove is 0.5.x history, reachable only from this self-test. Nothing invokes it. |
 | `check-unit-gate-wiring.sh` | Asserts the JS unit gate is wired into `.github/workflows/tests.yml` and cannot be skipped | **retired — dormant** — red: `FAIL: workflow not found …/.github/workflows/tests.yml`. That Kotlin-era workflow was hard-cut upstream (#2934); the wiring it checked does not exist. |
 | `check-executed-test-counts.sh` | Compares executed test counts against `scripts/executed-test-count-floors.txt` for the Kotlin `test-areas.txt` map | **retired — dormant** — its counts are recorded from app2/shared lanes that are 0.5.x history and absent here. |
 | `check-tests-referenced.sh` | Asserts every test file is named by some harness so no test is silently orphaned | **retired — dormant** — Kotlin-era: there is no `src/androidTest/*.kt` tree left to cross-reference; it also hangs on this box. |
@@ -232,9 +244,49 @@ Short form:
 
 | Path | Why |
 |---|---|
-| `scripts/check-js-first-android-journeys.py` | J1's JS-first half: asserted that each of fifteen packaged lanes dispatched its exact class, methods and result contract. Every one of those classes was deleted by Task 3, so it failed closed ("zero journey-shaped classes") with nothing left to assert. Its two call sites were repaired in the same change. |
+| `scripts/check-js-first-android-journeys.py` | J1's JS-first half: asserted that each of fifteen packaged lanes dispatched its exact class, methods and result contract. Every one of those classes was deleted by Task 3, so it failed closed ("zero journey-shaped classes") with nothing left to assert. Its call sites were repaired in the same change — the `exec` of the dispatch checker at `scripts/check-test-validity.sh:190` and its `scan_js_j1` delegation at `:1061`, the self-test invocation at `scripts/check-test-validity-selftest.sh:527`, and the five doc/agent instructions that told people to run the entry point (`.claude/agents/implementer.md`, `.claude/agents/reviewer.md`, `process.md`, `docs/testing.md`, `docs/release.md`; all re-checked in the follow-up fix round). |
 | `scripts/check-js-usage-ports-composer-order.py` | Opened `UsagePortsDockerJourneyTest.java` and `PhysicalTap.java` by path — both deleted; it guarded the ordering of a usage/ports screen the phone shell does not have. |
 | `tests/scripts/js-first-rewrite-composer-gate-test.sh` | 1,700-line contract test whose whole subject was the workflow wiring of the composer/hotkeys/usage-ports lanes and the gateway-lane action; it asserted the exact workflow steps this task trimmed, so it could only go red. It was the last referrer of the composer-order guard. |
+| `tests/scripts/js-first-rewrite-hotkeys-gate-test.sh` | Contract test that asserted *itself* is wired into CI — its `:79` case names its own path among the workflow's steps, i.e. it asserted the very `js-first-rewrite.yml` step Task 6 deleted. Measured **red** before deletion (`FAIL: rewrite fast-key gate inputs are missing`, exit 1) and invoked by nothing otherwise. `docs/superpowers/plans/2026-10-19-phone-shell-tabs-chat.md:1308` already authorised retiring it. |
+
+### 3.1 The rest of the workflow drop (20 paths)
+
+`js-first-rewrite.yml` / `js-full-suite.yml` drop 44 paths between `b5573b8` and
+`5d2aa07`. §2 lists the guards among them, §3 above the four removals, the
+"deliberately not deleted" note below covers `.github/actions/prepare-gateway-lane`;
+the remaining 20 are here so no reader has to re-diff the workflows. None was
+deleted in this round, and **none is invoked by a live entry point** — but five
+of them are still named by `run:` / `script:` targets in the *gated*
+`js-release-validation.yml` (`scripts/agents-pool.sh` at `:190/:193/:437/:441`,
+`scripts/ci-js-first-packaged-lanes.sh` at `:239`, which in turn calls the three
+`connected-js-*` runners below). That workflow can never run (`if: false`), so
+they are dormant rather than broken — but **deleting one of those five means
+deleting its gated step in the same change**, or the gated file is left with a
+dangling target, which is exactly the defect §3 refuses to introduce for
+`prepare-gateway-lane`.
+
+| Path | What it did | Why it went | Still there? |
+|---|---|---|---|
+| `tests/scripts/connected-test-js-runner-test.sh` | Dispatch contract for `scripts/connected-test.sh` (scratch git repos + stub lanes) | It ran in the "Check JS-first connected-test dispatch and lock contracts" step, whose lanes are gone. Its subject `scripts/connected-test.sh` **still exists**, and `docs/testing.md` still recommends it for a local lane run | yes, uninvoked |
+| `tests/scripts/android-input-preflight-test.sh` | Contract for `scripts/lib/android-input-preflight.sh` (#2946) against a stateful fake `adb` | Same removed step. The subject **still exists**, and `docs/testing.md` § "Android input preflight (#2946)" still documents it — note the subject is the `lib/` helper; no `scripts/android-input-preflight.sh` ever existed | yes, uninvoked |
+| `tests/scripts/js-fixture-port-lock-test.sh` | Contract for `scripts/lib/js-fixture-port-lock.sh`: one lane owns an agents fixture port at a time | Only lanes take fixture ports, and no lane runs | yes, uninvoked |
+| `tests/scripts/avd-lock-test.sh` | Hermetic AVD-lock harness (#1702): inherited acquire state must not short-circuit a fresh gate | Guarded the emulator boot path that was removed | yes, uninvoked |
+| `tests/scripts/avd-lock-sharing-test.sh` | Cross-worktree AVD lock sharing (#1657): the lock file must not be per-checkout | Same emulator plumbing | yes, uninvoked |
+| `tests/scripts/connected-test-root-guard-test.sh` | `connected-test.sh` must resolve `ROOT_DIR` from its own location, not the caller's cwd (#2500) | It ran beside the lane step; the guard's subject survives, the CI invocation does not | yes, uninvoked |
+| `tests/scripts/connected-test-serial-ownership-test.sh` | Serial/AVD ownership between two concurrent lanes (#2863) | Needs two lanes to exist | yes, uninvoked |
+| `tests/scripts/shared-app-runner-cleanup-test.sh` | `scripts/connected-js-shared-app.sh` kills its sessions and releases its locks on every exit path (#3002/#2953) | The shared-app lane is retired with the pre-#2936 shared shell | yes, uninvoked |
+| `tests/scripts/start-local-avd-launcher-recovery-test.sh` | The emulator start path re-enables a HOME launcher a SIGKILLed lane left disabled (#2946) | CI no longer boots an AVD; local acceptance uses `scripts/start-emulator.ps1` | yes, uninvoked |
+| `scripts/test-gradle-output-lock.sh` | Gradle output-tree lock between `connected-test.sh` and the JVM gate (#2007) | Ran in the same removed step; no second concurrent Gradle writer is left in CI | yes, uninvoked |
+| `scripts/test-journey-quarantine-non-blocking.sh` | Self-test for the consumption half of flake quarantine (#2355/D36) | The quarantine registry's subject (the deleted journeys) is gone — see `check-journey-quarantine-expiry.sh` in §2.3 | yes, uninvoked |
+| `scripts/gateway-lane-fixture.py` | Host-side controller and oracle for the gateway emulator lane (#3086) | Lane retired; the release workflow that also used it is gated | yes, uninvoked |
+| `scripts/watch-ci.py` | Token-free, hang-proof Actions run watcher (#952); its `--self-test` was a CI step | Needs a remote, and its `--self-test` wiring was removed with the lanes. Its two default required checks (`JS checks and Android debug APK`, `Docker agents fixture contract`) still exist as jobs — the watcher is not stale, it is simply uninvoked. `process.md` § "Protected `main` checks" still names it **and still says its `--self-test` runs in that job** — that step was removed too | yes, uninvoked |
+| `scripts/agents-pool.sh` | Brings Docker agents fixtures up/down on fixed ports for the lanes (2243–2245, `scripts/agents-pool.sh:20`) | No lane uses a fixture port now; `docs/testing.md` still documents the local `up 2244` recipe. Its only remaining caller is the gated `js-release-validation.yml` | yes, uninvoked by a live entry point |
+| `scripts/ci-emulator-free-disk.sh` | Frees disk before the API 35 AVD | CI no longer boots an AVD | yes, uninvoked |
+| `scripts/ci-emulator-repair-sdk-tools.sh` | Repairs cmdline-tools and accepts licences before the AVD | Same | yes, uninvoked |
+| `scripts/ci-js-first-packaged-lanes.sh` | The wrapper that ran the fifteen lanes in order | No lane left to order; still named by the dormant lane scripts and by `docs/testing.md`'s banner | yes — `js-release-validation.yml:239` (`script:`, gated) |
+| `scripts/connected-js-smoke.sh` | Smoke lane runner | Its `JsShellPackagedSmokeTest` was deleted | yes — called only by the wrapper above |
+| `scripts/connected-js-files-docker.sh` | Files lane runner | Its `J10FilesBrowseEditJourneyTest` was deleted | yes — called only by the wrapper above |
+| `scripts/connected-js-key-vault-docker.sh` | Key-vault lane runner | Its `SshKeyVaultDockerJourneyTest` was deleted | yes — called only by the wrapper above |
 
 Deliberately **not** deleted, and why:
 
@@ -260,14 +312,21 @@ Deliberately **not** deleted, and why:
    half-deleting it — would have left exactly the dangling references the plan
    forbids.
 2. **Re-add a packaged journey lane only with a phone-shell journey.** The kept
-   `androidTest` tree is seven files: `DocumentContentIntentTest`,
-   `LegacyInstalledDataReaderTest`, `ScriptedImeSelectionTest`, two support
-   classes and the scripted IME trio. None is journey-shaped, and none is
+   `androidTest` tree is **ten tracked files: seven `.java`** —
+   `DocumentContentIntentTest`, `LegacyInstalledDataReaderTest`,
+   `ScriptedImeSelectionTest`, plus their helpers `GeneratedSshKeyTestSupport`,
+   `SshKeyVaultTestSupport`, `ScriptedIme` and `ScriptedTestIme` — **plus**
+   `AndroidManifest.xml`, `assets/terminal-logical-lines.js` and
+   `res/xml/scripted_test_ime.xml`. None is journey-shaped, and none is
    executed by CI. When the phone shell gets an instrumented journey, add the
    lane, the result guard and the J1 dispatch assertion *together*.
 3. **`build.yml` / `publish-release.yml`** can be deleted outright once nobody
    needs the upstream release contract readable in-tree; until then `if: false`
    is the honest state.
-4. The three guards marked `kept — dormant` in §2.1 should be wired into a kept
-   workflow step or explicitly deleted; two of the three could not even be
-   verified on this box.
+4. The **five** guards marked `kept — dormant` in §2.1 —
+   `check-test-validity.sh`, `check-test-validity-selftest.sh`,
+   `check-no-native-build.sh`, `check-file-size-hygiene.sh`,
+   `check-script-interpreter-hygiene.sh` — should each be wired into a kept
+   workflow step or explicitly deleted. None is verified on this box: the first
+   scans no test source at all, the self-test cannot complete, and the other
+   three are either over the time budget or simply never invoked.

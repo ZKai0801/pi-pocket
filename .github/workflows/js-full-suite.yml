@@ -4,8 +4,12 @@
 # this workflow re-runs it on a nightly cadence and on manual dispatch so the
 # D36 signal ("a red scheduled full-suite run on main is a feature-merge
 # freeze") exists again after #2934 hard-cut tests.yml with the Kotlin line.
-# The battery is deliberately the same steps: each lane's fail-closed result
-# guard is the tripwire if the two copies ever drift.
+# The battery is deliberately the same steps as js-first-rewrite.yml, so drift
+# between the two copies shows up as a different step list. There are no journey
+# lanes and no result guards left in either copy (Plan 5 Task 6 deleted their
+# subjects): the tripwire is the step list itself — the JS unit gate, the dev-shim
+# guard, the native unit and close-accounting regressions, and the APK identity
+# checks.
 #
 # D37 wiring this workflow kept from upstream. It used to be asserted by the
 # release-authorization self-test, which is retired with the release chain
@@ -16,7 +20,9 @@
 #   - one concurrency group keyed on github.ref with `queue: max` and NO
 #     cancel-in-progress, so scheduled runs are never cancelled and queued
 #     runs are never collapsed (#2736, #2825);
-#   - every lane stays fail-closed: no continue-on-error on a result guard.
+#   - every remaining step stays fail-closed: no step sets that key, and the
+#     result guards this property was written for are gone (Plan 5 Task 6), so
+#     the invariant is now simply "no step may opt out".
 #
 # js-release-validation.yml reacts to this workflow's green completions and
 # produces the exact-SHA release verdict artifact. Both halves of that release
