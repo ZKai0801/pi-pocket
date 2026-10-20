@@ -267,8 +267,38 @@ git commit -m "feat(native): a Keystore-sealed store for remembered credentials"
 
 ---
 
-### Task 3: The JS wrapper
+### R28 — Task 2 fix round and the Task 3 contract (authoritative, resolved 2026-10-19)
+Static review of Task 2 (no JDK on this box, so nothing compiled) found no Blocker
+but two IMPORTANTs and several minors:
+1. **The JVM test never runs the two Review Focus 1 failure modes.** `forTesting`
+   hard-wires the identity protector, so an *undecryptable* record is only
+   inspected, never exercised, and no test injects a failing write. Add seams:
+   `forTesting(File)` delegates to `forTesting(File, KeyProtector)` and
+   `forTesting(File, SecretRepository, KeyProtector)`; test (a) a protector whose
+   `open` throws → `resolve` returns `null`; (b) a repository whose `write` throws
+   → `put` throws `IOException` and leaves no record; (c) `put("not-a-uuid", …)` →
+   `IOException` **and** the caller's array is wiped; (d) a traversal-shaped id
+   (`../../x`) is refused.
+2. **A failed `delete` reads as "already gone".** Change the signature to
+   `synchronized boolean delete(String secretId) throws IOException`: a failed
+   commit must surface (Global Constraint: never leave an orphan), while a
+   malformed id still returns `false` without touching storage. `forgetSecret`'s
+   reject path becomes reachable; test it with the failing repository.
+3. Cache **one store per plugin instance** (lazy, synchronized) instead of
+   `forContext` per bridge call — otherwise the store's `synchronized` is
+   per-instance and every call reopens EncryptedSharedPreferences/Keystore.
+4. **Task 3 contract (amends the Task 3 text below):** the JS wrapper's `put`
+   takes an explicit kind —
+   `put(secret: string, kind: 'key-passphrase' | 'password', secretId?: string): Promise<string>`
+   — because `rememberSecret` validates and requires it. The wrapper's
+   `RememberedSecrets` interface therefore has three arguments, not two.
+Deferred: extracting one alias-parameterized Keystore protector shared with
+`CredentialHandleVault` (a later cleanup, not this plan); real at-rest proof, the
+Keystore alias, app-data wipe and the bridge round-trip stay Plan 5 device checks.
 
+---
+
+### Task 3: The JS wrapper
 **Files:**
 - Create: `src/native/rememberedSecrets.ts`
 - Test: `tests/unit/rememberedSecrets.test.ts`
