@@ -262,4 +262,18 @@ describe('connections store credentials', () => {
       auth: { kind: 'password', passwordCredentialId: '' },
     });
   });
+
+  it('a password record saved with an empty id forgets the old credential (R30.3)', async () => {
+    const d = deps([passwordHost]);
+    const store = createConnectionsStore(d);
+    store.load();
+    // The editor's "记住密码 off" record: the outcome the plan pins is this
+    // store path, not which control produced it.
+    await store.save({ ...passwordHost, auth: { kind: 'password', passwordCredentialId: '' } });
+
+    const written = d.save.mock.calls[0]![0];
+    expect(written.auth).toEqual({ kind: 'password', passwordCredentialId: '' });
+    expect(d.forget).toHaveBeenCalledWith('s-2');
+    expect(d.forget).toHaveBeenCalledTimes(1);
+  });
 });

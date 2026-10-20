@@ -967,7 +967,27 @@
         "save seals a supplied secret before writing the record",
         "forgets the just-sealed secret when the host write fails",
         "a failing forget never blocks a save or a remove",
-        "forgetSecrets clears the stored ids and rewrites the record"
+        "forgetSecrets clears the stored ids and rewrites the record",
+        "a password record saved with an empty id forgets the old credential (R30.3)"
+      ]
+    },
+    "tests/unit/connectionEditorAuth.test.ts": {
+      "suite": "connection editor auth",
+      "tests": [
+        "switches between the key and password fields",
+        "keeps save disabled until a key is chosen or a password is typed",
+        "hands a typed password to save and keeps it off the record",
+        "emits no secret and no remember flag when 记住口令 is off (R30.1)",
+        "saves the passphrase with rememberPassphrase when 记住口令 is on (R30.1)",
+        "carries a retained secret id through when nothing new is typed (R30.1)",
+        "writes an empty password id when 记住密码 is off, without a secret (R30.1)",
+        "keeps the editor open and shows an error when the save rejects (R30.2)",
+        "closes the editor after a save that resolves (R30.2)",
+        "saves a stale password host with a cleared id when the toggle is off (R30.3)",
+        "shows an error and keeps the row when forgetting the credentials fails (R30.4)",
+        "offers 已保存 and a clear action for a host that holds a password (R30.3)",
+        "shows no saved marker for a host that holds no credential",
+        "locks only the rows that reference a stored secret"
       ]
     },
     "tests/unit/connectionsStore.test.ts": {

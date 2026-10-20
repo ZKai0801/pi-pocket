@@ -1,14 +1,16 @@
 <script setup lang="ts">
 /**
  * Connections (tab 1, spec §8.2): the saved-host list. Green/red dot per host,
- * name and `host · user`, a key glyph for key-authed hosts, `…` for edit/delete,
- * `+` in the header to add. Empty state: a big 新增连接 button. Tapping a row
- * connects it (or closes it when it is already the live one); switching hosts
- * closes the current connection first (D8), which the store owns.
+ * name and `host · user`, a key glyph for key-authed hosts, a lock for a host
+ * that keeps a sealed credential, `…` for edit/delete, `+` in the header to
+ * add. Empty state: a big 新增连接 button. Tapping a row connects it (or closes
+ * it when it is already the live one); switching hosts closes the current
+ * connection first (D8), which the store owns.
  */
 import { computed, onMounted, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import KeyIcon from '../KeyIcon.vue';
+import LockIcon from './LockIcon.vue';
 import ConnectionEditor from './ConnectionEditor.vue';
 import { useConnectionsStore } from '../../stores/connections';
 import type { SavedHost } from '../../platform/android/hostStore';
@@ -20,6 +22,7 @@ const store = useConnectionsStore();
 
 const editing = ref<SavedHost | null>(null);
 const menuFor = ref<string | null>(null);
+const editorError = ref('');
 
 const editorOpen = computed(() => props.editorOpen === true);
 const connecting = computed(() => store.status === 'connecting');
@@ -30,6 +33,13 @@ function isKeyHost(host: SavedHost): boolean {
   return host.auth?.kind !== 'password' && Boolean(host.keyHandleId);
 }
 
+/** Whether the record reads a sealed secret from the native store at dial time. */
+function holdsSecret(host: SavedHost): boolean {
+  const auth = host.auth;
+  if (auth?.kind === 'password') return auth.passwordCredentialId.length > 0;
+  return auth?.kind === 'key' && auth.rememberPassphrase === true && Boolean(auth.secretId);
+}
+
 function setEditorOpen(open: boolean): void {
   emit('update:editorOpen', open);
 }
@@ -37,24 +47,55 @@ function setEditorOpen(open: boolean): void {
 function openNew(): void {
   editing.value = null;
   menuFor.value = null;
+  editorError.value = '';
   setEditorOpen(true);
 }
 
 function openEdit(host: SavedHost): void {
   editing.value = { ...host };
   menuFor.value = null;
+  editorError.value = '';
   setEditorOpen(true);
 }
 
 function closeEditor(): void {
   setEditorOpen(false);
   editing.value = null;
+  editorError.value = '';
 }
 
-function saveHost(host: SavedHost): void {
-  void store.save(host, editing.value?.name ?? null);
+/**
+ * R30.2: the sheet closes only once the store has written the record, so a
+ * rejected save (an unavailable credential store, a failed write) keeps what
+ * the user typed on screen with the reason beside it.
+ */
+async function saveHost(host: SavedHost, secret: string | null): Promise<void> {
+  const previousName = editing.value?.name ?? null;
+  editorError.value = '';
+  try {
+    await store.save(host, previousName, secret);
+  } catch {
+    editorError.value = '保存失败，请重试。';
+    return;
+  }
   closeEditor();
 }
+
+/** R30.4: an explicit clear must report its own failure rather than vanish. */
+async function forgetCredentials(): Promise<void> {
+  const name = editing.value?.name;
+  if (!name) return;
+  editorError.value = '';
+  try {
+    await store.forgetSecrets(name);
+  } catch {
+    editorError.value = '无法清除已保存凭据，请重试。';
+    return;
+  }
+  const updated = store.hosts.find((candidate) => candidate.name === name);
+  if (updated) editing.value = { ...updated };
+}
+
 
 function removeHost(name: string): void {
   menuFor.value = null;
@@ -72,8 +113,10 @@ function toggleConnect(host: SavedHost): void {
     <ConnectionEditor
       v-if="editorOpen"
       :host="editing"
+      :error="editorError"
       @save="saveHost"
       @cancel="closeEditor"
+      @forget-credentials="forgetCredentials"
     />
 
     <template v-else>
@@ -133,6 +176,15 @@ function toggleConnect(host: SavedHost): void {
               <span class="connections__address">{{ host.hostname }} · {{ host.user }}</span>
             </span>
             <KeyIcon v-if="isKeyHost(host)" :size="16" class="connections__key" />
+            <span
+              v-if="holdsSecret(host)"
+              class="connections__secret"
+              role="img"
+              aria-label="已保存凭据"
+              data-testid="host-secret-lock"
+            >
+              <LockIcon :size="16" />
+            </span>
           </button>
 
           <button
@@ -356,6 +408,12 @@ function toggleConnect(host: SavedHost): void {
 }
 
 .connections__key {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+}
+
+.connections__secret {
+  display: inline-flex;
   flex: 0 0 auto;
   color: var(--fg-muted);
 }
