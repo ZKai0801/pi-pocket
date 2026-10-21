@@ -13,13 +13,10 @@ import { useConnectionsStore } from '../../stores/connections';
 import { useProjectsStore } from '../../stores/projects';
 import { t } from '../../i18n';
 
-const emit = defineEmits<{ 'open-terminal': [path: string] }>();
-
 const store = useProjectsStore();
 const connections = useConnectionsStore();
 
 const connected = computed(() => connections.status === 'connected');
-const terminalPath = computed(() => store.selected);
 
 onMounted(() => { void store.discover(); });
 
@@ -99,20 +96,6 @@ function addCurrentDirectory(): void {
   const cwd = store.browse.cwd;
   if (cwd !== null) store.addProject(cwd);
 }
-
-function openTerminal(): void {
-  const path = terminalPath.value;
-  if (path !== null) emit('open-terminal', path);
-}
-
-/**
- * The header action opens this project's aplexer session, so with nothing
- * selected there is nothing to open. Saying so on the button beats a greyed
- * 打开终端 that looks live and does nothing (the previous behaviour).
- */
-const terminalLabel = computed(() => (
-  terminalPath.value === null ? t('projects.openTerminalDisabled') : t('projects.openTerminal')
-));
 </script>
 
 <template>
@@ -120,17 +103,6 @@ const terminalLabel = computed(() => (
     <header class="projects__bar">
       <h1 class="projects__title">{{ t('projects.title') }}</h1>
       <div class="projects__actions">
-        <button
-          type="button"
-          class="projects__terminal"
-          :aria-label="t('projects.openTerminal')"
-          data-testid="projects-open-terminal"
-          :disabled="terminalPath === null"
-          @click="openTerminal"
-        >
-          <AppIcon name="terminal" />
-          <span class="projects__terminal-label">{{ terminalLabel }}</span>
-        </button>
         <button type="button" class="projects__add" :aria-label="t('projects.add')" @click="void store.openBrowse()">
           <AppIcon name="plus" />
         </button>
@@ -308,32 +280,6 @@ const terminalLabel = computed(() => (
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-}
-
-.projects__terminal {
-  display: inline-flex;
-  min-height: 48px;
-  align-items: center;
-  gap: var(--sp-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  padding: 0 var(--sp-3);
-  color: var(--accent);
-  font: var(--fw-medium) var(--fs-300) var(--font-ui);
-}
-
-.projects__terminal:disabled {
-  opacity: var(--disabled-opacity);
-}
-
-.projects__terminal-label {
-  white-space: nowrap;
-}
-
-.projects__terminal:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--focus-ring-offset);
 }
 
 .projects__add {

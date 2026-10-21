@@ -95,8 +95,6 @@ export const ZH = {
 
   /* ---- 项目 -------------------------------------------------------- */
   'projects.title': '项目',
-  'projects.openTerminal': '打开终端',
-  'projects.openTerminalDisabled': '先选项目',
   'projects.add': '新增项目',
   'projects.search': '搜索项目',
   'projects.discovering': '正在发现项目…',
@@ -329,8 +327,6 @@ export const EN: Record<MessageKey, string> = {
   'editor.vaultUnreadable': 'Could not read the key vault.',
 
   'projects.title': 'Projects',
-  'projects.openTerminal': 'Open terminal',
-  'projects.openTerminalDisabled': 'Select a project first',
   'projects.add': 'Add project',
   'projects.search': 'Search projects',
   'projects.discovering': 'Discovering projects…',

@@ -748,7 +748,7 @@ onBeforeUnmount(() => {
         @update:editor-open="setEditorOpen"
         @update:keys-open="setKeysOpen"
       />
-      <ProjectsList v-show="activeTab === 'projects'" @open-terminal="openTerminal" />
+      <ProjectsList v-show="activeTab === 'projects'" />
       <SettingsTab v-show="activeTab === 'settings'" />
       <ChatScreen
         v-show="activeTab === 'sessions' && sessions.open !== null"

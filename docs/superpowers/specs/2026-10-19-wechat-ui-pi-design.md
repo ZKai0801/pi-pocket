@@ -279,7 +279,10 @@ interpreted.
 
 ### 8.7 Terminal (retained, secondary)
 
-The reused terminal is reachable from a project or session as **打开终端**:
+The reused terminal is reachable from a session's header as **打开终端**
+(the 项目 page carried a copy of the action and no longer does: the
+session header is the one that knows which project the conversation
+belongs to, while the project list only knew a folder path):
 attach to an aplexer session for that workspace (existing
 `sessions attach` + `TerminalViewport`), giving a real escape hatch for
 anything the chat surface does not cover. This is the concrete home for the
