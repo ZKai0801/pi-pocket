@@ -13,7 +13,12 @@ import KeyIcon from '../KeyIcon.vue';
 import LockIcon from './LockIcon.vue';
 import ConnectionEditor from './ConnectionEditor.vue';
 import { useConnectionsStore } from '../../stores/connections';
-import type { SavedHost } from '../../platform/android/hostStore';
+import { redactForLog } from '../../credentials/redactForLog';
+import {
+  SAVED_HOST_SENTENCE,
+  type SavedHost,
+  type SavedHostProblem,
+} from '../../platform/android/hostStore';
 
 const props = defineProps<{ editorOpen?: boolean; keysOpen?: boolean }>();
 const emit = defineEmits<{
@@ -22,6 +27,48 @@ const emit = defineEmits<{
 }>();
 
 const store = useConnectionsStore();
+
+/**
+ * The editor's words for each saved-host validation problem (R35). The store
+ * still authors the exact English sentences; the list only matches a rejected
+ * save's message against them so the cause can be shown in Chinese (R44).
+ */
+const PROBLEM_CAUSE: Record<SavedHostProblem, string> = {
+  name: '请填写名称。',
+  hostname: '请填写主机名或 IP 地址。',
+  user: '请填写登录用户。',
+  port: '端口需在 1–65535 之间。',
+  key: '请从密钥库选择一把密钥。',
+};
+
+const SAVED_HOST_CAUSE = new Map<string, string>(
+  (Object.keys(PROBLEM_CAUSE) as SavedHostProblem[])
+    .map((problem) => [SAVED_HOST_SENTENCE[problem], PROBLEM_CAUSE[problem]]),
+);
+
+/** A password host whose sealed credential was not available at dial time. */
+const PASSWORD_CREDENTIAL_REFUSAL = /^“(.+)” uses a password credential that is not available yet\.$/;
+
+/** The actionable Chinese cause for a known rejection, or null when unknown. */
+function causeFor(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  const known = SAVED_HOST_CAUSE.get(error.message);
+  if (known) return known;
+  const refusal = PASSWORD_CREDENTIAL_REFUSAL.exec(error.message);
+  return refusal ? `「${refusal[1]}」使用的密码凭据尚不可用。` : null;
+}
+
+/**
+ * The generic sentence always stays; a known cause is appended after a space
+ * (R44). An unknown cause is not shown — it would be English or internal — but
+ * it is still logged, through the redaction helper, so the failure is
+ * diagnosable without the secret ever reaching the log.
+ */
+function failureLine(generic: string, error: unknown): string {
+  console.error(redactForLog(error));
+  const cause = causeFor(error);
+  return cause ? `${generic} ${cause}` : generic;
+}
 
 const editing = ref<SavedHost | null>(null);
 const menuFor = ref<string | null>(null);
@@ -68,6 +115,14 @@ function closeEditor(): void {
 }
 
 /**
+ * R36: pressing 保存 is the retry the list's error was waiting for, so the
+ * stale sentence must not be able to mask a locally refused save.
+ */
+function clearEditorError(): void {
+  editorError.value = '';
+}
+
+/**
  * R30.2: the sheet closes only once the store has written the record, so a
  * rejected save (an unavailable credential store, a failed write) keeps what
  * the user typed on screen with the reason beside it.
@@ -77,8 +132,8 @@ async function saveHost(host: SavedHost, secret: string | null): Promise<void> {
   editorError.value = '';
   try {
     await store.save(host, previousName, secret);
-  } catch {
-    editorError.value = '保存失败，请重试。';
+  } catch (error) {
+    editorError.value = failureLine('保存失败，请重试。', error);
     return;
   }
   closeEditor();
@@ -91,8 +146,8 @@ async function forgetCredentials(): Promise<void> {
   editorError.value = '';
   try {
     await store.forgetSecrets(name);
-  } catch {
-    editorError.value = '无法清除已保存凭据，请重试。';
+  } catch (error) {
+    editorError.value = failureLine('无法清除已保存凭据，请重试。', error);
     return;
   }
   const updated = store.hosts.find((candidate) => candidate.name === name);
@@ -118,6 +173,7 @@ function toggleConnect(host: SavedHost): void {
       :error="editorError"
       :keys-open="keysOpen === true"
       @save="saveHost"
+      @retry="clearEditorError"
       @cancel="closeEditor"
       @forget-credentials="forgetCredentials"
       @update:keys-open="emit('update:keysOpen', $event)"

@@ -995,7 +995,18 @@
         "locks only the rows that reference a stored secret",
         "states a validation problem in Chinese (F4)",
         "drops the validation problem as soon as the field is edited (F5, R36)",
-        "keeps a rejected save from the list in front of a local edit until the save is retried (R36)"
+        "keeps a rejected save from the list in front of a local edit until the save is retried (R36)",
+        "appends a known Chinese cause to a rejected save (4b)",
+        "shows only the generic line for an unknown cause and logs it redacted (4b)",
+        "redacts private-key material from a log line (4b)",
+        "redacts quoted secrets with spaces and JSON-shaped keys (4b)",
+        "redacts through escaped quotes without leaking the tail (4b)",
+        "never throws when a value cannot be converted to a string (4b)",
+        "never throws when an Error message is not a string (4b)",
+        "redacts at the 32-character material threshold and keeps short words (4b)",
+        "closes the editor and clears the error after a retried save succeeds (4b)",
+        "does not let a stale list error mask a locally refused save (4b, R36)",
+        "carries a known cause through a failed clear and logs an unknown one redacted (4b)"
       ]
     },
     "tests/unit/connectionsStore.test.ts": {

@@ -38,6 +38,7 @@ vi.mock('../../src/stores/connections', () => ({ useConnectionsStore: () => stor
 
 import ConnectionEditor from '../../src/components/connections/ConnectionEditor.vue';
 import ConnectionsList from '../../src/components/connections/ConnectionsList.vue';
+import { redactForLog } from '../../src/credentials/redactForLog';
 
 const PASSWORD_HOST: SavedHost = {
   name: 'pw', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
@@ -536,5 +537,231 @@ describe('connection editor auth', () => {
     expect(store.save).toHaveBeenCalledTimes(2);
     expect(q(list.root, 'editor-error')).toBeNull();
     expect(q(list.root, 'password-input')).toBeNull();
+  });
+
+  it('appends a known Chinese cause to a rejected save (4b)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = fakeStore([PASSWORD_HOST]);
+      store.save
+        .mockRejectedValueOnce(new Error('Give the host a name.'))
+        .mockRejectedValueOnce(new Error('“pw” uses a password credential that is not available yet.'));
+      const list = mountList(store);
+      await settle();
+      await openEditorFor(list.root, PASSWORD_HOST);
+
+      await pressSave(list.root);
+      expect(q(list.root, 'editor-error')?.textContent)
+        .toBe('保存失败，请重试。 请填写名称。');
+
+      // The store's password-credential refusal is the other known cause.
+      await pressSave(list.root);
+      expect(q(list.root, 'editor-error')?.textContent)
+        .toBe('保存失败，请重试。 「pw」使用的密码凭据尚不可用。');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('shows only the generic line for an unknown cause and logs it redacted (4b)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = fakeStore([PASSWORD_HOST]);
+      const secret = 'hunter2';
+      store.save.mockRejectedValue(new Error(`keystore refused: passphrase=${secret}`));
+      const list = mountList(store);
+      await settle();
+      await openEditorFor(list.root, PASSWORD_HOST);
+
+      await pressSave(list.root);
+
+      expect(q(list.root, 'editor-error')?.textContent).toBe('保存失败，请重试。');
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const logged = String(consoleError.mock.calls[0]?.[0] ?? '');
+      expect(logged).toContain('Error: keystore refused');
+      expect(logged).not.toContain(secret);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('redacts private-key material from a log line (4b)', () => {
+    const pem = [
+      '-----BEGIN OPENSSH PRIVATE KEY-----',
+      'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW',
+      '-----END OPENSSH PRIVATE KEY-----',
+    ].join('\n');
+    const base64Run = 'QWxleGV5U2VjcmV0MTIzNDU2Nzg5MEFCQ0RFRkdISUpLTE1OT1A=';
+    const hexRun = 'deadbeef'.repeat(8);
+    const logged = redactForLog(new TypeError(
+      `vault failed: ${pem} passphrase=hunter2 sealed=${base64Run} key=${hexRun}`,
+    ));
+
+    expect(logged).toContain('TypeError');
+    expect(logged).not.toContain('hunter2');
+    expect(logged).not.toContain('OPENSSH PRIVATE KEY');
+    expect(logged).not.toContain('b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW');
+    expect(logged).not.toContain(base64Run);
+    expect(logged).not.toContain(hexRun);
+    expect(logged).toContain('passphrase=<redacted>');
+  });
+
+  it('redacts quoted secrets with spaces and JSON-shaped keys (4b)', () => {
+    const cases: Array<[string, string[]]> = [
+      ['passphrase="correct horse battery staple"', ['correct', 'horse', 'battery', 'staple']],
+      ["passphrase='my secret words'", ['my secret words', 'words']],
+      ['passphrase: "two words"', ['two words', 'words']],
+      ['{"passphrase":"my secret phrase"}', ['my secret phrase', 'secret phrase']],
+      // A JSON key that does not itself contain "phrase", so the value word can
+      // be asserted without matching the preserved key.
+      ['{"secret":"my secret phrase"}', ['secret phrase', 'phrase']],
+    ];
+    for (const [message, leaked] of cases) {
+      const logged = redactForLog(new Error(message));
+      expect(logged, message).toContain('<redacted>');
+      for (const word of leaked) expect(logged, `${message} leaked ${word}`).not.toContain(word);
+    }
+  });
+
+  it('redacts through escaped quotes without leaking the tail (4b)', () => {
+    const cases: Array<[string, string]> = [
+      ['passphrase="\\"hunter2"', 'hunter2'],
+      ['{"passphrase":"\\"hunter2"}', 'hunter2'],
+      ["passphrase='\\'hunter2'", 'hunter2'],
+      ['{"passphrase":"my \\"secret\\" phrase"}', 'secret'],
+      ['password="alpha \\" beta"', 'beta'],
+    ];
+    for (const [message, tail] of cases) {
+      const logged = redactForLog(new Error(message));
+      expect(logged, message).toContain('<redacted>');
+      expect(logged, `${message} leaked ${tail}`).not.toContain(tail);
+    }
+  });
+
+  it('never throws when a value cannot be converted to a string (4b)', () => {
+    const nullPrototype = Object.create(null);
+    const throwingToString = {
+      toString: () => {
+        throw new TypeError('no string for you');
+      },
+    };
+
+    for (const value of [nullPrototype, throwingToString]) {
+      const logged = redactForLog(value);
+      expect(typeof logged).toBe('string');
+      expect(logged).toBe('UnknownError: <unrepresentable>');
+    }
+
+    const error = new Error('placeholder');
+    error.name = 'UnrepresentableMessageError';
+    Object.defineProperty(error, 'message', { value: throwingToString, configurable: true });
+    const logged = redactForLog(error);
+    expect(typeof logged).toBe('string');
+    expect(logged).toBe('UnrepresentableMessageError: <unrepresentable>');
+  });
+
+  it('never throws when an Error message is not a string (4b)', () => {
+    function withMessage(name: string, message: unknown): Error {
+      const error = new Error('placeholder');
+      error.name = name;
+      Object.defineProperty(error, 'message', { value: message, configurable: true });
+      return error;
+    }
+    const cases = [
+      withMessage('NullMessageError', null),
+      withMessage('UndefinedMessageError', undefined),
+      withMessage('ObjectMessageError', { secret: 'hunter2' }),
+    ];
+    for (const error of cases) {
+      const logged = redactForLog(error);
+      expect(typeof logged).toBe('string');
+      expect(logged.startsWith(`${error.name}: `)).toBe(true);
+      expect(logged).not.toContain('hunter2');
+    }
+  });
+
+  it('redacts at the 32-character material threshold and keeps short words (4b)', () => {
+    const hex32 = 'deadbeef'.repeat(4);
+    const base64Run39 = 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t';
+    const logged = redactForLog(new Error(`hex=${hex32} b64=${base64Run39} code=ECONNREFUSED`));
+
+    expect(logged).not.toContain(hex32);
+    expect(logged).not.toContain(base64Run39);
+    expect(logged).toContain('ECONNREFUSED');
+  });
+
+  it('closes the editor and clears the error after a retried save succeeds (4b)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = fakeStore([PASSWORD_HOST]);
+      store.save.mockRejectedValueOnce(new Error('the store is unavailable'));
+      const list = mountList(store);
+      await settle();
+      await openEditorFor(list.root, PASSWORD_HOST);
+
+      await pressSave(list.root);
+      expect(q(list.root, 'editor-error')?.textContent).toBe('保存失败，请重试。');
+
+      await pressSave(list.root);
+
+      expect(store.save).toHaveBeenCalledTimes(2);
+      expect(q(list.root, 'editor-error')).toBeNull();
+      expect(q(list.root, 'password-input')).toBeNull();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('does not let a stale list error mask a locally refused save (4b, R36)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = fakeStore([PASSWORD_HOST]);
+      store.save.mockRejectedValueOnce(new Error('Give the host a name.'));
+      const list = mountList(store);
+      await settle();
+      await openEditorFor(list.root, PASSWORD_HOST);
+
+      await pressSave(list.root);
+      expect(q(list.root, 'editor-error')?.textContent).toBe('保存失败，请重试。 请填写名称。');
+
+      await setChecked(input(list.root, 'remember-password'), false);
+      await typeInto(input(list.root, 'password-input'), 'fresh-pw');
+      await pressSave(list.root);
+
+      expect(store.save).toHaveBeenCalledTimes(1);
+      expect(q(list.root, 'editor-error')?.textContent)
+        .toBe('未开启「记住密码」时无法保存新密码，请开启后重试。');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('carries a known cause through a failed clear and logs an unknown one redacted (4b)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = fakeStore([PASSWORD_HOST]);
+      store.forgetSecrets.mockRejectedValueOnce(new Error('Enter the SSH user.'));
+      const list = mountList(store);
+      await settle();
+      await openEditorFor(list.root, PASSWORD_HOST);
+
+      (q(list.root, 'forget-credentials') as HTMLButtonElement).click();
+      await settle();
+      expect(q(list.root, 'editor-error')?.textContent)
+        .toBe('无法清除已保存凭据，请重试。 请填写登录用户。');
+
+      consoleError.mockClear();
+      store.forgetSecrets.mockRejectedValueOnce(new Error('keystore down passphrase=hunter2'));
+      (q(list.root, 'forget-credentials') as HTMLButtonElement).click();
+      await settle();
+
+      expect(q(list.root, 'editor-error')?.textContent).toBe('无法清除已保存凭据，请重试。');
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const logged = String(consoleError.mock.calls[0]?.[0] ?? '');
+      expect(logged).toContain('Error: keystore down');
+      expect(logged).not.toContain('hunter2');
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

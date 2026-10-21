@@ -130,7 +130,7 @@ export function savedHostProblem(host: SavedHost): SavedHostProblem | null {
 }
 
 /** The shared app's copy for each problem: the sentences it has always shown. */
-const SAVED_HOST_SENTENCE: Record<SavedHostProblem, string> = {
+export const SAVED_HOST_SENTENCE: Record<SavedHostProblem, string> = {
   name: 'Give the host a name.',
   hostname: 'Enter a hostname or IP address.',
   user: 'Enter the SSH user.',

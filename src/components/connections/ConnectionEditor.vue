@@ -43,6 +43,8 @@ const PROBLEM_COPY: Record<SavedHostProblem, string> = {
 const props = defineProps<{ host?: SavedHost | null; error?: string; keysOpen?: boolean }>();
 const emit = defineEmits<{
   save: [host: SavedHost, secret: string | null];
+  /** The user pressed 保存: the list's last failure is being retried (R36). */
+  retry: [];
   cancel: [];
   'forget-credentials': [];
   'update:keys-open': [open: boolean];
@@ -166,6 +168,9 @@ function typedSecret(): string | null {
 }
 
 function submit(): void {
+  // Pressing 保存 is the retry that retires the list's stale failure sentence,
+  // so a local refusal below is never masked by it (R36).
+  emit('retry');
   const host: SavedHost = {
     name: form.name.trim(),
     hostname: form.hostname.trim(),
