@@ -99,7 +99,7 @@ R35 kept `validateSavedHost`'s English sentences because "the shared app calls
 it". Re-verified: `src/sharedApp/` has **no HTML entry** (`index.html:17` loads
 only `/src/main.ts`; the built `dist/` has no `sharedApp` chunk) and nothing
 outside `src/sharedApp/` imports it — so the shared app is **not reachable in
-the packaged app**. But `src/platform/android/hostStore.ts:169` (`save()`) is a
+the packaged app**. But `src/platform/android/hostStore.ts:170` (`save()`) is a
 **live** caller of `validateSavedHost`, and its thrown English sentence
 reaches the user through `ConnectionsList.vue:81` → `保存失败，请重试。` (the
 cause is discarded — see §3.2).
@@ -151,10 +151,10 @@ decision.
 A second, distinct path exists and is **not** fixed by this item:
 `hostStore.resolve()` throws `MissingHostCredential` (the class is declared at
 `src/platform/android/hostStore.ts:63`, its message is the `super(...)` at
-`:68`, and it is thrown at `:244`), which reaches the user through
-`connections.ts:359`/`:377`/`:386` (`state.lastError = errorMessage(error)`)
-→ `ConnectionsList.vue:135`. Two more English throws live in that same file —
-`:242` (a password credential that is not available yet) and `:262` (no saved
+`:68`, and it is thrown at `:246`), which reaches the user through
+`connections.ts:399`/`:417`/`:426` (`state.lastError = errorMessage(error)`)
+→ `ConnectionsList.vue:206`. Two more English throws live in that same file —
+`:244` (a password credential that is not available yet) and `:264` (no saved
 host for the request). These are a different action (dialing, not saving) and
 a different contract family; they stay English by decision (R41), and the plan
 must say so rather than let the boundary note imply otherwise.

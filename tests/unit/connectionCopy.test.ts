@@ -34,19 +34,19 @@
  *
  * EXCEPTION (JS-owned, but a *contract* family — R41): `hostStore.ts`'s
  * `MissingHostCredential` (declared at `src/platform/android/hostStore.ts:63`,
- * its message the `super(...)` at `:68`, thrown at `:245`), the two other
- * English throws in the same file (`:243`, a password credential that is not
- * available yet; `:263`, no saved host for the request), and
+ * its message the `super(...)` at `:68`, thrown at `:246`), the two other
+ * English throws in the same file (`:244`, a password credential that is not
+ * available yet; `:264`, no saved host for the request), and
  * `UnsupportedHostAuth` in `src/credentials/buildSshCredential.ts`. These are
  * JS-owned, but they are a store/contract surface rather than screen copy: their
  * consumers include the unreachable shared app, so changing them is a contract
  * change rather than a translation. `validateSavedHost`'s five sentences
- * (`hostStore.ts:132-138`) are the same case — they stay byte-identical because
+ * (`hostStore.ts:133-139`) are the same case — they stay byte-identical because
  * the wrapper is a public contract with a test pinning the exact sentences
  * (`tests/unit/hostStoreAuth.test.ts`), not because the shared app is
  * reachable. Fixing any of these is out of this plan's scope. The
- * `MissingHostCredential` a user actually sees arrives via `connections.ts:359`/
- * `:377`/`:386` → `ConnectionsList.vue:135`; no task in this plan makes it
+ * `MissingHostCredential` a user actually sees arrives via `connections.ts:399`/
+ * `:417`/`:426` → `ConnectionsList.vue:206`; no task in this plan makes it
  * Chinese.
  *
  * The last tests below pin that boundary, so this note cannot rot silently:

@@ -212,11 +212,11 @@ What remains English on this path is therefore two kinds of family:
   `src/native/sshKeyVault.ts`.
 - **JS-owned but a *contract* family (out of this plan's scope, R41):**
   `src/platform/android/hostStore.ts`'s `MissingHostCredential` (declared at
-  `:63`, message at `:68`, thrown at `:245`), the two other English throws in
-  that file (`:243`, `:263`), and `UnsupportedHostAuth` in
+  `:63`, message at `:68`, thrown at `:246`), the two other English throws in
+  that file (`:244`, `:264`), and `UnsupportedHostAuth` in
   `src/credentials/buildSshCredential.ts`. Changing these is a contract change,
   not a translation. The `MissingHostCredential` a user sees arrives through
-  `connections.ts:359`/`:377`/`:386` → `ConnectionsList.vue:135`.
+  `connections.ts:399`/`:417`/`:426` → `ConnectionsList.vue:206`.
 
 Until then the boundary is explicit and enforced: the note at the top of
 `tests/unit/connectionCopy.test.ts` names every family that stays English

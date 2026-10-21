@@ -97,8 +97,8 @@ tree (do not redo):
   `MissingHostCredential` refusals Chinese.** Task 3 (R44) does not reach
   them: they are thrown from `resolve()`, not from `save()`, and the
   `MissingHostCredential` that reaches the user does so through
-  `connections.ts:359`/`:377`/`:386` (`state.lastError = errorMessage(error)`)
-  → `ConnectionsList.vue:135`. List that
+  `connections.ts:399`/`:417`/`:426` (`state.lastError = errorMessage(error)`)
+  → `ConnectionsList.vue:206`. List that
   family as *known English, with the file and the reason*, and say plainly
   that fixing it is out of this plan's scope.
 - **R42** `validateSavedHost`'s English sentences stay **byte-identical**. The
@@ -238,8 +238,8 @@ tree (do not redo):
     **Do not claim any task in this plan makes them Chinese** — Task 3 does
     not reach them: `MissingHostCredential` is thrown from `resolve()`, not
     from `save()`, and the one the user sees arrives through
-    `connections.ts:359`/`:377`/`:386` (`state.lastError = errorMessage(error)`)
-    → `ConnectionsList.vue:135`.
+    `connections.ts:399`/`:417`/`:426` (`state.lastError = errorMessage(error)`)
+    → `ConnectionsList.vue:206`.
   Keep the closing assertion that pins the boundary, extend it to assert that
   `keyManagement.ts` is **not** in the note's family list, and make sure the
   note no longer claims the `validateSavedHost` English sentences are a
