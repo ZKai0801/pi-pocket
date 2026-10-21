@@ -27,9 +27,16 @@ const html = computed(() => renderChatMarkdown(props.text));
 </template>
 
 <style scoped>
+/* A bubble is a share of the screen, not of its own content: `max-width` is
+   the one phone-width ratio the chat sets (78%), capped in px so a wide
+   preview shell does not grow a chat column with it. `min-width: 0` lets the
+   content box below shrink past its own min-content size — without it one
+   long unbreakable line (a `pre` line, a URL) sets the bubble's floor and
+   pushes the whole transcript wider than the viewport. */
 .bubble {
   display: flex;
-  max-width: 85%;
+  min-width: 0;
+  max-width: min(var(--chat-bubble-max-width, 78%), 480px);
   flex: 0 0 auto;
 }
 
@@ -42,7 +49,14 @@ const html = computed(() => renderChatMarkdown(props.text));
 }
 
 .bubble__content {
-  overflow-wrap: break-word;
+  /* `min-width: 0` is what makes the 78% cap hold: as a flex item this box's
+     automatic minimum size is otherwise its min-content size, which a `pre`
+     line or a long token inflates past the screen. `anywhere` (not
+     `break-word`) also shrinks the min-content contribution itself, so long
+     prose wraps instead of widening the bubble. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border-radius: var(--r-lg);
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-400);
@@ -106,10 +120,16 @@ const html = computed(() => renderChatMarkdown(props.text));
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: var(--fs-300);
+  /* Inline code wraps rather than setting the bubble's floor. */
+  overflow-wrap: anywhere;
 }
 
+/* A fenced block keeps its line structure and scrolls inside the bubble:
+   capped at the bubble's width, it can no longer push the bubble (and with
+   it the transcript) past the screen edge. */
 .bubble__content :deep(pre) {
   margin: 0 0 var(--sp-2);
+  max-width: 100%;
   overflow-x: auto;
   border-radius: var(--r-md);
   background: var(--surface);
