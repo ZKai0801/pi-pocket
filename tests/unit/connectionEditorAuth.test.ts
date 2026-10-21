@@ -256,6 +256,18 @@ describe('connection editor auth', () => {
     expect(JSON.stringify(record)).not.toContain('p@ssw0rd-typed');
   });
 
+  it('keeps the stored password id and emits the typed secret when 记住密码 is on (R30.1)', async () => {
+    const editor = mountEditor(PASSWORD_HOST);
+    await settle();
+    await typeInto(input(editor.root, 'password-input'), 'fresh-pw');
+    expect(input(editor.root, 'remember-password').checked).toBe(true);
+    await pressSave(editor.root);
+
+    const [record, secret] = editor.save.mock.calls[0] as [SavedHost, string | null];
+    expect(secret).toBe('fresh-pw');
+    expect(record.auth).toEqual({ kind: 'password', passwordCredentialId: 'p-1' });
+  });
+
   it('emits no secret and no remember flag when 记住口令 is off (R30.1)', async () => {
     const editor = mountEditor();
     await settle();
@@ -311,7 +323,7 @@ describe('connection editor auth', () => {
     expect(record.auth).toEqual({ kind: 'password', passwordCredentialId: '' });
   });
 
-  it('emits no typed password when 记住密码 is off (R30.1)', async () => {
+  it('refuses to save a typed password while 记住密码 is off (4a)', async () => {
     const editor = mountEditor();
     await settle();
     await fillBasics(editor.root);
@@ -321,11 +333,35 @@ describe('connection editor auth', () => {
     await setChecked(input(editor.root, 'remember-password'), false);
     await pressSave(editor.root);
 
-    expect(editor.save).toHaveBeenCalledTimes(1);
-    const [record, secret] = editor.save.mock.calls[0] as [SavedHost, string | null];
-    expect(secret).toBeNull();
-    expect(record.auth).toEqual({ kind: 'password', passwordCredentialId: '' });
-    expect(JSON.stringify(record)).not.toContain('pw-typed');
+    expect(editor.save).not.toHaveBeenCalled();
+    expect(q(editor.root, 'editor-error')?.textContent)
+      .toBe('未开启「记住密码」时无法保存新密码，请开启后重试。');
+    // The refusal is the signal; the typed value stays visible in the field.
+    expect(input(editor.root, 'password-input').value).toBe('pw-typed');
+  });
+
+  it('shows the remember hint only while the password toggle is off (4a)', async () => {
+    const editor = mountEditor();
+    await settle();
+    (q(editor.root, 'auth-password') as HTMLButtonElement).click();
+    await settle();
+    expect(q(editor.root, 'remember-password-hint')).toBeNull();
+
+    await setChecked(input(editor.root, 'remember-password'), false);
+    expect(q(editor.root, 'remember-password-hint')?.textContent)
+      .toBe('开启「记住密码」后才能保存新密码。');
+
+    (q(editor.root, 'auth-key') as HTMLButtonElement).click();
+    await settle();
+    expect(q(editor.root, 'remember-password-hint')).toBeNull();
+
+    (q(editor.root, 'auth-password') as HTMLButtonElement).click();
+    await settle();
+    expect(q(editor.root, 'remember-password-hint')?.textContent)
+      .toBe('开启「记住密码」后才能保存新密码。');
+
+    await setChecked(input(editor.root, 'remember-password'), true);
+    expect(q(editor.root, 'remember-password-hint')).toBeNull();
   });
 
   it('keeps the editor open and shows an error when the save rejects (R30.2)', async () => {

@@ -181,8 +181,15 @@ function submit(): void {
     error.value = PROBLEM_COPY[problem];
     return;
   }
+  // 4a: with 记住密码 off, a typed password has no secret to emit — it can only
+  // be dropped or sealed under an id the record does not reference. Refuse.
+  const secret = typedSecret();
+  if (!isKeyAuth.value && form.password.length > 0 && secret === null) {
+    error.value = '未开启「记住密码」时无法保存新密码，请开启后重试。';
+    return;
+  }
   error.value = '';
-  emit('save', host, typedSecret());
+  emit('save', host, secret);
 }
 </script>
 
@@ -305,6 +312,11 @@ function submit(): void {
           <input v-model="form.rememberPassword" type="checkbox" data-testid="remember-password" />
           <span class="connection-editor__toggle-label">记住密码</span>
         </label>
+        <p
+          v-if="!form.rememberPassword"
+          class="connection-editor__hint"
+          data-testid="remember-password-hint"
+        >开启「记住密码」后才能保存新密码。</p>
       </template>
 
       <div v-if="hasStoredCredential" class="connection-editor__stored">
