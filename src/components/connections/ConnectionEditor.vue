@@ -220,7 +220,7 @@ function submit(): void {
     <form class="connection-editor__form" @input="clearProblem" @change="clearProblem" @submit.prevent="submit">
       <label class="connection-editor__field">
         <span class="connection-editor__label">{{ t('editor.name') }}</span>
-        <input v-model="form.name" type="text" autocomplete="off" placeholder="kai" />
+        <input v-model="form.name" type="text" autocomplete="off" placeholder="dev box" />
       </label>
 
       <label class="connection-editor__field">
@@ -235,7 +235,7 @@ function submit(): void {
 
       <label class="connection-editor__field">
         <span class="connection-editor__label">{{ t('editor.user') }}</span>
-        <input v-model="form.user" type="text" autocomplete="off" placeholder="kai" />
+        <input v-model="form.user" type="text" autocomplete="off" placeholder="dev" />
       </label>
 
       <fieldset class="connection-editor__auth">
