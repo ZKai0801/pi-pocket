@@ -1027,7 +1027,12 @@
         "saves and removes through the host store, closing a removed live host (D8)",
         "treats a resolved { ok: false } dial as a failure, not a connection (D8)",
         "leaves a live connection alone when the named host is unknown (D8)",
-        "does not dial twice when connect() is re-entered (D8 interleaving)"
+        "does not dial twice when connect() is re-entered (D8 interleaving)",
+        "clears the dial error when the host it names is saved (F6)",
+        "keeps a dial error about another host when a different host is saved (F6)",
+        "clears the dial error when the host it names is saved under a new name (F6)",
+        "clears the dial error when the host it names is removed (F6)",
+        "keeps the dial error when the save that would clear it is rejected (F6)"
       ]
     },
     "tests/unit/hostStoreAuth.test.ts": {

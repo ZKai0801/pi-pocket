@@ -132,20 +132,29 @@ record.
 
 ## New finding
 
-### F6 — a stale error line survives a successful save (open, minor)
+### F6 — a stale error line survives a successful save (**fixed; unit-tested, not re-walked**)
 
-`52-rerun-key-host-saved.png`: the red line still reads
-无法连接到「pw-host」。 after `key-host` was saved successfully. `store.lastError`
-is cleared when a connect succeeds (`src/stores/connections.ts:382`) and set
-again when a save or a connect fails (`:399`/`:417`/`:426`/`:433`), but a
-**successful** save never resets it. A user who fixes the previous failure and
-saves sees a red bar while the new row appears beneath it, which reads as
-"this one failed too".
+`52-rerun-key-host-saved.png`: the red line still read
+无法连接到「pw-host」。 after `key-host` was saved. `store.lastError` was cleared
+when a connect succeeded and set again when a dial failed, but a **successful**
+save never reset it, so a user who fixed the previous failure and saved saw a
+red bar beside the new row.
 
-Not fixed in Plan 6 — it is a copy-lifecycle defect in the same family as F5,
-but out of this plan's stated scope. The one-line fix is a `state.lastError =
-null` on the save success path, with a test that a failed connect followed by a
-successful save clears the line.
+Fixed in `src/stores/connections.ts`: the message now carries the host it is
+about (`lastErrorHost`), and writing *that* record — under its own name, or as
+the old half of a rename — clears it. The scope is deliberate: saving a
+different host leaves the message alone, because that failure is still true.
+
+That distinction matters for reading the screenshot above: the line there is
+about `pw-host` while the saved row is `key-host`, so under this fix it would
+still be present, and correctly so — the sentence is not stale, it is about a
+host the save did not touch. The case F6 describes is the other one: fail to
+connect to a host, edit *that* host, save — the line now goes away.
+
+Covered by five unit tests in `tests/unit/connectionsStore.test.ts` (same host,
+other host, rename, removal, and a rejected save that must keep the message).
+Not re-walked on a device: the emulator was gone by the time this landed, and a
+device pass would only re-confirm what the store tests pin down.
 
 ## What this walk does not prove
 

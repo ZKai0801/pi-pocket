@@ -164,6 +164,26 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
    */
   const credential = reactive({ busy: false });
 
+  /**
+   * F6: `lastError` is a message *about a host* — a dial that failed, or a
+   * connect naming a record that is not there. Rewriting that host's record
+   * makes the message describe a state that no longer exists, so a successful
+   * save clears it; saving a *different* host leaves it alone, because that
+   * failure is still true. `null` means the message has no subject, and a
+   * message with no subject is never cleared by a save.
+   */
+  let lastErrorHost: string | null = null;
+
+  function failFor(hostName: string, message: string): void {
+    state.lastError = message;
+    lastErrorHost = hostName;
+  }
+
+  function clearError(): void {
+    state.lastError = null;
+    lastErrorHost = null;
+  }
+
   function load(): void {
     state.hosts = deps.hosts.savedHosts();
   }
@@ -223,6 +243,13 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       throw error;
     }
     load();
+
+    // F6: the record `lastError` described has just been rewritten, so the
+    // message is stale. A rename makes the old name stale as well, which is
+    // why both names count.
+    if (lastErrorHost !== null && (lastErrorHost === record.name || lastErrorHost === previousName)) {
+      clearError();
+    }
 
     const stillReferenced = referencedSecretIds(record);
     const stale = previous.flatMap((old) => [...heldSecretIds(old)]).filter((id) => !stillReferenced.has(id));
@@ -289,6 +316,8 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     if (state.activeName === name) await disconnect();
     deps.hosts.remove(name);
     load();
+    // F6: a message about a record that no longer exists is stale too.
+    if (lastErrorHost === name) clearError();
     // The record is gone, so its sealed secrets must not survive it.
     await forgetSwallowed(heldSecretIds(removed));
   }
@@ -332,7 +361,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     }
     state.activeName = null;
     state.status = 'idle';
-    state.lastError = null;
+    clearError();
     state.pendingSwitch = null;
   }
 
@@ -372,14 +401,14 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
         // A validation failure, not a dial: it must not disturb a live
         // connection. Record the error and leave `activeName`/`status` saying
         // what is actually connected (D8).
-        state.lastError = `没有名为「${name}」的已保存连接。`;
+        failFor(name, `没有名为「${name}」的已保存连接。`);
         return;
       }
       // D8: one live connection — close the current host before opening another.
       if (state.activeName !== null) await disconnect();
       state.status = 'connecting';
       state.activeName = null;
-      state.lastError = null;
+      clearError();
       state.pendingSwitch = null;
 
       // Every saved host dials with a credential built here, from opaque ids
@@ -396,7 +425,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
         } catch (error) {
           // A missing password is an actionable failure, not a dial.
           state.status = 'error';
-          state.lastError = errorMessage(error);
+          failFor(host.name, errorMessage(error));
           return;
         }
       }
@@ -414,7 +443,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
           : await deps.hosts.resolve(request, credential);
       } catch (error) {
         state.status = 'error';
-        state.lastError = errorMessage(error);
+        failFor(host.name, errorMessage(error));
         return;
       }
 
@@ -423,14 +452,14 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
         result = await deps.port.connect(target);
       } catch (error) {
         state.status = 'error';
-        state.lastError = errorMessage(error);
+        failFor(host.name, errorMessage(error));
         return;
       }
       // A resolved `{ ok: false }` is a failed dial, handled exactly like a
       // thrown one — never a false "connected" (D8).
       if (!result.ok) {
         state.status = 'error';
-        state.lastError = `无法连接到「${host.name}」。`;
+        failFor(host.name, `无法连接到「${host.name}」。`);
         return;
       }
 
@@ -449,7 +478,14 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     get status() { return state.status; },
     set status(value: ConnectionStatus) { state.status = value; },
     get lastError() { return state.lastError; },
-    set lastError(value: string | null) { state.lastError = value; },
+    /**
+     * F6: a message written from outside names no host, so no save can clear
+     * it — the subject is unknown, not "whatever is saved next".
+     */
+    set lastError(value: string | null) {
+      state.lastError = value;
+      lastErrorHost = null;
+    },
     get pendingSwitch() { return state.pendingSwitch; },
     set pendingSwitch(value: string | null) { state.pendingSwitch = value; },
     load,

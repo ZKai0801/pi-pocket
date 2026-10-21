@@ -124,4 +124,53 @@ describe('connections store', () => {
     expect(d.port.connect).toHaveBeenCalledTimes(1);
     expect(store.activeName).toBe('kai');
   });
+
+  // F6: the error line names a host, so only rewriting *that* record makes it
+  // stale. A save of another host must not hide a failure that is still true.
+  it('clears the dial error when the host it names is saved (F6)', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => ({ ok: false }));
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    expect(store.lastError).toBe('无法连接到「kai」。');
+    await store.save({ ...kai, hostname: '10.1.1.1' });
+    expect(store.lastError).toBeNull();
+  });
+
+  it('keeps a dial error about another host when a different host is saved (F6)', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => ({ ok: false }));
+    const store = createConnectionsStore(d as never);
+    await store.connect('other');
+    await store.save({ ...kai, hostname: '10.1.1.1' });
+    expect(store.lastError).toBe('无法连接到「other」。');
+  });
+
+  it('clears the dial error when the host it names is saved under a new name (F6)', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => ({ ok: false }));
+    const store = createConnectionsStore(d as never);
+    await store.connect('other');
+    await store.save({ ...other, name: 'renamed' }, 'other');
+    expect(store.lastError).toBeNull();
+  });
+
+  it('clears the dial error when the host it names is removed (F6)', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => ({ ok: false }));
+    const store = createConnectionsStore(d as never);
+    await store.connect('other');
+    await store.remove('other');
+    expect(store.lastError).toBeNull();
+  });
+
+  it('keeps the dial error when the save that would clear it is rejected (F6)', async () => {
+    const d = deps();
+    d.port.connect = vi.fn(async () => ({ ok: false }));
+    d.hosts.save = vi.fn(() => { throw new Error('write failed'); });
+    const store = createConnectionsStore(d as never);
+    await store.connect('kai');
+    await expect(store.save({ ...kai, hostname: '10.1.1.1' })).rejects.toThrow('write failed');
+    expect(store.lastError).toBe('无法连接到「kai」。');
+  });
 });
