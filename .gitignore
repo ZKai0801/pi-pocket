@@ -82,6 +82,11 @@ android/app/google-services.json
 __pycache__/
 *.pyc
 
+# TypeScript declaration emit for the .mjs tooling under scripts/. tsconfig.json
+# does not include scripts/, so a `tsc --declaration` run over any script leaves
+# a stray .d.mts behind and dirties every worktree. Deleted 2026-10-22.
+scripts/**/*.d.mts
+
 # Issue #2381: scripts/derive-version.sh write-pin's output. It only ever
 # belongs in a DETACHED copy of a checkout (the pre-release gate's `.git`-less
 # rsync worktree, which already lives under build/); committing one would

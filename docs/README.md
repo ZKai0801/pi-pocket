@@ -40,14 +40,12 @@ Kotlin `app2` line and takes 0.5.x hotfixes only. Docs that describe `app2`,
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker fixture targets, ports, emulator commands, connected-test runbook |
 | [screenshots/](screenshots/) | Curated README screenshot assets captured from the visual-audit workflow |
 | [tmux-socket-recovery.md](tmux-socket-recovery.md) | Operational runner-only tmux socket recovery and namespace guardrails |
-| [audit-2026-08-23-comprehensive-session-management.md](audit-2026-08-23-comprehensive-session-management.md) | Session-tree/connection audit and issue plan — delete once #2222, #2241–#2243, #2247, #2264, #2295 all close; no unique content will remain |
-| [audit-2026-08-30-code-quality.md](audit-2026-08-30-code-quality.md) | Five-reviewer whole-codebase audit of correctness, inefficiency, duplication, dead code, and simplification — delete when its retained findings are tracked and resolved or superseded |
 | [worktrees.md](worktrees.md) | Agent worktree layout, creation, and merge-back mechanics |
 | [ci-pitfalls.md](ci-pitfalls.md) | Catalogue of ways a CI/gate run can look green while proving nothing — check before trusting a result |
 | [review-standards.md](review-standards.md) | Reviewer acceptance bars for terminal/session/visual/journey work |
 | [lessons-learned.md](lessons-learned.md) | Durable, recurring operational lessons not tied to any one epic |
 | [documentation-guide.md](documentation-guide.md) | How these docs are organized and kept lazy-loaded; read before restructuring/adding/pruning any doc |
-| [../AGENTS.md](../AGENTS.md) | Primary project + agent instructions (imported by [../CLAUDE.md](../CLAUDE.md)) |
+| [../AGENTS.md](../AGENTS.md) | Primary project + agent instructions |
 | [../process.md](../process.md) | The implementer/reviewer/orchestrator process contract |
 
 ## Related projects

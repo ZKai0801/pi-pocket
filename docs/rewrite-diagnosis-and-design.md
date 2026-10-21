@@ -17,7 +17,7 @@ Revised 2026-09-02 (second pass): §2.4 (server-side ownership split), §3.5
 (full-codebase audited size arithmetic against the explicit ≥50% deletion
 target), §5 (modularity → test/release-time targets), §6 (APX-ADOPT
 dependency). The executable companion is
-[simplification-implementation-plan-2026-09-02.md](simplification-implementation-plan-2026-09-02.md)
+`simplification-implementation-plan-2026-09-02.md` (not present in this checkout)
 — a 42-task playbook sized for small-model implementers.
 
 ---
@@ -271,7 +271,7 @@ in-flight commit 53c04b3 already moved to exactly this).
 | Durable folder tree / watched folders | CLI (`tree.py`) | Filesystem data, not session lifecycle. |
 
 The implementation playbook's Part B
-([simplification-implementation-plan-2026-09-02.md](simplification-implementation-plan-2026-09-02.md))
+(`simplification-implementation-plan-2026-09-02.md`, not present in this checkout)
 carries the exact schemas and function signatures for this split.
 
 ---
