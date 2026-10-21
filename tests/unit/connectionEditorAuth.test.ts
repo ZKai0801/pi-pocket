@@ -148,21 +148,25 @@ function labelled(root: HTMLElement, label: string): HTMLInputElement {
   return found as HTMLInputElement;
 }
 
+/**
+ * A real `input` event bubbles, which is how the form's own `@input` hears an
+ * edit and retires a validation problem (R36); the helper must too.
+ */
 async function typeInto(target: HTMLInputElement, value: string): Promise<void> {
   target.value = value;
-  target.dispatchEvent(new Event('input'));
+  target.dispatchEvent(new Event('input', { bubbles: true }));
   await nextTick();
 }
 
 async function choose(target: HTMLSelectElement, value: string): Promise<void> {
   target.value = value;
-  target.dispatchEvent(new Event('change'));
+  target.dispatchEvent(new Event('change', { bubbles: true }));
   await nextTick();
 }
 
 async function setChecked(target: HTMLInputElement, checked: boolean): Promise<void> {
   target.checked = checked;
-  target.dispatchEvent(new Event('change'));
+  target.dispatchEvent(new Event('change', { bubbles: true }));
   await nextTick();
 }
 
@@ -447,5 +451,54 @@ describe('connection editor auth', () => {
     const plainRow = list.root.querySelector('[aria-label="plain 的更多操作"]')?.closest('li');
     expect(plainRow).not.toBeNull();
     expect(plainRow?.querySelector('[data-testid="host-secret-lock"]')).toBeNull();
+  });
+
+  it('states a validation problem in Chinese (F4)', async () => {
+    const editor = mountEditor();
+    await settle();
+    await choose(editor.root.querySelector('select') as HTMLSelectElement, 'k-1');
+    await pressSave(editor.root);
+
+    const alert = q(editor.root, 'editor-error');
+    expect(alert?.getAttribute('role')).toBe('alert');
+    expect(alert?.textContent).toBe('请填写名称。');
+    // Nothing English, and no validator sentence borrowed from the shared app.
+    expect(alert?.textContent).not.toMatch(/[A-Za-z]{3,}\s+[A-Za-z]{3,}/);
+  });
+
+  it('drops the validation problem as soon as the field is edited (F5, R36)', async () => {
+    const editor = mountEditor();
+    await settle();
+    await choose(editor.root.querySelector('select') as HTMLSelectElement, 'k-1');
+    await pressSave(editor.root);
+    expect(q(editor.root, 'editor-error')?.textContent).toBe('请填写名称。');
+
+    await typeInto(labelled(editor.root, '名称'), 'kai');
+
+    expect(q(editor.root, 'editor-error')).toBeNull();
+    // The form is still incomplete; the next attempt names the next field.
+    await pressSave(editor.root);
+    expect(q(editor.root, 'editor-error')?.textContent).toBe('请填写主机名或 IP 地址。');
+  });
+
+  it('keeps a rejected save from the list in front of a local edit until the save is retried (R36)', async () => {
+    const store = fakeStore([PASSWORD_HOST]);
+    store.save.mockRejectedValueOnce(new Error('the store is unavailable'));
+    const list = mountList(store);
+    await settle();
+    await openEditorFor(list.root, PASSWORD_HOST);
+
+    await pressSave(list.root);
+    expect(q(list.root, 'editor-error')?.textContent).toBe('保存失败，请重试。');
+
+    // Editing is not a retry: the list still owns this failure.
+    await typeInto(input(list.root, 'password-input'), 'fresh-pw');
+    expect(q(list.root, 'editor-error')?.textContent).toBe('保存失败，请重试。');
+
+    // Retrying is: the failure retires with the attempt that replaced it.
+    await pressSave(list.root);
+    expect(store.save).toHaveBeenCalledTimes(2);
+    expect(q(list.root, 'editor-error')).toBeNull();
+    expect(q(list.root, 'password-input')).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AndroidHostStore, validateSavedHost, type SavedHost } from '../../src/platform/android/hostStore';
+import { AndroidHostStore, savedHostProblem, validateSavedHost, type SavedHost } from '../../src/platform/android/hostStore';
 
 function make(seed?: string) {
   const map = new Map<string, string>();
@@ -33,6 +33,33 @@ describe('SavedHost auth', () => {
   it('still requires a key for a key host', () => {
     expect(validateSavedHost({ name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: '' }))
       .toMatch(/key/i);
+  });
+
+  it('names each problem as a code while keeping the shared English sentence byte-identical (R35)', () => {
+    // The five sentences are a public contract pinned here byte-for-byte: a
+    // translation of the wrapper would turn this test red, which is the point.
+    const complete: SavedHost = { name: 'k', hostname: 'h', port: 22, user: 'u', keyHandleId: 'h-1' };
+    const cases: Array<[SavedHost, string, string]> = [
+      [{ ...complete, name: '  ' }, 'name', 'Give the host a name.'],
+      [{ ...complete, hostname: '' }, 'hostname', 'Enter a hostname or IP address.'],
+      [{ ...complete, user: '' }, 'user', 'Enter the SSH user.'],
+      [{ ...complete, port: 0 }, 'port', 'Port must be 1–65535.'],
+      [{ ...complete, port: 70000 }, 'port', 'Port must be 1–65535.'],
+      [{ ...complete, keyHandleId: '' }, 'key', 'Choose an SSH key from the key vault.'],
+    ];
+    for (const [host, code, sentence] of cases) {
+      expect(savedHostProblem(host), sentence).toBe(code);
+      expect(validateSavedHost(host), sentence).toBe(sentence);
+    }
+    // The first failing field wins, in the order the sentences have always used.
+    expect(validateSavedHost({ name: '', hostname: '', port: 0, user: '', keyHandleId: '' }))
+      .toBe('Give the host a name.');
+    // A password host needs no key; a complete record has no problem either way.
+    const password = { ...complete, keyHandleId: '', auth: { kind: 'password' as const, passwordCredentialId: 'p-1' } };
+    expect(savedHostProblem(password)).toBeNull();
+    expect(validateSavedHost(password)).toBeNull();
+    expect(savedHostProblem(complete)).toBeNull();
+    expect(validateSavedHost(complete)).toBeNull();
   });
 
   it('keeps piSessionsDir and piCommand through a save', () => {

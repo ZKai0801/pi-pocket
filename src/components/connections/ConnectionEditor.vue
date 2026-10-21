@@ -23,9 +23,22 @@ import SshKeysScreen from '../SshKeysScreen.vue';
 import { listSshKeys, type SshKeyMetadata } from '../../native/sshKeyVault';
 import { androidKeyManager } from '../../platform/android/hosts';
 import { piSessionsDirFor } from '../../pi/lastSessionRoot';
-import { validateSavedHost, type HostAuth, type SavedHost } from '../../platform/android/hostStore';
+import { savedHostProblem, type HostAuth, type SavedHost, type SavedHostProblem } from '../../platform/android/hostStore';
 
 type KeyAuth = Extract<HostAuth, { kind: 'key' }>;
+
+/**
+ * The phone shell's words for each validator problem (R35). The shared app
+ * keeps the validator's English sentences: this component asks for the
+ * problem code and says it in Chinese, rather than forking the validator.
+ */
+const PROBLEM_COPY: Record<SavedHostProblem, string> = {
+  name: '请填写名称。',
+  hostname: '请填写主机名或 IP 地址。',
+  user: '请填写登录用户。',
+  port: '端口需在 1–65535 之间。',
+  key: '请从密钥库选择一把密钥。',
+};
 
 const props = defineProps<{ host?: SavedHost | null; error?: string; keysOpen?: boolean }>();
 const emit = defineEmits<{
@@ -89,8 +102,17 @@ async function loadKeys(): Promise<void> {
   } catch (caught) {
     keysError.value = caught instanceof Error && caught.message.length > 0
       ? caught.message
-      : 'The key vault could not be read.';
+      : '无法读取密钥库。';
   }
+}
+
+/**
+ * R36: a validation problem belongs to the field that raised it, so any edit
+ * drops it. `props.error` (a rejected save or clear from the list) is not
+ * touched: the list owns it, and it stays until the action is retried.
+ */
+function clearProblem(): void {
+  error.value = '';
 }
 
 /** R33: the empty state opens the vault sheet instead of naming a dead page. */
@@ -109,12 +131,14 @@ function closeKeySheet(): void {
  */
 function selectKey(handleId: string, stay = false): void {
   form.keyHandleId = handleId;
+  // Choosing a key is the remedy for 请从密钥库选择一把密钥, so it retires it.
+  clearProblem();
   if (!stay) closeKeySheet();
 }
 
 function selectAuth(kind: 'key' | 'password'): void {
   form.authKind = kind;
-  error.value = '';
+  clearProblem();
 }
 
 function buildAuth(): HostAuth {
@@ -152,9 +176,9 @@ function submit(): void {
   };
   if (form.piSessionsDir.trim()) host.piSessionsDir = form.piSessionsDir.trim();
   if (form.piCommand.trim()) host.piCommand = form.piCommand.trim();
-  const problem = validateSavedHost(host);
+  const problem = savedHostProblem(host);
   if (problem) {
-    error.value = problem;
+    error.value = PROBLEM_COPY[problem];
     return;
   }
   error.value = '';
@@ -171,7 +195,7 @@ function submit(): void {
       <h2 class="connection-editor__title">{{ props.host ? '编辑连接' : '新增连接' }}</h2>
     </header>
 
-    <form class="connection-editor__form" @submit.prevent="submit">
+    <form class="connection-editor__form" @input="clearProblem" @change="clearProblem" @submit.prevent="submit">
       <label class="connection-editor__field">
         <span class="connection-editor__label">名称</span>
         <input v-model="form.name" type="text" autocomplete="off" placeholder="kai" />

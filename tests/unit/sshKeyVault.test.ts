@@ -245,7 +245,7 @@ describe('opaque SSH key handles', () => {
       const dialog = findByTestId(root, 'ssh-key-delete-confirmation');
       expect(dialog).toBeDefined();
       expect(nodeText(dialog!)).toContain('devbox');
-      expect(nodeText(dialog!)).toContain('Remove associations and delete key');
+      expect(nodeText(dialog!)).toContain('解除关联并删除密钥');
       expect(vault.deleteKey).not.toHaveBeenCalled();
       expect(references.detach).not.toHaveBeenCalled();
 

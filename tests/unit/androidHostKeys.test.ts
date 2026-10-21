@@ -181,7 +181,7 @@ describe('Android add-host key flow', () => {
     const { vault } = fakeVault();
     const manager = new CredentialKeyManager(vault, combineKeyReferenceStores(createAndroidHostKeyReferenceStore(hosts), refusing));
     const asked = await manager.delete(HANDLE_A);
-    await expect(manager.delete(HANDLE_A, asked.affectedHosts)).rejects.toThrow(/associations changed/);
+    await expect(manager.delete(HANDLE_A, asked.affectedHosts)).rejects.toThrow('主机密钥关联在删除前已变更，请刷新主机后重试。');
     expect(vault.deleteKey).not.toHaveBeenCalled();
     expect(hosts.savedHosts()[0]!.keyHandleId).toBe(HANDLE_A);
   });

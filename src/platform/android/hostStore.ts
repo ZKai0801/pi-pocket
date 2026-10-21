@@ -111,13 +111,43 @@ function isSavedHost(value: unknown): value is SavedHost {
     && (host.piCommand === undefined || typeof host.piCommand === 'string');
 }
 
-export function validateSavedHost(host: SavedHost): string | null {
-  if (!host.name.trim()) return 'Give the host a name.';
-  if (!host.hostname.trim()) return 'Enter a hostname or IP address.';
-  if (!host.user.trim()) return 'Enter the SSH user.';
-  if (!Number.isInteger(host.port) || host.port < 1 || host.port > 65535) return 'Port must be 1–65535.';
-  if (host.auth?.kind !== 'password' && !host.keyHandleId) return 'Choose an SSH key from the key vault.';
+/**
+ * The one field a saved host is missing or has wrong, named rather than
+ * worded, so a shell can render it in its own language (R35). The wrapper
+ * below is a public contract pinned by `tests/unit/hostStoreAuth.test.ts`: the
+ * phone shell maps these codes to Chinese instead.
+ */
+export type SavedHostProblem = 'name' | 'hostname' | 'user' | 'port' | 'key';
+
+/** Which field stops this record from being saved, or null when it is complete. */
+export function savedHostProblem(host: SavedHost): SavedHostProblem | null {
+  if (!host.name.trim()) return 'name';
+  if (!host.hostname.trim()) return 'hostname';
+  if (!host.user.trim()) return 'user';
+  if (!Number.isInteger(host.port) || host.port < 1 || host.port > 65535) return 'port';
+  if (host.auth?.kind !== 'password' && !host.keyHandleId) return 'key';
   return null;
+}
+
+/** The shared app's copy for each problem: the sentences it has always shown. */
+const SAVED_HOST_SENTENCE: Record<SavedHostProblem, string> = {
+  name: 'Give the host a name.',
+  hostname: 'Enter a hostname or IP address.',
+  user: 'Enter the SSH user.',
+  port: 'Port must be 1–65535.',
+  key: 'Choose an SSH key from the key vault.',
+};
+
+/**
+ * The shared contract's words. This wrapper is a public contract whose exact
+ * sentences are pinned by `tests/unit/hostStoreAuth.test.ts`, so the phone shell
+ * maps {@link savedHostProblem} codes to Chinese instead of changing them (R35,
+ * R42). The shared app is not reachable in the packaged app; the pinned test is
+ * the reason the strings stay byte-identical.
+ */
+export function validateSavedHost(host: SavedHost): string | null {
+  const problem = savedHostProblem(host);
+  return problem === null ? null : SAVED_HOST_SENTENCE[problem];
 }
 
 export class AndroidHostStore {

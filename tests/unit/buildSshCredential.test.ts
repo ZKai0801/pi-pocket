@@ -26,7 +26,7 @@ describe('buildSshCredential', () => {
 
   it('refuses to build a password credential without a stored password', async () => {
     await expect(buildSshCredential({ kind: 'password', passwordCredentialId: 's-2' }, vi.fn(async () => null)))
-      .rejects.toThrow(/password/i);
+      .rejects.toThrow(/密码/);
   });
 
   it('treats an undecryptable secret as absent', async () => {
@@ -51,7 +51,7 @@ describe('buildSshCredential', () => {
   it('rejects a password lookup that throws', async () => {
     const lookup = vi.fn(async () => { throw new Error('keystore reset'); });
     await expect(buildSshCredential({ kind: 'password', passwordCredentialId: 's-2' }, lookup))
-      .rejects.toThrow(/password/i);
+      .rejects.toThrow(/密码/);
   });
 
   it('rejects an unknown auth kind without touching the lookup', async () => {

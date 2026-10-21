@@ -84,7 +84,9 @@ describe('connections store credentials', () => {
     store.load();
     await store.connect('pw');
     expect(store.status).toBe('error');
-    expect(store.lastError).toMatch(/password/i);
+    // The sentence reaches the list's alert in Chinese now (F4): the name of
+    // the missing secret is what it still has to say.
+    expect(store.lastError).toMatch(/密码/);
     expect(d.connect).not.toHaveBeenCalled();
     expect(d.resolve).not.toHaveBeenCalled();
   });

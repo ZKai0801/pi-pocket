@@ -85,7 +85,7 @@ const NO_REMEMBERED_SECRETS: RememberedSecrets = {
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
-  return 'The connection could not be opened.';
+  return '无法建立连接。';
 }
 
 /** Which sealed secret a newly typed value becomes for this host. */
@@ -332,7 +332,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
         // A validation failure, not a dial: it must not disturb a live
         // connection. Record the error and leave `activeName`/`status` saying
         // what is actually connected (D8).
-        state.lastError = `No saved host named “${name}”.`;
+        state.lastError = `没有名为「${name}」的已保存连接。`;
         return;
       }
       // D8: one live connection — close the current host before opening another.
@@ -390,7 +390,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       // thrown one — never a false "connected" (D8).
       if (!result.ok) {
         state.status = 'error';
-        state.lastError = `The connection to “${host.name}” did not open.`;
+        state.lastError = `无法连接到「${host.name}」。`;
         return;
       }
 
@@ -478,7 +478,7 @@ export const useConnectionsStore = defineStore('connections', () => {
     remove: (name) => { realHosts?.remove(name); },
     resolve: (request, credential) => realHosts
       ? realHosts.resolve(request, credential)
-      : Promise.reject(new Error('The saved hosts are still loading.')),
+      : Promise.reject(new Error('连接列表还在加载，请稍后再试。')),
   };
 
   const store = createConnectionsStore({ hosts: lazyHosts, port: shellPort, secrets: lazySecrets });

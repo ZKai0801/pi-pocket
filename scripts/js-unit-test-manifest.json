@@ -670,6 +670,7 @@
       "suite": "mobile SSH key setup (#3021)",
       "tests": [
         "sends pasted key text straight to the native vault and returns only public metadata",
+        "labels a picked key 导入的密钥 when the user left the label blank",
         "accepts only one-line Ed25519/RSA public keys from the native boundary",
         "clears the pasted private key from the field after a successful import",
         "clears the pasted text and explains the error when native validation rejects it",
@@ -989,7 +990,10 @@
         "offers 已保存 and a clear action for a host that holds a password (R30.3)",
         "drops 已保存 and disables save once a successful clear rewrites the record",
         "shows no saved marker for a host that holds no credential",
-        "locks only the rows that reference a stored secret"
+        "locks only the rows that reference a stored secret",
+        "states a validation problem in Chinese (F4)",
+        "drops the validation problem as soon as the field is edited (F5, R36)",
+        "keeps a rejected save from the list in front of a local edit until the save is retried (R36)"
       ]
     },
     "tests/unit/connectionsStore.test.ts": {
@@ -1013,6 +1017,7 @@
         "loads a v1 record with no auth as a key host",
         "round-trips a password host under the same storage key",
         "still requires a key for a key host",
+        "names each problem as a code while keeping the shared English sentence byte-identical (R35)",
         "keeps piSessionsDir and piCommand through a save",
         "loads a key auth record saved before remember fields existed",
         "round-trips rememberPassphrase and secretId through a save",
@@ -1394,6 +1399,19 @@
         "keeps the vault reachable and replaces the handle when the vault already holds keys (F3)",
         "closes the sheet before the editor when Back is pressed (R34)",
         "puts the sheet bar outside the DOM scroll region and declares a fixed layer between z-index 20 and 30"
+      ]
+    },
+    "tests/unit/connectionCopy.test.ts": {
+      "suite": "connection copy (F4)",
+      "tests": [
+        "shows every sentence of this flow in Chinese and none of them in English",
+        "asks the validator for a problem code instead of rendering its English sentence",
+        "renders the empty vault in Chinese",
+        "renders a stored key row in Chinese, including its public-key control",
+        "shows a vault-read failure as the error it was handed, with Chinese chrome around it",
+        "reports a failed dial and an unknown host in Chinese",
+        "keeps the boundary honest: native-contract and impossible failures stay English",
+        "keeps the boundary note from re-absorbing a translatable family"
       ]
     }
   }

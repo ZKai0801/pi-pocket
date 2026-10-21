@@ -15,7 +15,7 @@ export type SecretLookup = (secretId: string) => Promise<string | null>;
 /** A password host whose sealed password is gone, so the dial cannot proceed. */
 export class MissingPasswordCredential extends Error {
   constructor() {
-    super('The saved password for this host is missing — enter it again in the connection editor.');
+    super('这台主机保存的密码已丢失，请在连接编辑页重新输入。');
     this.name = 'MissingPasswordCredential';
   }
 }

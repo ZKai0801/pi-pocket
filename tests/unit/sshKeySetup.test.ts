@@ -164,15 +164,24 @@ describe('mobile SSH key setup (#3021)', () => {
     const vault = nativeVault();
     const manager = new CredentialKeyManager(vault);
     await expect(manager.importText({ text: PASTED_PRIVATE_KEY, label: '  ', passphrase: 'pass' })).resolves.toEqual(metadata);
-    expect(vault.importKeyText).toHaveBeenCalledWith({ text: PASTED_PRIVATE_KEY, label: 'Pasted SSH key', passphrase: 'pass' });
+    expect(vault.importKeyText).toHaveBeenCalledWith({ text: PASTED_PRIVATE_KEY, label: '粘贴的密钥', passphrase: 'pass' });
 
-    await expect(manager.importText({ text: '  \n', label: 'x' })).rejects.toThrow(/paste a private key/i);
+    await expect(manager.importText({ text: '  \n', label: 'x' })).rejects.toThrow('请先粘贴私钥。');
     expect(vault.importKeyText).toHaveBeenCalledTimes(1);
 
     const leaky = new CredentialKeyManager(nativeVault({
       importKeyText: vi.fn(async () => ({ ...metadata, privateKeyPem: PASTED_PRIVATE_KEY })),
     }));
     await expect(leaky.importText({ text: PASTED_PRIVATE_KEY, label: 'x' })).rejects.toThrow(/invalid public metadata/i);
+  });
+
+  it('labels a picked key 导入的密钥 when the user left the label blank', async () => {
+    const vault = nativeVault({
+      pickKeyDocument: vi.fn(async () => ({ cancelled: false, documentId: 'doc-1' })),
+    });
+    const manager = new CredentialKeyManager(vault);
+    await expect(manager.pickAndImport({ label: '  ' })).resolves.toEqual(metadata);
+    expect(vault.importPickedKey).toHaveBeenCalledWith({ documentId: 'doc-1', label: '导入的密钥' });
   });
 
   it('accepts only one-line Ed25519/RSA public keys from the native boundary', () => {
@@ -225,7 +234,7 @@ describe('mobile SSH key setup (#3021)', () => {
       expect(textarea.value).toBe('');
       const error = text(find(view.root, 'ssh-key-error')!);
       expect(error).toContain('This is a public key');
-      expect(error).toContain('paste it again');
+      expect(error).toContain('请重新粘贴后重试');
     } finally {
       view.unmount();
     }
@@ -244,7 +253,7 @@ describe('mobile SSH key setup (#3021)', () => {
       expect(find(view.root, `ssh-public-key-install-hint-${metadata.handleId}`)).toBeDefined();
       await fire(view.root, `copy-ssh-public-key-${metadata.handleId}`);
       expect(vault.copyPublicKey).toHaveBeenCalledWith({ handleId: metadata.handleId });
-      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('copied');
+      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('公钥已复制');
       await fire(view.root, `share-ssh-public-key-${metadata.handleId}`);
       expect(vault.sharePublicKey).toHaveBeenCalledWith({ handleId: metadata.handleId });
     } finally {
@@ -309,11 +318,11 @@ describe('mobile SSH key setup (#3021)', () => {
       await fire(view.root, `install-ssh-public-key-${metadata.handleId}`);
       await fire(view.root, 'confirm-install-ssh-key');
       expect(install).toHaveBeenCalledWith(ED25519_LINE);
-      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('Installed on testuser@fixture');
+      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('已添加到 testuser@fixture');
 
       await fire(view.root, `install-ssh-public-key-${metadata.handleId}`);
       await fire(view.root, 'confirm-install-ssh-key');
-      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('already in ~/.ssh/authorized_keys');
+      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('里已有 Generated key，未做改动。');
     } finally {
       view.unmount();
     }
@@ -357,7 +366,7 @@ describe('mobile SSH key setup (#3021)', () => {
       expect(confirmation).not.toContain('b.example');
       await fire(view.root, 'confirm-install-ssh-key');
       expect(install).toHaveBeenCalledWith(ED25519_LINE);
-      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('Installed on alexey@a.example:2201');
+      expect(text(find(view.root, 'ssh-public-key-message')!)).toContain('已添加到 alexey@a.example:2201');
     } finally {
       view.unmount();
     }

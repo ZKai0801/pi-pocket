@@ -178,3 +178,49 @@ Expected: JS gate = 109 files / 835 tests + the new ones, with the single known
 Windows-only red (`sshKeySetup.test.ts:392`) and nothing else; doctor green;
 androidTest compiles; APK builds and its packaged version matches what the script
 printed. In the packaged walk, item 1 must still pass unchanged.
+
+## Residual (recorded, not done)
+
+**The plugin answers in sentences, so one English clause can still sit inside a
+Chinese one.** The Android side of the key vault validates pasted input itself
+and rejects it with prose — a pasted public key comes back as *"This is a public
+key. Paste the private key instead; it starts with a BEGIN line."* Those
+messages cross the boundary as `cause.message`: `src/components/SshKeysScreen.vue`
+renders them through `failureMessage(cause, …)` (import, public-key read, copy,
+share, delete, install), and `src/components/connections/ConnectionEditor.vue`
+renders the vault-read one as `keysError`. F4's JS copy is Chinese; the clause
+the native layer contributes is not, and JS cannot translate a sentence it did
+not author without parsing English prose.
+
+The fix is for the plugin to return **error codes** (with the message kept for
+logs) that the WebView maps to Chinese copy. That is a native-contract change
+with its own compatibility question — old APK against new JS, new APK against a
+cached bundle — so it is **out of this plan's scope** and is recorded here
+rather than attempted inside it.
+
+**The `keyManagement.ts` family is closed (R39).** An earlier revision of this
+section treated the plugin's prose as the only English left on this path. That
+was wrong: `src/credentials/keyManagement.ts` authored nine error sentences and
+two default labels in English, and eight of the nine are reachable from the
+phone shell. They are JS-owned and have since been translated (R39, Plan 6 Task
+1); the copy guard now asserts on the authoring file, so a move rather than a
+translation fails it (R40).
+
+What remains English on this path is therefore two kinds of family:
+
+- **Not JS-owned:** the plugin's prose above, and native-contract validation in
+  `src/native/sshKeyVault.ts`.
+- **JS-owned but a *contract* family (out of this plan's scope, R41):**
+  `src/platform/android/hostStore.ts`'s `MissingHostCredential` (declared at
+  `:63`, message at `:68`, thrown at `:245`), the two other English throws in
+  that file (`:243`, `:263`), and `UnsupportedHostAuth` in
+  `src/credentials/buildSshCredential.ts`. Changing these is a contract change,
+  not a translation. The `MissingHostCredential` a user sees arrives through
+  `connections.ts:359`/`:377`/`:386` → `ConnectionsList.vue:135`.
+
+Until then the boundary is explicit and enforced: the note at the top of
+`tests/unit/connectionCopy.test.ts` names every family that stays English
+(native-contract validation in `src/native/sshKeyVault.ts`, plugin sentences
+above, and the declared contract exception), and its last tests assert the
+boundary still holds — including that a translatable family cannot be added to
+the note — so this cannot rot into "F4 was half-done" quietly.
