@@ -47,7 +47,7 @@ against `scripts/js-unit-test-manifest.json`, so a dropped file fails the gate
 instead of hiding. A standard `npx vitest run` on this box reports
 109 files / 835 tests — the same set the gate asserts.
 
-**2. `tests/unit/sshKeySetup.test.ts:392` cannot pass on Windows.** The test
+**2. `tests/unit/sshKeySetup.test.ts:401` cannot pass on Windows.** The test
 asserts a key file is written with mode `0o600`; Windows has no POSIX file
 modes, so `stat` reports `0o666` and the assertion fails. This is the single
 expected red in the JS unit gate on this box (109 files / 835 tests, 834 passed,
@@ -62,7 +62,7 @@ full-suite parallel load. Serial execution also fixes that.
 
 **Task 6's Step 3 acceptance was not met, and is not claimed as met.** Step 3
 expected the JS unit gate to exit **0** on this box. It exits **1**, and the only
-failure is fact 2 above (`tests/unit/sshKeySetup.test.ts:392`, POSIX `0o600` vs
+failure is fact 2 above (`tests/unit/sshKeySetup.test.ts:401`, POSIX `0o600` vs
 Windows `0o666`). That is the recorded outcome: **acceptance not met — one
 documented Windows-only red**, never "green". The gate itself worked (it
 collected the exact 109-file / 835-test manifest set and reported 834 passed),

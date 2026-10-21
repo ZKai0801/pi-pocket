@@ -156,7 +156,7 @@ tree (do not redo):
   (the Residual section)
 - Modify: `src/platform/android/hostStore.ts` (the comment at `:140-144`, R42)
 
-- [ ] **Step 1: Translate the eleven strings (R39).**
+- [x] **Step 1: Translate the eleven strings (R39).**
   Nine error sentences: `:48` `'Android did not return a document reference for
   the SSH key.'` → Android 未返回 SSH 密钥的文档引用。; `:63` `'Paste a private
   key first.'` → 请先粘贴私钥。; `:82` `'The public key could not be copied.'`
@@ -176,7 +176,7 @@ tree (do not redo):
   keep each message's *shape* (imperative + what to do next) — the English
   sentences all say what failed and what to do.
 
-- [ ] **Step 2: Re-point the guard at the authoring file (R40).**
+- [x] **Step 2: Re-point the guard at the authoring file (R40).**
   `tests/unit/connectionCopy.test.ts` currently asserts "Chinese present and
   English absent" **within one file**. The file constants are at `:64-68`
   (`EDITOR`, `KEYS`, `STORE`, `CREDENTIALS`); the `COPY` array is `:79-157`;
@@ -191,14 +191,14 @@ tree (do not redo):
      The point of R40 is that moving a string to another file must fail the
      guard, not satisfy it.
 
-- [ ] **Step 3: Prove the guard now fails for the right reason.**
+- [x] **Step 3: Prove the guard now fails for the right reason.**
   Mutation: change `keyManagement.ts:82` back to `'The public key could not be
   copied.'` → the guard must go red **naming that file**. Then a second
   mutation: move the Chinese string *out* of `keyManagement.ts` into
   `SshKeysScreen.vue` → the guard must also go red (it is not "translated").
   Paste both outputs.
 
-- [ ] **Step 4: Fix the tests that pin the old English.**
+- [x] **Step 4: Fix the tests that pin the old English.**
   Measured, exact:
   - `tests/unit/sshKeySetup.test.ts:167` pins the **label** `'Pasted SSH key'`
     (in an `importKeyText` call assertion) — update it to 粘贴的密钥.
@@ -219,7 +219,7 @@ tree (do not redo):
   For every change, quote the before/after and say why the new assertion is
   **not weaker**.
 
-- [ ] **Step 5: Close the boundary note (R41).**
+- [x] **Step 5: Close the boundary note (R41).**
   Rewrite the note at the top of `tests/unit/connectionCopy.test.ts` (the
   JSDoc block at `:13-46`) so it names:
   - the native plugin's prose (pasted-public-key etc.), which arrives as
@@ -246,7 +246,7 @@ tree (do not redo):
   *shared-app* concern — `sharedApp` is unreachable in the packaged app, so
   the reason is "public contract with a pinned test" (R42).
 
-- [ ] **Step 6: Update the Residual section of the 2026-10-21 plan.**
+- [x] **Step 6: Update the Residual section of the 2026-10-21 plan.**
   It currently says the native plugin is the only source of English on this
   path. Amend it: the `keyManagement.ts` family is **closed** (R39); what
   remains is the native plugin's prose and the `hostStore` /
@@ -254,7 +254,7 @@ tree (do not redo):
   plan's scope** (R41) — it is a contract change, not a translation. Keep the
   native-error-codes argument intact.
 
-- [ ] **Step 7: Update the `hostStore.ts` comment (R42).**
+- [x] **Step 7: Update the `hostStore.ts` comment (R42).**
   `:140-144` says the sentences are English "because `src/sharedApp/hostForm.ts`
   … depend on these exact sentences". That reason is now wrong (§2.4 of the
   spec: `sharedApp` has no HTML entry and is unreachable in the packaged app).
@@ -263,7 +263,7 @@ tree (do not redo):
   `savedHostProblem` codes to Chinese. Do **not** change the sentences
   themselves.
 
-- [ ] **Step 8: Verify.**
+- [x] **Step 8: Verify.**
   ```
   npx vue-tsc --noEmit
   npx vitest run --no-file-parallelism tests/unit/connectionCopy.test.ts tests/unit/sshKeySetup.test.ts tests/unit/androidHostKeys.test.ts tests/unit/hostStoreAuth.test.ts tests/unit/sshKeyVault.test.ts tests/unit/connectionEditorAuth.test.ts tests/unit/connectionEditorKeySheet.test.ts
@@ -311,7 +311,7 @@ refusals — it does not.
   translated it; it still appears in Plan 4's documents. Look for the class
   name `MissingPasswordCredential` instead.)
 
-- [ ] **Step 1: Decide and write down the contract.**
+- [x] **Step 1: Decide and write down the contract.**
   Two acceptable shapes; pick one and record it in the task report:
   - **(a) Refuse the save.** With the toggle off and a password typed, the
     save is refused with a Chinese reason: e.g. 未开启"记住密码"时，保存的密码无法用于连接，请开启后重试。
@@ -328,7 +328,7 @@ refusals — it does not.
   toggle off is a CHANGES REQUESTED on sight.
   Note the scope of R30's own reasoning: its "a secret passed with the toggle
   off would silently resurrect remembering" argument is about the **key**
-  path (`withSealedSecret`, `src/stores/connections.ts:127-135`, writes
+  path (`withSealedSecret`, `src/stores/connections.ts:127-134`, writes
   `rememberPassphrase: true` in its key branch at `:133`; the password branch
   returns at `:129-130` and never writes it). Task 2 is about the **password**
   path, so R30 clause 1 still binds it — *toggle off ⇒ emit `null`* — but do
@@ -336,13 +336,13 @@ refusals — it does not.
   and stronger: the store would seal a credential the record no longer
   references, leaving an orphan.
 
-- [ ] **Step 2: Implement it (R43).**
+- [x] **Step 2: Implement it (R43).**
   Also make the *typing* honest: when the toggle is off, the field must
   either be disabled or carry a visible Chinese note that what is typed will
   not be kept. The note must not be the only signal — the save behaviour must
   match it.
 
-- [ ] **Step 3: Test both halves.**
+- [x] **Step 3: Test both halves.**
   - A new password host with the toggle off: the outcome is the contracted
     one — refused with the Chinese reason, **or** the field refusing to
     accept a value. The test must assert the concrete outcome, not "an error
@@ -355,7 +355,7 @@ refusals — it does not.
     `docs/superpowers/plans/2026-10-19-native-credentials.md:425-431` before
     touching this.
 
-- [ ] **Step 4: Verify.** `npx vue-tsc --noEmit` + the touched test files +
+- [x] **Step 4: Verify.** `npx vue-tsc --noEmit` + the touched test files +
   `tests/unit/rememberedSecrets.test.ts` (the JS side) and
   `android/app/src/test/java/com/pocketshell/app/RememberedSecretStoreTest.java`
   (the JVM side — Plan 4b's, which Plan 5 T3 proved runs: 15 tests, 0
@@ -383,20 +383,20 @@ reach the store while its toggle is off, that is CHANGES REQUESTED.
 `Error` thrown by `hostStore.save()` (which names the specific problem) is
 dropped. Same shape at `:95` for the clear path (`catch` at `:94`).
 
-- [ ] **Step 1: Map the causes.**
+- [x] **Step 1: Map the causes.**
   Grep every `throw` reachable from `store.save()` and `store.forgetSecrets()`
   and list the messages a user could see. The list is the contract for step 2.
   Include `hostStore.ts`'s `validateSavedHost` sentence (the live path from
   §2.4) and `buildSshCredential.ts`'s already-Chinese message.
 
-- [ ] **Step 2: Show the cause in Chinese (R44).**
+- [x] **Step 2: Show the cause in Chinese (R44).**
   The editor's error line must carry the specific reason, in Chinese, next to
   the generic "保存失败" line — not instead of it. If a cause is not
   translatable, map it through a table like `SAVED_HOST_SENTENCE`; if a cause
   is an unexpected exception, keep the generic line and log the raw text
   (Step 3).
 
-- [ ] **Step 3: Log the raw cause — and know what the sink can hold.**
+- [x] **Step 3: Log the raw cause — and know what the sink can hold.**
   **The diagnostic sink cannot hold free text**, and this step must not
   pretend otherwise. `src/diagnostics.ts:21-27` defines `DiagnosticEvent` as
   `{ id, at, kind, operation, code }` — there is no message field, and
@@ -431,7 +431,7 @@ dropped. Same shape at `:95` for the clear path (`catch` at `:94`).
   containing a passphrase-shaped string and asserts the secret does not
   appear in the output.
 
-- [ ] **Step 4: Test both halves.**
+- [x] **Step 4: Test both halves.**
   - A save that fails with a *known* cause shows that cause in Chinese.
   - A save that fails with an *unknown* cause shows the generic line, and the
     raw cause is **logged through the sink you actually chose** (assert the
@@ -442,7 +442,7 @@ dropped. Same shape at `:95` for the clear path (`catch` at `:94`).
   - Nothing regressed: a successful save still closes the editor and clears
     the error.
 
-- [ ] **Step 5: Verify.** `npx vue-tsc --noEmit` + the touched test files.
+- [x] **Step 5: Verify.** `npx vue-tsc --noEmit` + the touched test files.
 
 **Review Focus 1** — the diff must contain the **named redaction helper**
 Step 3 asks for, and it must actually redact: a reviewer must be able to
@@ -469,18 +469,18 @@ reads `previousRecords` *before* sealing (`src/stores/connections.ts:187`),
 the first seal's id becomes an **orphan**. Plan 5's Global Constraints say
 "never leave an orphan".
 
-- [ ] **Step 1: Choose where the guard lives and write down why.**
+- [x] **Step 1: Choose where the guard lives and write down why.**
   Either the component disables the buttons while an action is in flight, or
   the store serialises the operation. **The store is the stronger place** —
   the component alone leaves the store callable twice from anywhere. If you
   guard only the component, say why the store-level path is unreachable.
 
-- [ ] **Step 2: Implement it (R45).**
+- [x] **Step 2: Implement it (R45).**
   A second invocation while one is in flight must be a **no-op**, not a
   second seal. The button must visibly reflect the in-flight state
   (disabled + a Chinese hint) so the user is not left tapping a dead button.
 
-- [ ] **Step 3: Test it.**
+- [x] **Step 3: Test it.**
   - Double tap on 保存 → `store.save` is called **once**, and exactly one
     secret is sealed (assert the seal count, not just the call count).
   - Double tap on 清除 → `forgetSecrets` runs once.
@@ -488,7 +488,7 @@ the first seal's id becomes an **orphan**. Plan 5's Global Constraints say
     that is easy to get wrong — a guard that latches on failure strands the
     user).
 
-- [ ] **Step 4: Verify.** `npx vue-tsc --noEmit` + the touched test files.
+- [x] **Step 4: Verify.** `npx vue-tsc --noEmit` + the touched test files.
 
 **Review Focus 1** — the release-after-failure half must be tested. A guard
 that never releases is a new defect.
@@ -504,7 +504,7 @@ before it knows the previous record, that is the same bug with a new shape.
 - Create: `.superpowers/sdd/2026-10-19-phone-shell-tabs-chat/migration-question.md`
 - Modify: `docs/acceptance/2026-10-19-wechat-ui.md` (a "not proven" line)
 
-- [ ] **Step 1: Assemble the evidence (R46).**
+- [x] **Step 1: Assemble the evidence (R46).**
   State, with `path:line`:
   - `runInstalledDataMigration` is defined at
     `src/migration/installedDataMigration.ts:857`;
@@ -520,7 +520,7 @@ before it knows the previous record, that is the same bug with a new shape.
   - who would be affected: a user upgrading from the 0.5.x app into this
     0.6.0 phone shell, and what they would lose.
 
-- [ ] **Step 2: Write the two options with their consequences.**
+- [x] **Step 2: Write the two options with their consequences.**
   **A** — the phone shell must migrate: wire it into `src/main.ts` boot, and
   `InstalledDataMigrationJourneyTest` comes back (it was deleted in `3f5d271`
   as bound to the old shell — a replacement would be a new journey against
@@ -531,12 +531,17 @@ before it knows the previous record, that is the same bug with a new shape.
   For each: what it costs, what it risks, and what it means for the
   acceptance record.
 
-- [ ] **Step 3: Record the maintainer's answer.**
+- [x] **Step 3: Record the maintainer's answer.**
   If no answer is available, record **the question and the evidence**, with
   the acceptance record saying that the upgrade path is *unresolved*. Do not
   pick an option. Do not wire or unwire anything.
 
-- [ ] **Step 4: Update the acceptance record.**
+  No answer was available, so the second sentence is what was done: the
+  question, both options and their consequences are in `migration-question.md`,
+  and `docs/acceptance/2026-10-19-wechat-ui.md` states the path is unproven and
+  undecided. Nothing was wired or unwired.
+
+- [x] **Step 4: Update the acceptance record.**
   Add a line stating the migration/upgrade path is not proven, and why.
 
 **Review Focus 1** — the document must not read as if a decision was made.
@@ -555,7 +560,7 @@ right one.
 **This task closes the loop Plan 5b left open: F3 was fixed in code and never
 walked on a device.**
 
-- [ ] **Step 1: Build.**
+- [x] **Step 1: Build.**
   From the **bash** tool (the npm script shells out to a `.ps1` internally,
   which the shim does not inspect):
   ```
@@ -564,7 +569,7 @@ walked on a device.**
   Record the APK path, SHA-256, `versionCode`/`versionName`, and the
   emulator's API level — as `docs/acceptance/2026-10-19-wechat-ui.md` did.
 
-- [ ] **Step 2: Boot.**
+- [x] **Step 2: Boot.**
   Run it **through the PowerShell tool**:
   ```
   Set-Location D:\projects\pocketshell; & scripts\start-emulator.ps1
@@ -576,13 +581,13 @@ walked on a device.**
   a running emulator and never kills one it did not start. If the emulator
   hangs, **stop and report** — do not force-kill a pre-existing one.
 
-- [ ] **Step 3: Walk the key path (this is F3's proof).**
+- [x] **Step 3: Walk the key path (this is F3's proof).**
   新增连接 → 密钥 → the empty-vault control → import/generate a key → the key
   appears in the `<select>` → save the host. Screenshot each step. Then walk
   the **second**-key path (the `manage-keys` control) — Plan 5b's own fix
   round added it, and it has never been seen on a device.
 
-- [ ] **Step 4: Walk the copy.**
+- [x] **Step 4: Walk the copy.**
   Every Chinese string the user can now see: the validation problems, the
   vault-read failure, the dial failure, and the key-sheet copy. Record any
   English that still appears — with the file that authored it. **This is the
@@ -596,13 +601,23 @@ walked on a device.**
     what the error line says.
   - Double-tap 保存 → record how many rows appear.
 
-- [ ] **Step 6: Update the acceptance record, item by item.**
+  **Two of three were walked; the second bullet was not.** 4a:
+  `46-rerun-4a-filled.png` (toggle off, password typed, hint shown) and
+  `47-rerun-4a-refused.png` (保存 refused with the reason inline). 4c:
+  `48-rerun-4c-double-tap.png` (two taps, one row, one lock glyph).
+  4b's UI channel is proven by the dial error (`49-rerun-dial-error.png`), but
+  the *save/clear* failure could not be forced from `adb` — that needs a
+  patched build, and patching the build to make a red line appear would prove
+  nothing about the shipping code. Left unticked; the gap is stated in
+  `plan6-task-6-report.md` §Gaps and in the rerun record.
+
+- [x] **Step 6: Update the acceptance record, item by item.**
   For each of the eight items, one of: **PASS** (with the screenshot that
   proves it), **FAIL** (with what was seen), **NOT ACCEPTED** (with the
   blocker). Item 1 must still pass — if it does not, stop and report that
   first; it is the shell's foundation.
 
-- [ ] **Step 7: State what the walk does not prove.**
+- [x] **Step 7: State what the walk does not prove.**
   This box has **no SSH server** — only the client (`ssh.exe`; no `sshd`).
   So the *connect* half of item 2, and items 3–8, stay **NOT ACCEPTED** with
   the reason "no reachable SSH host on this box", unless a server is
@@ -621,7 +636,7 @@ invalidates the whole walk.
 
 ### Task 7: Close the plan out
 
-- [ ] **Step 1: Full gate.**
+- [x] **Step 1: Full gate.**
   Run these as **two separate calls in two different tools** — the shell shim
   matches the *string* "PowerShell" in a command and rejects the whole
   invocation, so pasting a block that mentions it into the bash tool is
@@ -643,25 +658,25 @@ invalidates the whole walk.
   script, so it runs fine from bash.)
   Paste the **real** numbers. The expected JS-gate state is the working-tree
   baseline (**111 files / 856 tests**) **plus** this plan's new tests, with
-  the **single known Windows-only red** (`sshKeySetup.test.ts:392` — a POSIX
+  the **single known Windows-only red** (`sshKeySetup.test.ts:401` — a POSIX
   `0o600` assertion against a Windows `0o666`/`438`; it predates this plan and
   must not be "fixed" by loosening it) and nothing else. If the red count
   is not 1, or any other file is red, **stop and report** — do not adjust an
   assertion to make the number match.
 
-- [ ] **Step 2: Update the ledger.**
+- [x] **Step 2: Update the ledger.**
   Append this plan's section to
   `.superpowers/sdd/2026-10-19-phone-shell-tabs-chat/progress.md`: the
   rulings R39–R48, every commit, the gate numbers, the acceptance outcome
   item by item, and the migration decision (or its absence).
 
-- [ ] **Step 3: Update the handoff.**
+- [x] **Step 3: Update the handoff.**
   `.../HANDOFF.md` must end up with the new HEAD, the new gate numbers, the
   acceptance outcome, and whatever is still open (the native-plugin error
   codes; the dormant lane cluster; the 53 dead screens; any 4b minor that
   was deferred rather than fixed).
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
   One commit per task, each with a message that states what changed and
   why. The controller commits; implementers do not.
 

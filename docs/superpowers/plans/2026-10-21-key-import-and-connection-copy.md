@@ -92,7 +92,7 @@ hosted there instead), `tests/unit/*.test.ts` (new or extended),
 - [ ] **Step 4.** Back behaviour (R34): opening the sheet pushes a stack entry,
       Back pops the sheet and leaves the editor open. Wire it through the
       existing seam the editor already uses (`@update:editor-open` /
-      `backStack` in `PhoneApp.vue:123-126`) rather than a new global handler.
+      `backStack` in `PhoneApp.vue:124-126`) rather than a new global handler.
 - [ ] **Step 5.** Tests, in the existing style (plain `createApp` + jsdom, ONE
       flat top-level `describe` per file, R14.5):
       - opening the sheet from the empty-state control;
@@ -175,7 +175,7 @@ npm run build:android:debug:win
 ```
 
 Expected: JS gate = 109 files / 835 tests + the new ones, with the single known
-Windows-only red (`sshKeySetup.test.ts:392`) and nothing else; doctor green;
+Windows-only red (`sshKeySetup.test.ts:401`) and nothing else; doctor green;
 androidTest compiles; APK builds and its packaged version matches what the script
 printed. In the packaged walk, item 1 must still pass unchanged.
 
