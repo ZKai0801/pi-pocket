@@ -5,6 +5,10 @@ import type { SavedHost } from '../../src/platform/android/hostStore';
 
 const vault = vi.hoisted(() => ({ listSshKeys: vi.fn() }));
 vi.mock('../../src/native/sshKeyVault', () => ({ listSshKeys: vault.listSshKeys }));
+// The editor reaches the shared key manager for its vault sheet; that module
+// wires IndexedDB and the native plugin at import time, and this file never
+// opens the sheet. `connectionEditorKeySheet.test.ts` covers the sheet itself.
+vi.mock('../../src/platform/android/hosts', () => ({ androidKeyManager: {} }));
 
 type Status = 'idle' | 'connecting' | 'connected' | 'error';
 

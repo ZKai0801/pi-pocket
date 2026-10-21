@@ -31,6 +31,7 @@ import { ConnectionController } from '../session/connectionController';
 import { hostKeyAnswer, hostKeyCard, hostKeyRefusalMessage } from '../session/hostKeyCard';
 import { type HomeSurface } from '../session/homeSurface';
 import {
+  clearViews,
   createBackStack,
   createShellBackNavigation,
   installBackButton,
@@ -120,9 +121,26 @@ const backNavigationOwner = createShellBackNavigation({
   },
 });
 
+/** The pushed view of the 连接 tab: `'editor'`, or `'keys'` stacked above it. */
+const connectionView = computed(() => backStack.current('connections'));
+
 function setEditorOpen(open: boolean): void {
   if (open) backStack.push('connections', 'editor');
-  else backStack.pop('connections');
+  // Closing the editor drops a key sheet stacked above it as well (R34).
+  else clearViews(backStack, 'connections');
+}
+
+/**
+ * R34: the key vault sheet is a view of the 连接 tab the editor pushes, so
+ * Android Back pops the sheet and leaves the editor open. The sheet's own
+ * state stays in the editor; only this entry lives here.
+ */
+function setKeysOpen(open: boolean): void {
+  if (open) {
+    if (backStack.current('connections') !== 'keys') backStack.push('connections', 'keys');
+    return;
+  }
+  if (backStack.current('connections') === 'keys') backStack.pop('connections');
 }
 
 // A chat is a pushed view of the 会话 tab, so Back can pop it (spec §8.1).
@@ -677,8 +695,10 @@ onBeforeUnmount(() => {
     <div class="phone-shell__content">
       <ConnectionsList
         v-show="activeTab === 'connections'"
-        :editor-open="backStack.current('connections') === 'editor'"
+        :editor-open="connectionView !== null"
+        :keys-open="connectionView === 'keys'"
         @update:editor-open="setEditorOpen"
+        @update:keys-open="setKeysOpen"
       />
       <ProjectsList v-show="activeTab === 'projects'" @open-terminal="openTerminal" />
       <ChatScreen

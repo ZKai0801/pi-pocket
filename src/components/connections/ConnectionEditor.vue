@@ -6,21 +6,33 @@
  * password host names an opaque credential id. A typed passphrase or password
  * leaves this sheet only as the `save` event's second argument, and only while
  * the matching remember toggle is on — never inside the record (Plan 4, R30).
+ *
+ * The key vault sheet lives here (Plan F3, R32): this component owns both the
+ * chosen `keyHandleId` and the listed keys, so hosting the reused
+ * `SshKeysScreen` anywhere else would need a second copy of that state. Two
+ * controls reach it — 管理密钥 beside the key field (§8.3: import belongs to
+ * this flow, so a second key is addable too) and the empty vault's 导入密钥
+ * (R33). Its open/closed flag is *not* local — the shell's back stack owns it
+ * (`keysOpen` prop up, `update:keys-open` down), so Android Back closes the
+ * sheet first (R34).
  */
 import { computed, onMounted, reactive, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import KeyIcon from '../KeyIcon.vue';
+import SshKeysScreen from '../SshKeysScreen.vue';
 import { listSshKeys, type SshKeyMetadata } from '../../native/sshKeyVault';
+import { androidKeyManager } from '../../platform/android/hosts';
 import { piSessionsDirFor } from '../../pi/lastSessionRoot';
 import { validateSavedHost, type HostAuth, type SavedHost } from '../../platform/android/hostStore';
 
 type KeyAuth = Extract<HostAuth, { kind: 'key' }>;
 
-const props = defineProps<{ host?: SavedHost | null; error?: string }>();
+const props = defineProps<{ host?: SavedHost | null; error?: string; keysOpen?: boolean }>();
 const emit = defineEmits<{
   save: [host: SavedHost, secret: string | null];
   cancel: [];
   'forget-credentials': [];
+  'update:keys-open': [open: boolean];
 }>();
 
 /** The opaque password id the edited record already holds, if any. */
@@ -68,15 +80,37 @@ const canSave = computed(() => (isKeyAuth.value
 /** A failure from the list (a rejected save or clear) outranks a local hint. */
 const shownError = computed(() => (props.error && props.error.length > 0 ? props.error : error.value));
 
-onMounted(async () => {
+onMounted(loadKeys);
+
+async function loadKeys(): Promise<void> {
   try {
     keys.value = await listSshKeys();
+    keysError.value = '';
   } catch (caught) {
     keysError.value = caught instanceof Error && caught.message.length > 0
       ? caught.message
       : 'The key vault could not be read.';
   }
-});
+}
+
+/** R33: the empty state opens the vault sheet instead of naming a dead page. */
+function openKeySheet(): void {
+  emit('update:keys-open', true);
+}
+
+function closeKeySheet(): void {
+  emit('update:keys-open', false);
+}
+
+/**
+ * The vault screen's own selection, applied to this form. `stay` keeps the
+ * sheet open — a freshly generated key shows its public half there, and
+ * closing it would hide the step the user still has to take.
+ */
+function selectKey(handleId: string, stay = false): void {
+  form.keyHandleId = handleId;
+  if (!stay) closeKeySheet();
+}
 
 function selectAuth(kind: 'key' | 'password'): void {
   form.authKind = kind;
@@ -185,17 +219,37 @@ function submit(): void {
       </fieldset>
 
       <template v-if="isKeyAuth">
-        <label class="connection-editor__field">
-          <span class="connection-editor__label">密钥</span>
-          <select v-model="form.keyHandleId">
-            <option value="">选择密钥…</option>
-            <option v-for="key in keys" :key="key.handleId" :value="key.handleId">{{ key.label }}</option>
-          </select>
-        </label>
+        <div class="connection-editor__key-row">
+          <label class="connection-editor__field connection-editor__key-field">
+            <span class="connection-editor__label">密钥</span>
+            <select v-model="form.keyHandleId">
+              <option value="">选择密钥…</option>
+              <option v-for="key in keys" :key="key.handleId" :value="key.handleId">{{ key.label }}</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="connection-editor__manage-keys"
+            data-testid="manage-keys"
+            @click="openKeySheet"
+          >
+            管理密钥
+          </button>
+        </div>
         <p v-if="keysError" class="connection-editor__hint connection-editor__hint--error">{{ keysError }}</p>
-        <p v-else-if="keys.length === 0" class="connection-editor__hint">
-          密钥库为空 — 先在密钥页导入一把密钥。
-        </p>
+        <div v-else-if="keys.length === 0" class="connection-editor__keys-empty" data-testid="keys-empty">
+          <p class="connection-editor__hint" data-testid="keys-empty-hint">
+            密钥库为空 — 导入或生成一把密钥后即可在这里选择。
+          </p>
+          <button
+            type="button"
+            class="connection-editor__import-key"
+            data-testid="open-key-sheet"
+            @click="openKeySheet"
+          >
+            导入密钥
+          </button>
+        </div>
         <label class="connection-editor__field">
           <span class="connection-editor__label">口令</span>
           <input
@@ -263,6 +317,47 @@ function submit(): void {
         <button type="submit" class="connection-editor__save" :disabled="!canSave">保存</button>
       </div>
     </form>
+
+    <!--
+      Teleported out of `.phone-shell__content`, whose `overflow: hidden` and
+      `padding-bottom: 56px` clip anything laid out inside it, and out of the
+      tab bar's stacking order: the sheet is a fixed full-screen layer at
+      z-index 25, above `.AppTabBar` (20) and below the terminal (30) and the
+      trust prompt (40). Its bar and its scroll body are siblings, so the 返回
+      control never sits inside the scrolling region (R34).
+    -->
+    <Teleport to="body">
+      <section
+        v-if="keysOpen"
+        class="connection-editor__keys-sheet"
+        role="dialog"
+        aria-label="密钥"
+        data-testid="ssh-key-sheet"
+      >
+        <header class="connection-editor__keys-bar" data-testid="ssh-key-sheet-header">
+          <button
+            type="button"
+            class="connection-editor__keys-back"
+            aria-label="返回"
+            data-testid="close-ssh-key-sheet"
+            @click="closeKeySheet"
+          >
+            <AppIcon name="arrow-left" />
+          </button>
+          <h2 class="connection-editor__keys-title">密钥</h2>
+        </header>
+        <div class="connection-editor__keys-body" data-testid="ssh-key-sheet-body">
+          <SshKeysScreen
+            :manager="androidKeyManager"
+            :keys="keys"
+            :selected-handle-id="form.keyHandleId"
+            :load-error="keysError"
+            @refresh="void loadKeys()"
+            @select="selectKey"
+          />
+        </div>
+      </section>
+    </Teleport>
   </section>
 </template>
 
@@ -301,6 +396,9 @@ function submit(): void {
 .connection-editor__cancel:focus-visible,
 .connection-editor__save:focus-visible,
 .connection-editor__forget:focus-visible,
+.connection-editor__import-key:focus-visible,
+.connection-editor__manage-keys:focus-visible,
+.connection-editor__keys-back:focus-visible,
 .connection-editor__toggle input:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
@@ -433,6 +531,120 @@ function submit(): void {
 
 .connection-editor__hint--error {
   color: var(--error);
+}
+
+.connection-editor__keys-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* The vault screen is reachable whether or not the vault already holds a key:
+   §8.3 puts import/generate in this flow, so a second key must be addable here
+   rather than only from the empty state. */
+.connection-editor__key-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+}
+
+.connection-editor__key-field {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.connection-editor__manage-keys {
+  display: inline-flex;
+  min-height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 0 var(--sp-3);
+  color: var(--fg);
+  font: var(--fw-medium) var(--fs-200) / 1 var(--font-ui);
+}
+
+.connection-editor__manage-keys:active {
+  background: var(--state-hover);
+}
+
+.connection-editor__import-key {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  padding: 0 var(--sp-3);
+  color: var(--accent);
+  font: var(--fw-semibold) var(--fs-200) / 1 var(--font-ui);
+}
+
+/* A fixed full-screen layer above the tab bar (20), below the terminal (30)
+   and the trust prompt (40). The bar and the scroll body are siblings, so the
+   返回 control stays reachable while the vault screen scrolls. */
+.connection-editor__keys-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  /* The shell's own insets (src/styles.css:37-38), repeated here because the
+     sheet is teleported to <body> and so never matches `.app-shell`. The 24px
+     floor is what the shell has on Android; the runtime variable is written on
+     documentElement (PhoneApp's IME listener), so both inherit from <html>. */
+  padding-top: max(24px, var(--safe-area-inset-top, env(safe-area-inset-top, 0px)));
+  padding-bottom: max(24px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
+}
+
+.connection-editor__keys-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-2);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.connection-editor__keys-back {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.connection-editor__keys-back:active {
+  background: var(--state-hover);
+}
+
+.connection-editor__keys-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-500);
+  font-weight: var(--fw-semibold);
+}
+
+/* Bounds the height; the vault screen's own .screen-content is the scroller
+   (flex: 1, overflow-y: auto in the phone stylesheet). */
+.connection-editor__keys-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .connection-editor__actions {

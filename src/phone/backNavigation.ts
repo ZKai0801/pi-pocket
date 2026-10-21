@@ -80,7 +80,11 @@ export interface BackStack {
   handleBack(): boolean;
 }
 
-/** A minimal per-tab stack: v1 tabs carry at most one pushed view each. */
+/**
+ * A minimal per-tab stack of pushed views. Views stack rather than replace: the
+ * 连接 tab pushes `editor` and then `keys` above it, so one Back pops the key
+ * sheet and the next pops the editor. Each press pops exactly one view.
+ */
 export function createBackStack(options: BackStackOptions): BackStack {
   const stacks = reactive<Record<string, string[]>>({});
 
@@ -113,6 +117,16 @@ export function createBackStack(options: BackStackOptions): BackStack {
       return false;
     },
   };
+}
+
+/**
+ * Drop every pushed view of one tab. Closing a parent view must not leave a
+ * child stacked above a view that no longer exists — the 连接 tab pushes
+ * `editor` and then `keys`, and closing the editor from its own 取消 closes
+ * both.
+ */
+export function clearViews(stack: BackStack, tab: string): void {
+  while (stack.current(tab) !== null) stack.pop(tab);
 }
 
 export interface ShellBackNavigationOptions {

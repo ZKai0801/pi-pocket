@@ -15,8 +15,11 @@ import ConnectionEditor from './ConnectionEditor.vue';
 import { useConnectionsStore } from '../../stores/connections';
 import type { SavedHost } from '../../platform/android/hostStore';
 
-const props = defineProps<{ editorOpen?: boolean }>();
-const emit = defineEmits<{ 'update:editorOpen': [open: boolean] }>();
+const props = defineProps<{ editorOpen?: boolean; keysOpen?: boolean }>();
+const emit = defineEmits<{
+  'update:editorOpen': [open: boolean];
+  'update:keysOpen': [open: boolean];
+}>();
 
 const store = useConnectionsStore();
 
@@ -113,9 +116,11 @@ function toggleConnect(host: SavedHost): void {
       v-if="editorOpen"
       :host="editing"
       :error="editorError"
+      :keys-open="keysOpen === true"
       @save="saveHost"
       @cancel="closeEditor"
       @forget-credentials="forgetCredentials"
+      @update:keys-open="emit('update:keysOpen', $event)"
     />
 
     <template v-else>

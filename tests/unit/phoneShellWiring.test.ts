@@ -35,4 +35,26 @@ describe('phone shell wiring', () => {
     expect(sessionsStoreSource).toContain('resolveAndRememberRoot(');
     expect(connectionEditorSource).toContain('piSessionsDirFor(');
   });
+
+  it('stacks the key vault sheet on the 连接 tab instead of adding a fourth tab (R31/R34)', () => {
+    // The sheet is a pushed view of the 连接 tab, so Back pops it before the editor.
+    expect(phoneAppSource).toContain("backStack.push('connections', 'keys')");
+    expect(phoneAppSource).toContain('@update:keys-open="setKeysOpen"');
+    // A sheet above the editor must not unmount the form that owns the handle.
+    expect(phoneAppSource).toContain(':editor-open="connectionView !== null"');
+    expect(phoneAppSource).toContain(":keys-open=\"connectionView === 'keys'\"");
+    expect(connectionsListSource).toContain('@update:keys-open=');
+    expect(connectionsListSource).toContain(':keys-open="keysOpen === true"');
+    // Closing the editor clears the whole tab stack, not one entry (see
+    // `clearViews` in backNavigation.ts and its own unit tests).
+    expect(phoneAppSource).toContain("clearViews(backStack, 'connections')");
+  });
+
+  it('reuses the one key manager and the one vault screen (R32)', () => {
+    expect(connectionEditorSource).toContain("import SshKeysScreen from '../SshKeysScreen.vue'");
+    expect(connectionEditorSource).toContain("from '../../platform/android/hosts'");
+    expect(connectionEditorSource).toContain(':manager="androidKeyManager"');
+    // No second manager on this path; the singleton comes from hosts.ts.
+    expect(connectionEditorSource).not.toContain('new CredentialKeyManager');
+  });
 });

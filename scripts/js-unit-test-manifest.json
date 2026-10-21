@@ -1238,6 +1238,8 @@
         "throws until a back-navigation owner is installed, then hands it back",
         "pops the active tab stack and leaves the other tab pushed",
         "keeps each tab stack through a tab switch",
+        "clears every stacked view of a tab, so a closed parent leaves no stale child",
+        "clears a single-view stack exactly like one pop",
         "calls the home behaviour at a tab root instead of consuming the press",
         "drives the active tab stack from an installed plugin listener",
         "closes the topmost overlay before popping the tab stack",
@@ -1291,7 +1293,9 @@
       "tests": [
         "installs the Back listener, snapshot sync, and app-state lifecycle in the shell",
         "routes host actions through the store seams",
-        "remembers the probed root and preloads the editor from it"
+        "remembers the probed root and preloads the editor from it",
+        "stacks the key vault sheet on the 连接 tab instead of adding a fourth tab (R31/R34)",
+        "reuses the one key manager and the one vault screen (R32)"
       ]
     },
     "tests/unit/piSessionRootMemory.test.ts": {
@@ -1379,6 +1383,17 @@
         "disposes the bare runner exactly once after startNew adopts a file",
         "sends the following turn to the adopted path, not the draft slot",
         "disposes the bare runner and retries with a fresh runner when startNew fails"
+      ]
+    },
+    "tests/unit/connectionEditorKeySheet.test.ts": {
+      "suite": "connection editor key sheet",
+      "tests": [
+        "replaces the dead key-page hint with a control that opens the vault sheet (R33)",
+        "writes the key chosen in the sheet into the editor and returns to it",
+        "re-lists the vault on refresh so a newly generated key reaches the editor select",
+        "keeps the vault reachable and replaces the handle when the vault already holds keys (F3)",
+        "closes the sheet before the editor when Back is pressed (R34)",
+        "puts the sheet bar outside the DOM scroll region and declares a fixed layer between z-index 20 and 30"
       ]
     }
   }

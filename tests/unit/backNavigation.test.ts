@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  clearViews,
   createBackStack,
   createShellBackNavigation,
   installBackButton,
@@ -40,6 +41,34 @@ describe('phone back navigation', () => {
     expect(stack.current('connections')).toBe('editor');
     expect(stack.current('sessions')).toBe('chat');
     expect(stack.handleBack()).toBe(true);
+    expect(stack.current('connections')).toBeNull();
+    expect(stack.current('sessions')).toBe('chat');
+  });
+
+  it('clears every stacked view of a tab, so a closed parent leaves no stale child', () => {
+    const onHomeBack = vi.fn();
+    const stack = createBackStack({ getActiveTab: () => 'connections', onHomeBack });
+    stack.push('connections', 'editor');
+    stack.push('connections', 'keys');
+    expect(stack.current('connections')).toBe('keys');
+
+    clearViews(stack, 'connections');
+
+    // One `pop` would leave 'editor' here; the editor is gone, so nothing may
+    // stay above it.
+    expect(stack.current('connections')).toBeNull();
+    // Back now reaches the tab root instead of a view that no longer exists.
+    expect(stack.handleBack()).toBe(false);
+    expect(onHomeBack).toHaveBeenCalledOnce();
+  });
+
+  it('clears a single-view stack exactly like one pop', () => {
+    const stack = createBackStack({ getActiveTab: () => 'connections' });
+    stack.push('connections', 'editor');
+    stack.push('sessions', 'chat');
+
+    clearViews(stack, 'connections');
+
     expect(stack.current('connections')).toBeNull();
     expect(stack.current('sessions')).toBe('chat');
   });
