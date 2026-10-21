@@ -53,7 +53,7 @@ tree (do not redo):
 | `tests/unit/sshKeyVault.test.ts` | One English→Chinese assertion |
 | `tests/unit/connectionsCredentials.test.ts` | One English→Chinese assertion |
 | `tests/unit/buildSshCredential.test.ts` | Two English→Chinese assertions |
-| `scripts/js-unit-test-manifest.json` | **Already dirty** — its diff already carries the whole new `connectionCopy.test.ts` entry (7 titles), 3 new `connectionEditorAuth` titles and 1 new `connectionsCredentials` title |
+| `scripts/js-unit-test-manifest.json` | **Already dirty** — its diff already carries the whole new `connectionCopy.test.ts` entry (7 titles), 3 new `connectionEditorAuth` titles and 1 new `hostStoreAuth` title. (`connectionsCredentials` gains **no** title — it only reworded one assertion.) The totals are 110 files / 845 tests at HEAD → **111 / 856** in the working tree |
 | `docs/superpowers/plans/2026-10-21-key-import-and-connection-copy.md` | Residual section (native-plugin English) |
 
 **Baseline counts** (the manifest is the source of truth for the checker):
@@ -97,7 +97,8 @@ tree (do not redo):
   `MissingHostCredential` refusals Chinese.** Task 3 (R44) does not reach
   them: they are thrown from `resolve()`, not from `save()`, and the
   `MissingHostCredential` that reaches the user does so through
-  `connections.ts:87` → `lastError`, a path no task here touches. List that
+  `connections.ts:359`/`:377`/`:386` (`state.lastError = errorMessage(error)`)
+  → `ConnectionsList.vue:135`. List that
   family as *known English, with the file and the reason*, and say plainly
   that fixing it is out of this plan's scope.
 - **R42** `validateSavedHost`'s English sentences stay **byte-identical**. The
@@ -355,7 +356,10 @@ refusals — it does not.
     touching this.
 
 - [ ] **Step 4: Verify.** `npx vue-tsc --noEmit` + the touched test files +
-  `tests/unit/rememberedSecretStore.test.ts` (or its current name — find it).
+  `tests/unit/rememberedSecrets.test.ts` (the JS side) and
+  `android/app/src/test/java/com/pocketshell/app/RememberedSecretStoreTest.java`
+  (the JVM side — Plan 4b's, which Plan 5 T3 proved runs: 15 tests, 0
+  failures).
 
 **Review Focus 1** — the test must fail if the fix is reverted. Show the
 mutation. A test that asserts "an error is shown" instead of "this specific
@@ -618,16 +622,18 @@ invalidates the whole walk.
 ### Task 7: Close the plan out
 
 - [ ] **Step 1: Full gate.**
-  The two `.ps1` scripts run **through the PowerShell tool**. The shell shim
+  Run these as **two separate calls in two different tools** — the shell shim
   matches the *string* "PowerShell" in a command and rejects the whole
-  invocation, so there is no bash spelling that works — use the PowerShell
-  tool for both. The other two run in bash:
+  invocation, so pasting a block that mentions it into the bash tool is
+  refused. **Call A — the PowerShell tool:**
   ```
-  # PowerShell tool:
   Set-Location D:\projects\pocketshell; & scripts\run-js-unit-gate.ps1
+  ```
+  ```
   Set-Location D:\projects\pocketshell; & scripts\android-doctor.ps1
-
-  # bash tool:
+  ```
+  **Call B — the bash tool:**
+  ```
   android/gradlew.bat -p android :app:assembleDebugAndroidTest --no-daemon
   npm run build:android:debug:win
   ```

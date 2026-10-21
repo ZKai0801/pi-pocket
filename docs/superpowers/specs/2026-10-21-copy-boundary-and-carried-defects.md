@@ -130,7 +130,7 @@ then dropped, with no indication. Two distinct harms: a host that is
 undialable, and typing that appears to do something and does not.
 
 Note the constraint this runs into: R30 clause 1 (predecessor plan
-`docs/superpowers/plans/2026-10-19-native-credentials.md:425-427`) says the
+`docs/superpowers/plans/2026-10-19-native-credentials.md:425-431`) says the
 editor emits a non-empty `secret` **only** while its remember toggle is on —
 "Toggle off ⇒ emit `null`". So the fix cannot be "seal it anyway"; it has to
 be either refusing the save or telling the user plainly.
@@ -141,7 +141,8 @@ be either refusing the save or telling the user plainly.
 `catch` opens at `:80`). The `Error` thrown by `hostStore.save()` (which
 carries the specific problem) is dropped on the floor.
 
-Note that the in-repo precedent usually cited here — `durableStorage.ts:259`'s
+Note that the in-repo precedent usually cited here —
+`src/native/durableStorage.ts:259`'s
 `appendDiagnosticEvent` — records a **code**, never a message, and the
 diagnostic sink cannot hold free text at all (§7.1). "Keep the cause" is
 therefore primarily a **UI** obligation; logging it is a second, separate
@@ -271,7 +272,7 @@ free-text field**, and `appendDiagnosticEvent` passes `kind` / `operation` /
 `code` through `safeKind` / `safeOperation` / `safeCode`, which map anything
 unknown onto `ssh-operation-failed` / `lifecycle` / `UNAVAILABLE` against
 closed whitelists. A cause string is destroyed before it is stored. The
-`durableStorage.ts:259` precedent that was cited for this records a **code**,
+`src/native/durableStorage.ts:259` precedent that was cited for this records a **code**,
 never a message.
 
 So "keep the cause" has to mean one of two things, and the plan must say which:
