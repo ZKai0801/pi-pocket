@@ -26,7 +26,9 @@ import ConnectionsList from '../components/connections/ConnectionsList.vue';
 import ProjectsList from '../components/projects/ProjectsList.vue';
 import SessionList from '../components/sessions/SessionList.vue';
 import ChatScreen from '../components/sessions/ChatScreen.vue';
+import SettingsTab from '../components/settings/SettingsTab.vue';
 import TerminalScreen from '../components/terminal/TerminalScreen.vue';
+import { installThemeSync } from './themeSync';
 import { ConnectionController } from '../session/connectionController';
 import { hostKeyAnswer, hostKeyCard, hostKeyRefusalMessage } from '../session/hostKeyCard';
 import { type HomeSurface } from '../session/homeSurface';
@@ -85,6 +87,9 @@ const TAB_HOME_SURFACE: Record<PhoneTab, HomeSurface> = {
   connections: 'connection',
   projects: 'sessions',
   sessions: 'sessions',
+  // 设置 has no workspace behind it, so Back at its root behaves like the
+  // 连接 tab's: the shell backgrounds the app instead of stepping anywhere.
+  settings: 'connection',
 };
 
 /** Topmost overlay/sheet wins: the terminal, then the Projects directory sheet. */
@@ -174,6 +179,7 @@ let removeControllerSnapshot: (() => void) | undefined;
 let removeTerminalOutput: (() => void) | undefined;
 let removeBackButton: (() => void) | undefined;
 let disposeAppStateLifecycle: (() => void) | undefined;
+let stopThemeSync: (() => void) | undefined;
 let terminalDataHandler: ((data: string) => void) | null = null;
 /** Output that landed between `attach()` and the screen's `onData()` registration. */
 let pendingTerminalOutput = '';
@@ -624,6 +630,9 @@ function applyKeyboardInsets(state: KeyboardInsetsState): void {
 onMounted(() => {
   installConnectionPort(connectionPort);
   installBackNavigation(backNavigationOwner);
+  // The live theme (设置 tab): the boot in main.ts painted the saved choice;
+  // this keeps re-picks and OS dark-mode flips applied without a restart.
+  stopThemeSync = installThemeSync(document.documentElement);
   removeBackButton = installBackButton({
     app: CapacitorApp,
     onError: (error) => {
@@ -667,6 +676,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopThemeSync?.();
   removeKeyboardViewportListeners?.();
   keyboardInsetsStateSync?.dispose();
   removeKeyboardInsetsListener?.();
@@ -701,6 +711,7 @@ onBeforeUnmount(() => {
         @update:keys-open="setKeysOpen"
       />
       <ProjectsList v-show="activeTab === 'projects'" @open-terminal="openTerminal" />
+      <SettingsTab v-show="activeTab === 'settings'" />
       <ChatScreen
         v-show="activeTab === 'sessions' && sessions.open !== null"
         @open-terminal="openTerminal"

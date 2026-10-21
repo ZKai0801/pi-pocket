@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import AppIcon, { type AppIconName } from '@ui/components/AppIcon.vue';
 
-/** The phone shell's three peer roots (spec §8.1): 连接 / 项目 / 会话. */
-export type PhoneTab = 'connections' | 'projects' | 'sessions';
+/** The phone shell's peer roots (spec §8.1): 连接 / 项目 / 会话 / 设置. */
+export type PhoneTab = 'connections' | 'projects' | 'sessions' | 'settings';
 
 interface TabItem {
   id: PhoneTab;
@@ -20,6 +20,7 @@ const TABS: readonly TabItem[] = [
   { id: 'connections', label: '连接', icon: 'terminal' },
   { id: 'projects', label: '项目', icon: 'folder' },
   { id: 'sessions', label: '会话', icon: 'activity' },
+  { id: 'settings', label: '设置', icon: 'settings' },
 ];
 
 const props = defineProps<{ modelValue: PhoneTab }>();

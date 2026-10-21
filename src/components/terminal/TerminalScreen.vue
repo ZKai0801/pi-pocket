@@ -10,7 +10,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import TerminalViewport from '../TerminalViewport.vue';
-import { mobileMonoFontFamily, mobileTheme } from '../../sharedUiDefaults';
+import { resolveTheme } from '@ui/themes';
+import { mobileMonoFontFamily } from '../../sharedUiDefaults';
+import { useAppSettings } from '../../stores/appSettings';
 import { terminalGeometryChanged, type TerminalGeometry, type TerminalResizeRequest } from '../../terminalGeometry';
 import { terminalPty, type TerminalPty } from '../../session/terminalPty';
 
@@ -30,8 +32,9 @@ interface TerminalViewportHandle {
   fit(): Promise<TerminalResizeRequest | null>;
 }
 
-/** The phone's shared terminal defaults (sharedUiDefaults): the shared theme's terminal scheme and mono face. */
-const terminalTheme = mobileTheme.terminal;
+/** The live theme's terminal scheme: follows the 设置 tab's theme choice. */
+const settings = useAppSettings();
+const terminalTheme = computed(() => resolveTheme(settings.themeChoice).terminal);
 const terminalFontFamily = mobileMonoFontFamily;
 const terminalFontSize = 13;
 

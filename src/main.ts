@@ -30,8 +30,12 @@ async function boot(): Promise<void> {
   recordDurableStorageStatus(document.documentElement, await installAndroidDurableStorage());
   document.documentElement.dataset.durableStorageOpenCalls = String(durableStorageOpenCalls());
 
+  // The saved theme goes on before the shell chunk loads, so the first frame
+  // carries the user's palette rather than flashing the shipped dark one. The
+  // shell's own `installThemeSync` keeps it live from here.
+  const { readAppSettings } = await import('./stores/appSettings');
+  applySharedUiDefaults(document.documentElement, readAppSettings().themeChoice);
   const { default: PhoneApp } = await import('./phone/PhoneApp.vue');
-  applySharedUiDefaults(document.documentElement);
   const app = createApp(PhoneApp);
   // Settings → Diagnostics/About/Update services and launch-time error capture (#2861).
   installAndroidPlatformServices(app, window);
