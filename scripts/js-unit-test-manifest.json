@@ -1006,7 +1006,13 @@
         "redacts at the 32-character material threshold and keeps short words (4b)",
         "closes the editor and clears the error after a retried save succeeds (4b)",
         "does not let a stale list error mask a locally refused save (4b, R36)",
-        "carries a known cause through a failed clear and logs an unknown one redacted (4b)"
+        "carries a known cause through a failed clear and logs an unknown one redacted (4b)",
+        "runs one save and one seal on a double tap of 保存 (4c)",
+        "runs one clear on a double tap of 清除 (4c)",
+        "ignores a save that starts while a clear is still in flight (4c)",
+        "releases the in-flight guard after a failed save so a retry runs (4c)",
+        "seals once when the store itself is called twice concurrently (4c)",
+        "disables 保存 and 清除 and shows the busy hint while an action is in flight (4c)"
       ]
     },
     "tests/unit/connectionsStore.test.ts": {

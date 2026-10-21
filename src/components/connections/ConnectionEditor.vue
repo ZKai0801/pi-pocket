@@ -40,7 +40,13 @@ const PROBLEM_COPY: Record<SavedHostProblem, string> = {
   key: '请从密钥库选择一把密钥。',
 };
 
-const props = defineProps<{ host?: SavedHost | null; error?: string; keysOpen?: boolean }>();
+const props = defineProps<{
+  host?: SavedHost | null;
+  error?: string;
+  keysOpen?: boolean;
+  /** 4c: a save or clear is in flight; both credential actions stay inert. */
+  busy?: boolean;
+}>();
 const emit = defineEmits<{
   save: [host: SavedHost, secret: string | null];
   /** The user pressed 保存: the list's last failure is being retried (R36). */
@@ -168,6 +174,9 @@ function typedSecret(): string | null {
 }
 
 function submit(): void {
+  // 4c: a second press while one action is in flight must do nothing at all —
+  // including emitting `retry` — so the list's guard is not the only one.
+  if (props.busy === true) return;
   // Pressing 保存 is the retry that retires the list's stale failure sentence,
   // so a local refusal below is never masked by it (R36).
   emit('retry');
@@ -330,6 +339,7 @@ function submit(): void {
           type="button"
           class="connection-editor__forget"
           data-testid="forget-credentials"
+          :disabled="busy"
           @click="emit('forget-credentials')"
         >
           清除已保存凭据
@@ -353,9 +363,11 @@ function submit(): void {
         data-testid="editor-error"
       >{{ shownError }}</p>
 
+      <p v-if="busy" class="connection-editor__hint" data-testid="editor-busy-hint">正在处理，请稍候。</p>
+
       <div class="connection-editor__actions">
         <button type="button" class="connection-editor__cancel" @click="emit('cancel')">取消</button>
-        <button type="submit" class="connection-editor__save" :disabled="!canSave">保存</button>
+        <button type="submit" class="connection-editor__save" :disabled="!canSave || busy">保存</button>
       </div>
     </form>
 
@@ -717,7 +729,8 @@ function submit(): void {
   color: var(--on-accent);
 }
 
-.connection-editor__save:disabled {
+.connection-editor__save:disabled,
+.connection-editor__forget:disabled {
   opacity: var(--disabled-opacity);
   cursor: not-allowed;
 }

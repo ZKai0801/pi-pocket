@@ -73,6 +73,12 @@ function failureLine(generic: string, error: unknown): string {
 const editing = ref<SavedHost | null>(null);
 const menuFor = ref<string | null>(null);
 const editorError = ref('');
+/**
+ * 4c: 保存 and 清除 share one in-flight flag. The store also refuses a second
+ * call, but by then the editor must not react to the no-op: its resolved
+ * promise would close the sheet the first action still owns.
+ */
+const saving = ref(false);
 
 const editorOpen = computed(() => props.editorOpen === true);
 const connecting = computed(() => store.status === 'connecting');
@@ -128,6 +134,8 @@ function clearEditorError(): void {
  * the user typed on screen with the reason beside it.
  */
 async function saveHost(host: SavedHost, secret: string | null): Promise<void> {
+  if (saving.value) return;
+  saving.value = true;
   const previousName = editing.value?.name ?? null;
   editorError.value = '';
   try {
@@ -135,20 +143,26 @@ async function saveHost(host: SavedHost, secret: string | null): Promise<void> {
   } catch (error) {
     editorError.value = failureLine('保存失败，请重试。', error);
     return;
+  } finally {
+    saving.value = false;
   }
   closeEditor();
 }
 
 /** R30.4: an explicit clear must report its own failure rather than vanish. */
 async function forgetCredentials(): Promise<void> {
+  if (saving.value) return;
   const name = editing.value?.name;
   if (!name) return;
+  saving.value = true;
   editorError.value = '';
   try {
     await store.forgetSecrets(name);
   } catch (error) {
     editorError.value = failureLine('无法清除已保存凭据，请重试。', error);
     return;
+  } finally {
+    saving.value = false;
   }
   const updated = store.hosts.find((candidate) => candidate.name === name);
   if (updated) editing.value = { ...updated };
@@ -171,6 +185,7 @@ function toggleConnect(host: SavedHost): void {
       v-if="editorOpen"
       :host="editing"
       :error="editorError"
+      :busy="saving"
       :keys-open="keysOpen === true"
       @save="saveHost"
       @retry="clearEditorError"

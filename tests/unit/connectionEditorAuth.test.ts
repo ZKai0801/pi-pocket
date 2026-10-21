@@ -34,11 +34,22 @@ interface FakeStore {
 }
 
 const storeCell = vi.hoisted(() => ({ current: null as unknown as FakeStore }));
-vi.mock('../../src/stores/connections', () => ({ useConnectionsStore: () => storeCell.current }));
+// Only the Pinia wrapper is replaced. `createConnectionsStore` stays real so the
+// store-level in-flight guard (4c) is exercised against its actual code, and the
+// list-level tests can hand the list a store that seals for real.
+vi.mock('../../src/stores/connections', async () => {
+  const actual = await vi.importActual<typeof import('../../src/stores/connections')>(
+    '../../src/stores/connections',
+  );
+  return { ...actual, useConnectionsStore: () => storeCell.current };
+});
 
+import type { SshHostTarget } from '@pocketshell/core';
 import ConnectionEditor from '../../src/components/connections/ConnectionEditor.vue';
 import ConnectionsList from '../../src/components/connections/ConnectionsList.vue';
 import { redactForLog } from '../../src/credentials/redactForLog';
+import { createConnectionsStore } from '../../src/stores/connections';
+import type { RememberedSecrets } from '../../src/native/rememberedSecrets';
 
 const PASSWORD_HOST: SavedHost = {
   name: 'pw', hostname: 'h', port: 22, user: 'u', keyHandleId: '',
@@ -76,6 +87,62 @@ function fakeStore(hosts: SavedHost[] = []): FakeStore {
     setPiSessionsDir: vi.fn(),
     statusFor: () => 'idle',
   }) as unknown as FakeStore;
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+/** A promise the test settles by hand, so "in flight" is a state it controls. */
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+interface RealStoreHarness {
+  store: ReturnType<typeof createConnectionsStore>;
+  records: SavedHost[];
+  put: ReturnType<typeof vi.fn<RememberedSecrets['put']>>;
+  forget: ReturnType<typeof vi.fn<RememberedSecrets['forget']>>;
+  hostsSave: ReturnType<typeof vi.fn<(host: SavedHost) => void>>;
+  savedHosts: ReturnType<typeof vi.fn<() => SavedHost[]>>;
+}
+
+/**
+ * The real store over a writable in-memory host list, so a list-level test can
+ * assert the seal (the injected `put`) rather than only the store call.
+ */
+function realStore(records: SavedHost[]): RealStoreHarness {
+  const put = vi.fn<RememberedSecrets['put']>(async () => 's-new');
+  const forget = vi.fn<RememberedSecrets['forget']>(async () => {});
+  const savedHosts = vi.fn<() => SavedHost[]>(() => records);
+  const hostsSave = vi.fn<(host: SavedHost) => void>((host) => {
+    const index = records.findIndex((entry) => entry.name === host.name);
+    if (index >= 0) records[index] = host;
+    else records.push(host);
+  });
+  const store = createConnectionsStore({
+    hosts: {
+      savedHosts,
+      save: hostsSave,
+      remove: (name) => {
+        const index = records.findIndex((entry) => entry.name === name);
+        if (index >= 0) records.splice(index, 1);
+      },
+      resolve: async (): Promise<SshHostTarget> => ({
+        hostId: 'u@h:22',
+        hostname: 'h',
+        port: 22,
+        username: 'u',
+        credential: { kind: 'key-handle', handleId: 'h-1', passphrase: null },
+      }),
+    },
+    port: { connect: async () => ({ ok: true }), disconnect: async () => {} },
+    secrets: { put, resolve: async () => null, forget },
+  });
+  return { store, records, put, forget, hostsSave, savedHosts };
 }
 
 let live: App[] = [];
@@ -763,5 +830,148 @@ describe('connection editor auth', () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it('runs one save and one seal on a double tap of 保存 (4c)', async () => {
+    const seal = deferred<string>();
+    const real = realStore([PASSWORD_HOST]);
+    real.put.mockImplementation(() => seal.promise);
+    const saveSpy = vi.spyOn(real.store, 'save');
+    const list = mountList(real.store as unknown as FakeStore);
+    await settle();
+    await openEditorFor(list.root, PASSWORD_HOST);
+    await typeInto(input(list.root, 'password-input'), 'fresh-pw');
+
+    const button = saveButton(list.root);
+    button.click();
+    button.click();
+    await settle();
+
+    // One call is not enough evidence: the store must also have sealed once.
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect(real.put).toHaveBeenCalledTimes(1);
+
+    seal.resolve('s-sealed');
+    await settle();
+
+    expect(real.hostsSave).toHaveBeenCalledTimes(1);
+    expect(real.forget).toHaveBeenCalledWith('p-1');
+  });
+
+  it('runs one clear on a double tap of 清除 (4c)', async () => {
+    const cleared = deferred<void>();
+    const real = realStore([PASSWORD_HOST]);
+    real.forget.mockImplementation(() => cleared.promise);
+    const forgetSpy = vi.spyOn(real.store, 'forgetSecrets');
+    const list = mountList(real.store as unknown as FakeStore);
+    await settle();
+    await openEditorFor(list.root, PASSWORD_HOST);
+
+    const button = q(list.root, 'forget-credentials') as HTMLButtonElement;
+    button.click();
+    button.click();
+    await settle();
+
+    expect(forgetSpy).toHaveBeenCalledTimes(1);
+    expect(real.forget).toHaveBeenCalledTimes(1);
+
+    cleared.resolve(undefined);
+    await settle();
+
+    expect(real.hostsSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a save that starts while a clear is still in flight (4c)', async () => {
+    const cleared = deferred<void>();
+    const real = realStore([PASSWORD_HOST]);
+    real.forget.mockImplementation(() => cleared.promise);
+    real.store.load();
+    real.savedHosts.mockClear();
+
+    const clearing = real.store.forgetSecrets('pw');
+    // The record and the secret id would interleave here: the clear is about to
+    // rewrite the record, and a save landing between the two writes could point
+    // the record at the id the clear forgets. One mutation at a time.
+    await real.store.save({ ...PASSWORD_HOST, name: 'pw-2' }, 'pw', 'fresh-pw');
+
+    expect(real.put).not.toHaveBeenCalled();
+    expect(real.hostsSave).toHaveBeenCalledTimes(0);
+
+    cleared.resolve(undefined);
+    await clearing;
+
+    expect(real.hostsSave).toHaveBeenCalledTimes(1);
+    expect(real.put).not.toHaveBeenCalled();
+  });
+
+  it('releases the in-flight guard after a failed save so a retry runs (4c)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = fakeStore([PASSWORD_HOST]);
+      store.save.mockRejectedValueOnce(new Error('the store is unavailable'));
+      const list = mountList(store);
+      await settle();
+      await openEditorFor(list.root, PASSWORD_HOST);
+
+      await pressSave(list.root);
+      expect(store.save).toHaveBeenCalledTimes(1);
+      expect(q(list.root, 'editor-error')?.textContent).toBe('保存失败，请重试。');
+      expect(q(list.root, 'editor-busy-hint')).toBeNull();
+
+      // The guard must release on failure; latching would strand the user.
+      await pressSave(list.root);
+
+      expect(store.save).toHaveBeenCalledTimes(2);
+      expect(q(list.root, 'editor-error')).toBeNull();
+      expect(q(list.root, 'password-input')).toBeNull();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('seals once when the store itself is called twice concurrently (4c)', async () => {
+    const seal = deferred<string>();
+    const real = realStore([PASSWORD_HOST]);
+    real.put.mockImplementation(() => seal.promise);
+    real.store.load();
+    real.savedHosts.mockClear();
+
+    const next: SavedHost = { ...PASSWORD_HOST, name: 'pw-2' };
+    const first = real.store.save(next, 'pw', 'fresh-pw');
+    const second = real.store.save(next, 'pw', 'fresh-pw');
+
+    // previousRecords is read before the seal: one save probes the deps twice.
+    // The second call returns before that read, so four probes means the guard
+    // let a second save get as far as the orphan.
+    expect(real.savedHosts).toHaveBeenCalledTimes(2);
+    expect(real.put).toHaveBeenCalledTimes(1);
+
+    seal.resolve('s-sealed');
+    await Promise.all([first, second]);
+
+    expect(real.put).toHaveBeenCalledTimes(1);
+    expect(real.hostsSave).toHaveBeenCalledTimes(1);
+    const written = real.hostsSave.mock.calls[0][0];
+    // The one sealed id is the id the written record reads: no orphan.
+    expect(written.auth).toEqual({ kind: 'password', passwordCredentialId: 's-sealed' });
+    expect(real.forget).toHaveBeenCalledWith('p-1');
+  });
+
+  it('disables 保存 and 清除 and shows the busy hint while an action is in flight (4c)', async () => {
+    const pending = deferred<void>();
+    const store = fakeStore([PASSWORD_HOST]);
+    store.save.mockImplementation(() => pending.promise);
+    const list = mountList(store);
+    await settle();
+    await openEditorFor(list.root, PASSWORD_HOST);
+
+    await pressSave(list.root);
+
+    expect(saveButton(list.root).disabled).toBe(true);
+    expect((q(list.root, 'forget-credentials') as HTMLButtonElement).disabled).toBe(true);
+    expect(q(list.root, 'editor-busy-hint')?.textContent).toBe('正在处理，请稍候。');
+
+    pending.resolve(undefined);
+    await settle();
   });
 });

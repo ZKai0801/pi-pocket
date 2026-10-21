@@ -154,6 +154,16 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
 
   const secrets = deps.secrets ?? NO_REMEMBERED_SECRETS;
 
+  /**
+   * 4c: one credential *mutation* at a time, enforced here rather than only in
+   * the editor — the store is callable twice from anywhere, and a save that
+   * interleaves with a clear can write a record pointing at an id the clear
+   * just forgot. The flag is claimed synchronously before the first `await`, so
+   * the second call sees it, and released in `finally` so a failure can be
+   * retried rather than latching.
+   */
+  const credential = reactive({ busy: false });
+
   function load(): void {
     state.hosts = deps.hosts.savedHosts();
   }
@@ -184,7 +194,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     }
   }
 
-  async function save(host: SavedHost, previousName?: string | null, secret?: string | null): Promise<void> {
+  async function saveRecord(host: SavedHost, previousName?: string | null, secret?: string | null): Promise<void> {
     const previous = previousRecords(previousName, host.name);
     const typed = typeof secret === 'string' && secret.length > 0 ? secret : null;
     let sealedId: string | null = null;
@@ -219,16 +229,46 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
     await forgetSwallowed(stale);
   }
 
-  async function saveSecret(host: SavedHost, secret: string): Promise<void> {
-    await save(host, null, secret);
+  /**
+   * 4c: a second credential mutation while one is in flight is a no-op that
+   * seals and forgets nothing. The early return sits *before* `previousRecords`
+   * is read and before the seal, so a double invocation cannot read the old
+   * record twice or leave a second sealed id with no record pointing at it.
+   */
+  async function save(host: SavedHost, previousName?: string | null, secret?: string | null): Promise<void> {
+    if (credential.busy) return;
+    credential.busy = true;
+    try {
+      await saveRecord(host, previousName, secret);
+    } finally {
+      credential.busy = false;
+    }
   }
 
+  /** Seal-and-write, under the same one-at-a-time rule as {@link save}. */
+  async function saveSecret(host: SavedHost, secret: string): Promise<void> {
+    if (credential.busy) return;
+    credential.busy = true;
+    try {
+      await saveRecord(host, null, secret);
+    } finally {
+      credential.busy = false;
+    }
+  }
+
+  /** 4c: the same one-at-a-time rule for an explicit clear. */
   async function forgetSecrets(name: string): Promise<void> {
-    const host = findRecord(name);
-    if (!host) return;
-    for (const id of heldSecretIds(host)) await secrets.forget(id);
-    deps.hosts.save(withoutSecretIds(host));
-    load();
+    if (credential.busy) return;
+    credential.busy = true;
+    try {
+      const host = findRecord(name);
+      if (!host) return;
+      for (const id of heldSecretIds(host)) await secrets.forget(id);
+      deps.hosts.save(withoutSecretIds(host));
+      load();
+    } finally {
+      credential.busy = false;
+    }
   }
 
   function setPiSessionsDir(name: string, dir: string): void {
