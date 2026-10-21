@@ -125,13 +125,29 @@ $pinnedNode = ((Get-Content -Raw -Path $nvmrc).Trim() -replace '^v', '') -replac
 if ($pinnedNode -notmatch '^[0-9]+$') {
     Fail ('.nvmrc must hold a Node major version, found "{0}"' -f $pinnedNode)
 }
-$localNode = (& node -p 'process.versions.node.split(".")[0]').Trim()
+$localNode = ((& node -p "process.versions.node") -split '\.')[0]
 if ($localNode -ne $pinnedNode) {
     Write-Host ("WARNING: this gate is running on Node {0}, but CI runs Node {1} (.nvmrc)." -f $localNode, $pinnedNode) -ForegroundColor Yellow
     Write-Host ("WARNING: a green result here does not prove CI is green; syntax or APIs newer than Node {0} pass locally and fail in CI." -f $pinnedNode) -ForegroundColor Yellow
     if ($env:JS_UNIT_GATE_STRICT_NODE -eq '1') {
         Fail ("JS_UNIT_GATE_STRICT_NODE=1 requires Node {0}" -f $pinnedNode)
     }
+}
+
+# Node >= 25 turns on Web Storage by default, so `globalThis.localStorage`
+# exists before jsdom installs its own — and without `--localstorage-file` it is
+# a non-functional object (`getItem` is not a function). jsdom does not replace
+# an existing global, so every jsdom test that reads localStorage would fail with
+# a stack trace that looks like a product bug. Turn the built-in store off when
+# the runtime knows the flag; jsdom then supplies its own, exactly as on Node 22.
+$webStorageProbe = & node '--no-experimental-webstorage' '-p' '1' 2>$null
+if ($LASTEXITCODE -eq 0 -and $env:NODE_OPTIONS -notmatch 'webstorage') {
+    $env:NODE_OPTIONS = if ([string]::IsNullOrWhiteSpace($env:NODE_OPTIONS)) {
+        '--no-experimental-webstorage'
+    } else {
+        "$($env:NODE_OPTIONS) --no-experimental-webstorage"
+    }
+    Write-Host 'Node Web Storage disabled for this run (jsdom owns localStorage).'
 }
 
 # --- report path -------------------------------------------------------------
