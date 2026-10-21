@@ -1,4 +1,4 @@
-# PocketShell — Plan 6 design: finish the copy boundary, close the four carried-over defects, and re-accept the packaged app
+# PocketShell — Plan 6 design: finish the copy boundary, close the three carried-over defects, and re-accept the packaged app
 
 Date: 2026-10-21
 Status: **draft for approval** (brainstorming output; not yet planned or built)
@@ -24,13 +24,15 @@ Plan 5b (F3/F4/F5) is **half-done at the moment of writing**:
   Verified by unit test only; **never walked on a packaged APK**.
 - **F4/F5 — in the working tree, uncommitted and unreviewed-then-changes-
   requested.** The Chinese-copy and validation-lifecycle work sits uncommitted
-  at `HEAD = e3e62f5`. An independent reviewer returned **CHANGES REQUESTED**
+  at `HEAD = caf8b64` (the commit that added this spec and its plan; the F3
+  commit is `e3e62f5`). An independent reviewer returned **CHANGES REQUESTED**
   with three findings, one of them a real product defect (§2.1 below).
 - **Acceptance items 2–8 remain open.** Item 1 (three tabs) still passes.
 
-So this design covers three things: **finish F4/F5 honestly**, **close the four
-carried-over defects**, and **re-run the acceptance walk** so the record
-reflects reality instead of the last walk's snapshot.
+So this design covers three things: **finish F4/F5 honestly**, **close the
+three carried-over defects** (§3.1–§3.3; §3.4 is a question, not a defect),
+and **re-run the acceptance walk** so the record reflects reality instead of
+the last walk's snapshot.
 
 ## 2. What the review actually found (F4, F5)
 
@@ -40,28 +42,31 @@ changed, the manifest matches. It returned CHANGES REQUESTED on:
 
 ### 2.1 The English boundary is not where it was drawn — a real defect
 
-`src/credentials/keyManagement.ts` authors **seven error sentences and two
-default labels in English**, and every one of them reaches the phone screen:
+`src/credentials/keyManagement.ts` authors **nine error sentences and two
+default labels in English**, and eight of the nine sentences are reachable from
+the phone shell:
 
-| Line | String the user sees |
-|---|---|
-| `:63` | `'Paste a private key first.'` |
-| `:82` | `'The public key could not be copied.'` |
-| `:88` | `'The public key could not be shared.'` |
-| `:101` | `'The selected SSH key is no longer available. Refresh the list and try again.'` |
-| `:107` | `'Host key associations changed before deletion. Refresh the hosts and try again.'` |
-| `:111` | `'The Android key vault did not confirm key removal.'` |
-| `:114` | `'Key removal failed and host associations could not be restored. Refresh saved hosts before connecting.'` |
-| `:51` | `'Imported SSH key'` (default label) |
-| `:66` | `'Pasted SSH key'` (default label) |
+| Line | String the user sees | Reachable from the phone shell? |
+|---|---|---|
+| `:48` | `'Android did not return a document reference for the SSH key.'` | **yes** — `pickAndImport`, called by `SshKeysScreen.vue:111` |
+| `:63` | `'Paste a private key first.'` | yes — `importText` |
+| `:82` | `'The public key could not be copied.'` | yes — `copyPublicKey` |
+| `:88` | `'The public key could not be shared.'` | yes — `sharePublicKey` |
+| `:101` | `'The selected SSH key is no longer available. Refresh the list and try again.'` | yes — `delete` |
+| `:107` | `'Host key associations changed before deletion. Refresh the hosts and try again.'` | yes — `delete` |
+| `:111` | `'The Android key vault did not confirm key removal.'` | yes — `delete` |
+| `:114` | `'Key removal failed and host associations could not be restored. Refresh saved hosts before connecting.'` | yes — `delete` |
+| `:123` | `'Select an SSH key before connecting.'` | no — only the unmounted legacy `App.vue:805` and one test |
+| `:51` | `'Imported SSH key'` (default label) | yes — renders in the editor's `<select>` |
+| `:66` | `'Pasted SSH key'` (default label) | yes — renders in the editor's `<select>` |
 
 The manager is **live**: `src/components/connections/ConnectionEditor.vue:24`
 imports `androidKeyManager` from `src/platform/android/hosts.ts`, which builds a
 `CredentialKeyManager` from `keyManagement.ts`. `SshKeysScreen.vue` calls
-`manager.copyPublicKey` / `sharePublicKey` / `delete` and renders
-`failureMessage(cause, …)` — which returns `cause.message` verbatim. The
-Chinese fallbacks added in Plan 5b are **dead code on those paths**: they fire
-only when `cause` is not an `Error`.
+`manager.copyPublicKey` / `sharePublicKey` / `delete` / `pickAndImport` and
+renders `failureMessage(cause, …)` — which returns `cause.message` verbatim
+(`SshKeysScreen.vue:82-84`). The Chinese fallbacks added in Plan 5b are **dead
+code on those paths**: they fire only when `cause` is not an `Error`.
 
 **This is not the native plugin speaking.** `keyManagement.ts` is JS-owned
 validation and policy; its own file header says so. The excuse used for the
@@ -104,25 +109,54 @@ caller.** The wrapper may still be kept (it is a public contract with a test
 that pins its exact sentences), but the *reason* changes, and — more
 importantly — the live path that actually shows a problem to the user is
 `hostStore.save()`, which currently discards the cause (§3.2).
-## 3. The four carried-over defects
+## 3. The carried-over defects and the open question
 
-All four were measured again while writing this design; all still reproduce.
+The three defects below (3.1–3.3) were all measured again while writing this
+design; all still reproduce. §3.4 is not a defect but an unresolved question
+— it is listed here so the reader sees it in the same place, and the plan
+presents it rather than deciding it (R46).
 
 ### 3.1 (4a) A remember-toggle that is off silently discards what you typed
 
 `ConnectionEditor.vue:148` — with `rememberPassword` off, a **new** password
 host is written with `passwordCredentialId: ''`. The host then cannot be
-dialled, and the only clue is the dial-time `/password/i` error
-(`buildSshCredential.ts:14`). The field also keeps accepting keystrokes that
-are then dropped, with no indication. Two distinct harms: a host that is
+dialled, and the only clue is the dial-time error from
+`buildSshCredential.ts:44-46` → `MissingPasswordCredential` (whose message is
+**already Chinese** in the current working tree:
+`这台主机保存的密码已丢失，请在连接编辑页重新输入。`) — the user is told the
+password is missing, but never that *the app chose not to keep it*, which is
+what actually happened. The field also keeps accepting keystrokes that are
+then dropped, with no indication. Two distinct harms: a host that is
 undialable, and typing that appears to do something and does not.
+
+Note the constraint this runs into: R30 clause 1 (predecessor plan
+`docs/superpowers/plans/2026-10-19-native-credentials.md:425-427`) says the
+editor emits a non-empty `secret` **only** while its remember toggle is on —
+"Toggle off ⇒ emit `null`". So the fix cannot be "seal it anyway"; it has to
+be either refusing the save or telling the user plainly.
 
 ### 3.2 (4b) The failed-save copy discards the cause
 
 `ConnectionsList.vue:81` — `editorError.value = '保存失败，请重试。';` (the
-`catch` opens at `:80`). The `Error` thrown by `hostStore.save()` (which carries the specific problem)
-is dropped on the floor. `durableStorage.ts:259` (`appendDiagnosticEvent`) is
-the in-repo precedent for keeping support diagnosable.
+`catch` opens at `:80`). The `Error` thrown by `hostStore.save()` (which
+carries the specific problem) is dropped on the floor.
+
+Note that the in-repo precedent usually cited here — `durableStorage.ts:259`'s
+`appendDiagnosticEvent` — records a **code**, never a message, and the
+diagnostic sink cannot hold free text at all (§7.1). "Keep the cause" is
+therefore primarily a **UI** obligation; logging it is a second, separate
+decision.
+
+A second, distinct path exists and is **not** fixed by this item:
+`hostStore.resolve()` throws `MissingHostCredential` (the class is declared at
+`src/platform/android/hostStore.ts:63`, its message is the `super(...)` at
+`:68`, and it is thrown at `:244`), which reaches the user through
+`connections.ts:359`/`:377`/`:386` (`state.lastError = errorMessage(error)`)
+→ `ConnectionsList.vue:135`. Two more English throws live in that same file —
+`:242` (a password credential that is not available yet) and `:262` (no saved
+host for the request). These are a different action (dialing, not saving) and
+a different contract family; they stay English by decision (R41), and the plan
+must say so rather than let the boundary note imply otherwise.
 
 ### 3.3 (4c) No in-flight guard on 保存 / 清除
 
@@ -134,10 +168,13 @@ Constraints say "never leave an orphan".
 ### 3.4 The migration question — a product decision, not a task
 
 `runInstalledDataMigration` (`src/migration/installedDataMigration.ts:857`) is
-called from **two** places: the unmounted legacy `src/App.vue:1441` and
-`src/sharedApp/main.ts:33` — and `sharedApp` is unreachable (§2.4). **No
-reachable entry point runs the migration.** Its own comment says the reload
-opt-in belongs to "the legacy App.vue".
+reached from **three** call sites, all of them outside the phone shell:
+`src/App.vue:1441` (the unmounted legacy shell), `src/sharedApp/main.ts:33`
+(`sharedApp` is unreachable — see §2.4), and `retryInstalledDataMigration`
+(`installedDataMigration.ts:963`, itself called from `App.vue:1321`). The
+function's own comment says the reload opt-in belongs to "the legacy App.vue".
+
+**No reachable entry point runs the migration.**
 
 This is the maintainer's call, and this design states the options without
 picking one:
@@ -214,8 +251,50 @@ JS-owned family to that list would make the note a list of excuses, and the
 next reviewer would have to re-derive this same finding.
 
 The boundary note is therefore **closed by construction**: it may name only
-families that are *not* JS-owned user copy. The note's final assertion stays
-as the anti-rot check.
+families that are *not* JS-owned user copy, **with one named class of
+exception** — JS-owned **contract** families, whose consumers include the
+unreachable shared app, where changing them is a contract change rather than a
+translation. That exception covers `hostStore.ts`'s `MissingHostCredential`
+refusals and `UnsupportedHostAuth`. The exception must be stated as an
+exception, with the file named, not smuggled in as if it were native. The
+note's final assertion stays as the anti-rot check: it must assert that
+`keyManagement.ts` is **not** in the note's family list, so the note cannot
+silently re-absorb a translatable family.
+
+### 7.1 The diagnostic sink cannot carry free text (a correction)
+
+The obvious way to satisfy "keep the cause" — write the raw cause into the
+diagnostic sink — **does not work in this repo**, and a plan that asks for it
+is asking for the impossible. `src/diagnostics.ts:21-27` defines
+`DiagnosticEvent` as `{ id, at, kind, operation, code }`: there is **no
+free-text field**, and `appendDiagnosticEvent` passes `kind` / `operation` /
+`code` through `safeKind` / `safeOperation` / `safeCode`, which map anything
+unknown onto `ssh-operation-failed` / `lifecycle` / `UNAVAILABLE` against
+closed whitelists. A cause string is destroyed before it is stored. The
+`durableStorage.ts:259` precedent that was cited for this records a **code**,
+never a message.
+
+So "keep the cause" has to mean one of two things, and the plan must say which:
+
+- **(a) Keep the cause in the UI.** The specific reason is shown to the user,
+  in Chinese, in the editor's error line. This is the part that is always
+  possible: the cause is a short, known sentence at every reachable `throw`.
+- **(b) Keep the cause out of the UI but in a log.** The raw text goes to
+  `console.error` (the in-repo ad-hoc precedent:
+  `src/native/durableStorage.ts:242`, `src/phone/PhoneApp.vue:110`) or to a
+  new field on the diagnostic event — which is a **schema change**
+  (`DiagnosticEvent` is persisted under `pocketshell.js.diagnostics.v1`) and
+  therefore its own decision.
+
+**(a) is the UI half and (b) is the logging half — they are not alternatives
+to each other, and the plan must not present them as if they were.** The
+editor's error line carries the Chinese reason (a); *in addition*, the raw
+cause is logged (b). The only real choice inside (b) is *where* the log goes:
+`console.error`, or a diagnostic event whose schema was extended on purpose.
+A task that says "write the raw cause there" and then asserts "the sink was
+called with it" is unsatisfiable, and an
+implementer would either drop the cause silently or invent a schema change
+nobody sanctioned.
 
 ## 8. What "done" looks like
 
@@ -225,8 +304,9 @@ as the anti-rot check.
   translated — provable by mutation, not by inspection.
 - 4a: a password host saved with the toggle off is either not saveable or
   says so; typing with the toggle off tells the user it will not be kept.
-- 4b: the failed-save message carries the cause (Chinese), and the cause
-  reaches a diagnostic sink.
+- 4b: the failed-save message carries the cause in Chinese, and the raw cause
+  is **logged** (a console log, or a diagnostic event whose schema was
+  extended on purpose — see §7.1; the sink as it stands cannot hold text).
 - 4c: a double tap on 保存/清除 does exactly one thing and seals one id.
 - A **fresh** APK is walked; `docs/acceptance/2026-10-19-wechat-ui.md` is
   updated item by item, and item 1 still passes.
