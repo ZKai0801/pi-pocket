@@ -11,6 +11,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import { useConnectionsStore } from '../../stores/connections';
 import { useProjectsStore } from '../../stores/projects';
+import { t } from '../../i18n';
 
 const emit = defineEmits<{ 'open-terminal': [path: string] }>();
 
@@ -103,25 +104,34 @@ function openTerminal(): void {
   const path = terminalPath.value;
   if (path !== null) emit('open-terminal', path);
 }
+
+/**
+ * The header action opens this project's aplexer session, so with nothing
+ * selected there is nothing to open. Saying so on the button beats a greyed
+ * 打开终端 that looks live and does nothing (the previous behaviour).
+ */
+const terminalLabel = computed(() => (
+  terminalPath.value === null ? t('projects.openTerminalDisabled') : t('projects.openTerminal')
+));
 </script>
 
 <template>
   <section class="projects">
     <header class="projects__bar">
-      <h1 class="projects__title">项目</h1>
+      <h1 class="projects__title">{{ t('projects.title') }}</h1>
       <div class="projects__actions">
         <button
           type="button"
           class="projects__terminal"
-          aria-label="打开终端"
+          :aria-label="t('projects.openTerminal')"
           data-testid="projects-open-terminal"
           :disabled="terminalPath === null"
           @click="openTerminal"
         >
           <AppIcon name="terminal" />
-          <span class="projects__terminal-label">打开终端</span>
+          <span class="projects__terminal-label">{{ terminalLabel }}</span>
         </button>
-        <button type="button" class="projects__add" aria-label="新增项目" @click="void store.openBrowse()">
+        <button type="button" class="projects__add" :aria-label="t('projects.add')" @click="void store.openBrowse()">
           <AppIcon name="plus" />
         </button>
       </div>
@@ -133,8 +143,8 @@ function openTerminal(): void {
         v-model="store.query"
         type="search"
         class="projects__search-input"
-        placeholder="搜索项目"
-        aria-label="搜索项目"
+        :placeholder="t('projects.search')"
+        :aria-label="t('projects.search')"
       />
     </div>
 
@@ -153,10 +163,10 @@ function openTerminal(): void {
         />
       </div>
 
-      <p v-if="store.state === 'loading'" class="projects__status">正在发现项目…</p>
+      <p v-if="store.state === 'loading'" class="projects__status">{{ t('projects.discovering') }}</p>
 
       <p v-else-if="!connected" class="projects__status" role="alert">
-        先连接一台主机，项目列表才会出现。
+        {{ t('projects.needConnection') }}
       </p>
 
       <p v-else-if="store.state === 'error'" class="projects__error" role="alert">{{ store.error }}</p>
@@ -164,17 +174,17 @@ function openTerminal(): void {
       <template v-else>
         <div v-if="store.state === 'no-root'" class="projects__no-root" data-testid="projects-no-root">
           <p class="projects__status">
-            这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来，或在这里指定它的位置。
+            {{ t('projects.noRoot') }}
           </p>
           <label class="projects__no-root-field">
-            <span class="projects__no-root-label">Pi 会话目录</span>
+            <span class="projects__no-root-label">{{ t('projects.rootLabel') }}</span>
             <input
               v-model="piDir"
               type="text"
               class="projects__no-root-input"
               autocomplete="off"
               spellcheck="false"
-              placeholder="留空则自动探测"
+              :placeholder="t('projects.rootPlaceholder')"
               data-testid="projects-pi-dir-input"
             />
           </label>
@@ -184,7 +194,7 @@ function openTerminal(): void {
             data-testid="projects-pi-dir-save"
             @click="savePiDir"
           >
-            保存并重新探测
+            {{ t('projects.saveAndRescan') }}
           </button>
         </div>
 
@@ -211,26 +221,26 @@ function openTerminal(): void {
         </ul>
 
         <div v-else class="projects__empty">
-          <p class="projects__empty-text">{{ store.query ? '没有匹配的项目' : '还没有项目' }}</p>
+          <p class="projects__empty-text">{{ store.query ? t('projects.emptyFiltered') : t('projects.empty') }}</p>
           <button v-if="store.query === ''" type="button" class="projects__empty-button" @click="void store.openBrowse()">
-            新增项目
+            {{ t('projects.add') }}
           </button>
         </div>
       </template>
     </div>
 
     <div v-if="store.browse.open" class="projects__sheet-scrim" @click.self="store.closeBrowse()">
-      <div class="projects__sheet" role="dialog" aria-label="新增项目">
+      <div class="projects__sheet" role="dialog" :aria-label="t('projects.add')">
         <header class="projects__sheet-bar">
-          <h2 class="projects__sheet-title">新增项目</h2>
-          <button type="button" class="projects__sheet-close" aria-label="关闭" @click="store.closeBrowse()">
+          <h2 class="projects__sheet-title">{{ t('projects.sheetTitle') }}</h2>
+          <button type="button" class="projects__sheet-close" :aria-label="t('projects.sheetCloseAria')" @click="store.closeBrowse()">
             <AppIcon name="close" />
           </button>
         </header>
 
         <p v-if="store.browse.cwd !== null" class="projects__sheet-cwd">{{ store.browse.cwd }}</p>
 
-        <p v-if="store.browse.busy" class="projects__sheet-status">正在加载…</p>
+        <p v-if="store.browse.busy" class="projects__sheet-status">{{ t('projects.loading') }}</p>
 
         <p v-else-if="store.browse.error" class="projects__sheet-error" role="alert">{{ store.browse.error }}</p>
 
@@ -243,7 +253,7 @@ function openTerminal(): void {
             </button>
           </li>
           <li v-if="(store.browse.dirs ?? []).length === 0" class="projects__sheet-row">
-            <p class="projects__sheet-empty-text">这个目录没有子目录</p>
+            <p class="projects__sheet-empty-text">{{ t('projects.emptyDirectory') }}</p>
           </li>
         </ul>
 
@@ -254,7 +264,7 @@ function openTerminal(): void {
             :disabled="store.browse.cwd === null || store.browse.cwd === store.browse.root || store.browse.busy"
             @click="void store.browseUp()"
           >
-            <AppIcon name="arrow-up" /> 上级目录
+            <AppIcon name="arrow-up" /> {{ t('projects.parentDirectory') }}
           </button>
           <button
             type="button"
@@ -262,7 +272,7 @@ function openTerminal(): void {
             :disabled="store.browse.cwd === null || store.browse.busy"
             @click="addCurrentDirectory"
           >
-            添加此目录
+            {{ t('projects.addDirectory') }}
           </button>
         </footer>
       </div>
@@ -385,12 +395,20 @@ function openTerminal(): void {
   color: var(--fg-muted);
 }
 
+/* The scroller is the page's one vertical scroll owner. It must NOT be a
+   column flex container: `.projects__list` below is `overflow: hidden` (a
+   scroll container), so as a flex item its automatic minimum size collapses
+   to 0 and it shrinks to the remaining height instead of overflowing — the
+   list then clips its own rows and the page never gains a scroll range.
+   Block layout keeps every child at its content height. */
 .projects__scroller {
-  display: flex;
+  display: block;
   flex: 1 1 auto;
-  flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .projects__pull {

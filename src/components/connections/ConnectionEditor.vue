@@ -24,6 +24,7 @@ import { listSshKeys, type SshKeyMetadata } from '../../native/sshKeyVault';
 import { androidKeyManager } from '../../platform/android/hosts';
 import { piSessionsDirFor } from '../../pi/lastSessionRoot';
 import { savedHostProblem, type HostAuth, type SavedHost, type SavedHostProblem } from '../../platform/android/hostStore';
+import { t } from '../../i18n';
 
 type KeyAuth = Extract<HostAuth, { kind: 'key' }>;
 
@@ -33,11 +34,11 @@ type KeyAuth = Extract<HostAuth, { kind: 'key' }>;
  * problem code and says it in Chinese, rather than forking the validator.
  */
 const PROBLEM_COPY: Record<SavedHostProblem, string> = {
-  name: '请填写名称。',
-  hostname: '请填写主机名或 IP 地址。',
-  user: '请填写登录用户。',
-  port: '端口需在 1–65535 之间。',
-  key: '请从密钥库选择一把密钥。',
+  name: t('connections.validation.name'),
+  hostname: t('connections.validation.hostname'),
+  user: t('connections.validation.user'),
+  port: t('connections.validation.port'),
+  key: t('connections.validation.key'),
 };
 
 const props = defineProps<{
@@ -110,7 +111,7 @@ async function loadKeys(): Promise<void> {
   } catch (caught) {
     keysError.value = caught instanceof Error && caught.message.length > 0
       ? caught.message
-      : '无法读取密钥库。';
+      : t('editor.vaultUnreadable');
   }
 }
 
@@ -199,7 +200,7 @@ function submit(): void {
   // be dropped or sealed under an id the record does not reference. Refuse.
   const secret = typedSecret();
   if (!isKeyAuth.value && form.password.length > 0 && secret === null) {
-    error.value = '未开启「记住密码」时无法保存新密码，请开启后重试。';
+    error.value = t('editor.passwordNeedRememberSave');
     return;
   }
   error.value = '';
@@ -208,37 +209,37 @@ function submit(): void {
 </script>
 
 <template>
-  <section class="connection-editor" aria-label="连接编辑">
+  <section class="connection-editor" :aria-label="t('editor.aria')">
     <header class="connection-editor__bar">
-      <button type="button" class="connection-editor__close" aria-label="取消" @click="emit('cancel')">
+      <button type="button" class="connection-editor__close" :aria-label="t('editor.cancelAria')" @click="emit('cancel')">
         <AppIcon name="close" />
       </button>
-      <h2 class="connection-editor__title">{{ props.host ? '编辑连接' : '新增连接' }}</h2>
+      <h2 class="connection-editor__title">{{ props.host ? t('editor.titleEdit') : t('editor.titleNew') }}</h2>
     </header>
 
     <form class="connection-editor__form" @input="clearProblem" @change="clearProblem" @submit.prevent="submit">
       <label class="connection-editor__field">
-        <span class="connection-editor__label">名称</span>
+        <span class="connection-editor__label">{{ t('editor.name') }}</span>
         <input v-model="form.name" type="text" autocomplete="off" placeholder="kai" />
       </label>
 
       <label class="connection-editor__field">
-        <span class="connection-editor__label">主机 / IP</span>
+        <span class="connection-editor__label">{{ t('editor.host') }}</span>
         <input v-model="form.hostname" type="text" autocomplete="off" inputmode="url" placeholder="192.168.1.3" />
       </label>
 
       <label class="connection-editor__field">
-        <span class="connection-editor__label">端口</span>
+        <span class="connection-editor__label">{{ t('editor.port') }}</span>
         <input v-model="form.port" type="text" inputmode="numeric" placeholder="22" />
       </label>
 
       <label class="connection-editor__field">
-        <span class="connection-editor__label">用户</span>
+        <span class="connection-editor__label">{{ t('editor.user') }}</span>
         <input v-model="form.user" type="text" autocomplete="off" placeholder="kai" />
       </label>
 
       <fieldset class="connection-editor__auth">
-        <legend class="connection-editor__label">认证方式</legend>
+        <legend class="connection-editor__label">{{ t('editor.auth') }}</legend>
         <div class="connection-editor__segments">
           <button
             type="button"
@@ -248,7 +249,7 @@ function submit(): void {
             data-testid="auth-key"
             @click="selectAuth('key')"
           >
-            <KeyIcon :size="16" /> 密钥
+            <KeyIcon :size="16" /> {{ t('editor.authKey') }}
           </button>
           <button
             type="button"
@@ -258,7 +259,7 @@ function submit(): void {
             data-testid="auth-password"
             @click="selectAuth('password')"
           >
-            密码
+            {{ t('editor.authPassword') }}
           </button>
         </div>
       </fieldset>
@@ -266,9 +267,9 @@ function submit(): void {
       <template v-if="isKeyAuth">
         <div class="connection-editor__key-row">
           <label class="connection-editor__field connection-editor__key-field">
-            <span class="connection-editor__label">密钥</span>
+            <span class="connection-editor__label">{{ t('editor.key') }}</span>
             <select v-model="form.keyHandleId">
-              <option value="">选择密钥…</option>
+              <option value="">{{ t('editor.selectKey') }}</option>
               <option v-for="key in keys" :key="key.handleId" :value="key.handleId">{{ key.label }}</option>
             </select>
           </label>
@@ -278,13 +279,13 @@ function submit(): void {
             data-testid="manage-keys"
             @click="openKeySheet"
           >
-            管理密钥
+            {{ t('editor.manageKeys') }}
           </button>
         </div>
         <p v-if="keysError" class="connection-editor__hint connection-editor__hint--error">{{ keysError }}</p>
         <div v-else-if="keys.length === 0" class="connection-editor__keys-empty" data-testid="keys-empty">
           <p class="connection-editor__hint" data-testid="keys-empty-hint">
-            密钥库为空 — 导入或生成一把密钥后即可在这里选择。
+            {{ t('editor.vaultEmpty') }}
           </p>
           <button
             type="button"
@@ -292,49 +293,49 @@ function submit(): void {
             data-testid="open-key-sheet"
             @click="openKeySheet"
           >
-            导入密钥
+            {{ t('editor.importKey') }}
           </button>
         </div>
         <label class="connection-editor__field">
-          <span class="connection-editor__label">口令</span>
+          <span class="connection-editor__label">{{ t('editor.passphrase') }}</span>
           <input
             v-model="form.passphrase"
             type="password"
             autocomplete="new-password"
             data-testid="passphrase-input"
-            :placeholder="storedKeySecretId && form.rememberPassphrase ? '已保存，留空则保留' : '密钥没有口令可留空'"
+            :placeholder="storedKeySecretId && form.rememberPassphrase ? t('editor.passphraseKept') : t('editor.passphraseOptional')"
           />
         </label>
         <label class="connection-editor__toggle">
           <input v-model="form.rememberPassphrase" type="checkbox" data-testid="remember-passphrase" />
-          <span class="connection-editor__toggle-label">记住口令</span>
+          <span class="connection-editor__toggle-label">{{ t('editor.rememberPassphrase') }}</span>
         </label>
       </template>
 
       <template v-else>
         <label class="connection-editor__field">
-          <span class="connection-editor__label">密码</span>
+          <span class="connection-editor__label">{{ t('editor.password') }}</span>
           <input
             v-model="form.password"
             type="password"
             autocomplete="new-password"
             data-testid="password-input"
-            :placeholder="storedPasswordId && form.rememberPassword ? '已保存，留空则保留' : '登录密码'"
+            :placeholder="storedPasswordId && form.rememberPassword ? t('editor.passwordKept') : t('editor.passwordPlaceholder')"
           />
         </label>
         <label class="connection-editor__toggle">
           <input v-model="form.rememberPassword" type="checkbox" data-testid="remember-password" />
-          <span class="connection-editor__toggle-label">记住密码</span>
+          <span class="connection-editor__toggle-label">{{ t('editor.rememberPassword') }}</span>
         </label>
         <p
           v-if="!form.rememberPassword"
           class="connection-editor__hint"
           data-testid="remember-password-hint"
-        >开启「记住密码」后才能保存新密码。</p>
+        >{{ t('editor.passwordNeedRemember') }}</p>
       </template>
 
       <div v-if="hasStoredCredential" class="connection-editor__stored">
-        <p class="connection-editor__hint">已保存</p>
+        <p class="connection-editor__hint">{{ t('editor.saved') }}</p>
         <button
           type="button"
           class="connection-editor__forget"
@@ -342,17 +343,17 @@ function submit(): void {
           :disabled="busy"
           @click="emit('forget-credentials')"
         >
-          清除已保存凭据
+          {{ t('editor.clearCredential') }}
         </button>
       </div>
 
       <label class="connection-editor__field">
-        <span class="connection-editor__label">Pi 会话目录</span>
-        <input v-model="form.piSessionsDir" type="text" autocomplete="off" spellcheck="false" placeholder="留空则自动探测" />
+        <span class="connection-editor__label">{{ t('editor.piDirectory') }}</span>
+        <input v-model="form.piSessionsDir" type="text" autocomplete="off" spellcheck="false" :placeholder="t('editor.piDirectoryPlaceholder')" />
       </label>
 
       <label class="connection-editor__field">
-        <span class="connection-editor__label">Pi 命令</span>
+        <span class="connection-editor__label">{{ t('editor.piCommand') }}</span>
         <input v-model="form.piCommand" type="text" autocomplete="off" spellcheck="false" placeholder="pi" />
       </label>
 
@@ -363,11 +364,11 @@ function submit(): void {
         data-testid="editor-error"
       >{{ shownError }}</p>
 
-      <p v-if="busy" class="connection-editor__hint" data-testid="editor-busy-hint">正在处理，请稍候。</p>
+      <p v-if="busy" class="connection-editor__hint" data-testid="editor-busy-hint">{{ t('editor.busy') }}</p>
 
       <div class="connection-editor__actions">
-        <button type="button" class="connection-editor__cancel" @click="emit('cancel')">取消</button>
-        <button type="submit" class="connection-editor__save" :disabled="!canSave || busy">保存</button>
+        <button type="button" class="connection-editor__cancel" @click="emit('cancel')">{{ t('editor.cancel') }}</button>
+        <button type="submit" class="connection-editor__save" :disabled="!canSave || busy">{{ t('editor.save') }}</button>
       </div>
     </form>
 
@@ -384,20 +385,20 @@ function submit(): void {
         v-if="keysOpen"
         class="connection-editor__keys-sheet"
         role="dialog"
-        aria-label="密钥"
+        :aria-label="t('editor.keyAria')"
         data-testid="ssh-key-sheet"
       >
         <header class="connection-editor__keys-bar" data-testid="ssh-key-sheet-header">
           <button
             type="button"
             class="connection-editor__keys-back"
-            aria-label="返回"
+            :aria-label="t('editor.backAria')"
             data-testid="close-ssh-key-sheet"
             @click="closeKeySheet"
           >
             <AppIcon name="arrow-left" />
           </button>
-          <h2 class="connection-editor__keys-title">密钥</h2>
+          <h2 class="connection-editor__keys-title">{{ t('editor.keysTitle') }}</h2>
         </header>
         <div class="connection-editor__keys-body" data-testid="ssh-key-sheet-body">
           <SshKeysScreen

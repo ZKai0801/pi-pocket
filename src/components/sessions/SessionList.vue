@@ -11,6 +11,7 @@ import { computed, onMounted } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import { projectBasename, relativeTime, useSessionsStore } from '../../stores/sessions';
 import { useProjectsStore } from '../../stores/projects';
+import { t } from '../../i18n';
 
 const store = useSessionsStore();
 const projects = useProjectsStore();
@@ -26,7 +27,7 @@ onMounted(() => {
 
 const emptyText = computed(() => {
   const project = store.lastProject;
-  return project === null ? '还没有会话' : `「${project.name}」还没有会话`;
+  return project === null ? t('sessions.empty') : t('sessions.emptyForProject', { project: project.name });
 });
 
 function openSession(path: string): void {
@@ -47,11 +48,11 @@ function retry(): void {
 <template>
   <section class="sessions">
     <header class="sessions__bar">
-      <h1 class="sessions__title">会话</h1>
+      <h1 class="sessions__title">{{ t('sessions.title') }}</h1>
       <button
         type="button"
         class="sessions__add"
-        aria-label="新建会话"
+        :aria-label="t('sessions.new')"
         :disabled="store.lastProject === null"
         @click="newConversation"
       >
@@ -60,14 +61,14 @@ function retry(): void {
     </header>
 
     <div class="sessions__body">
-      <p v-if="projects.selected === null" class="sessions__status">先选择一个项目</p>
+      <p v-if="projects.selected === null" class="sessions__status">{{ t('sessions.selectProjectFirst') }}</p>
 
-      <p v-else-if="store.state === 'loading'" class="sessions__status">正在加载会话…</p>
+      <p v-else-if="store.state === 'loading'" class="sessions__status">{{ t('sessions.loading') }}</p>
 
       <div v-else-if="store.state === 'error'" class="sessions__failed">
         <p class="sessions__error" role="alert">{{ store.error }}</p>
         <button type="button" class="sessions__retry" @click="retry">
-          <AppIcon name="refresh" /> 重试
+          <AppIcon name="refresh" /> {{ t('sessions.retry') }}
         </button>
       </div>
 
@@ -81,7 +82,7 @@ function retry(): void {
                   <span class="sessions__name">{{ session.name ?? session.id }}</span>
                   <span class="sessions__when">{{ relativeTime(session.updatedAtMs) }}</span>
                 </span>
-                <span class="sessions__preview">{{ session.preview ?? '没有内容' }}</span>
+                <span class="sessions__preview">{{ session.preview ?? t('sessions.noPreview') }}</span>
               </span>
               <AppIcon name="chevron-right" class="sessions__chevron" />
             </button>

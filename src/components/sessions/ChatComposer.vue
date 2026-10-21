@@ -6,6 +6,7 @@
  */
 import { computed, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
+import { t } from '../../i18n';
 
 const props = defineProps<{
   send: (text: string) => Promise<'sent' | 'busy' | 'error'>;
@@ -40,14 +41,14 @@ async function submit(): Promise<void> {
         v-model="text"
         class="composer__input"
         rows="1"
-        placeholder="输入消息…"
-        aria-label="输入消息"
+        :placeholder="t('composer.placeholder')"
+        :aria-label="t('composer.aria')"
         data-testid="chat-composer-input"
       />
       <button
         type="button"
         class="composer__send"
-        aria-label="发送"
+        :aria-label="t('composer.send')"
         data-testid="chat-composer-send"
         :disabled="!canSend"
         @click="submit"
@@ -55,7 +56,7 @@ async function submit(): Promise<void> {
         <span v-if="sending" class="composer__spinner" data-testid="chat-composer-spinner">
           <AppIcon name="refresh" />
         </span>
-        <span v-else>发送</span>
+        <span v-else>{{ t('composer.send') }}</span>
       </button>
     </div>
   </div>
@@ -89,6 +90,9 @@ async function submit(): Promise<void> {
 .composer__input {
   min-height: 48px;
   max-height: 120px;
+  /* `min-width: 0`: the textarea's intrinsic `cols` width is a flex floor,
+     and the row must fit the send button beside it on a narrow phone. */
+  min-width: 0;
   flex: 1 1 auto;
   resize: none;
   border: 1px solid var(--border);

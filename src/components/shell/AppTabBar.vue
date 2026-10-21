@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import AppIcon, { type AppIconName } from '@ui/components/AppIcon.vue';
+import { t } from '../../i18n';
 
 /** The phone shell's peer roots (spec §8.1): 连接 / 项目 / 会话 / 设置. */
 export type PhoneTab = 'connections' | 'projects' | 'sessions' | 'settings';
@@ -16,12 +18,12 @@ interface TabItem {
  * 会话 wears `activity`, the registry's "a running thing to watch" pulse, the
  * nearest existing register for a list of live Pi conversations.
  */
-const TABS: readonly TabItem[] = [
-  { id: 'connections', label: '连接', icon: 'terminal' },
-  { id: 'projects', label: '项目', icon: 'folder' },
-  { id: 'sessions', label: '会话', icon: 'activity' },
-  { id: 'settings', label: '设置', icon: 'settings' },
-];
+const TABS = computed<readonly TabItem[]>(() => [
+  { id: 'connections', label: t('tab.connections'), icon: 'terminal' },
+  { id: 'projects', label: t('tab.projects'), icon: 'folder' },
+  { id: 'sessions', label: t('tab.sessions'), icon: 'activity' },
+  { id: 'settings', label: t('tab.settings'), icon: 'settings' },
+]);
 
 const props = defineProps<{ modelValue: PhoneTab }>();
 const emit = defineEmits<{ 'update:modelValue': [value: PhoneTab] }>();
@@ -32,7 +34,7 @@ function selectTab(tab: PhoneTab): void {
 </script>
 
 <template>
-  <nav class="app-tab-bar" aria-label="主导航">
+  <nav class="app-tab-bar" :aria-label="t('tab.navigation')">
     <button
       v-for="tab in TABS"
       :key="tab.id"

@@ -24,9 +24,9 @@ const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'u
 describe('mobile app settings', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  it('reads and persists only the phone theme, terminal text size and Android dictation settings', () => {
+  it('reads and persists only the phone theme, language, terminal text size and Android dictation settings', () => {
     const storage = new MemoryStorage();
-    const settings = { themeChoice: 'nord', terminalFontSize: 19, voiceLanguage: 'ru', voiceSilenceSeconds: 8 } as const;
+    const settings = { themeChoice: 'nord', uiLanguage: 'en', terminalFontSize: 19, voiceLanguage: 'ru', voiceSilenceSeconds: 8 } as const;
     persistAppSettings(settings, storage);
     expect(JSON.parse(storage.getItem(SETTINGS_STORAGE_KEY) ?? '{}')).toEqual(settings);
     expect(storage.getItem(SHARED_SETTINGS_STORAGE_KEY)).toBeNull();

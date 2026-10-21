@@ -19,6 +19,7 @@ import {
   type SavedHost,
   type SavedHostProblem,
 } from '../../platform/android/hostStore';
+import { t } from '../../i18n';
 
 const props = defineProps<{ editorOpen?: boolean; keysOpen?: boolean }>();
 const emit = defineEmits<{
@@ -34,11 +35,11 @@ const store = useConnectionsStore();
  * save's message against them so the cause can be shown in Chinese (R44).
  */
 const PROBLEM_CAUSE: Record<SavedHostProblem, string> = {
-  name: '请填写名称。',
-  hostname: '请填写主机名或 IP 地址。',
-  user: '请填写登录用户。',
-  port: '端口需在 1–65535 之间。',
-  key: '请从密钥库选择一把密钥。',
+  name: t('connections.validation.name'),
+  hostname: t('connections.validation.hostname'),
+  user: t('connections.validation.user'),
+  port: t('connections.validation.port'),
+  key: t('connections.validation.key'),
 };
 
 const SAVED_HOST_CAUSE = new Map<string, string>(
@@ -55,7 +56,7 @@ function causeFor(error: unknown): string | null {
   const known = SAVED_HOST_CAUSE.get(error.message);
   if (known) return known;
   const refusal = PASSWORD_CREDENTIAL_REFUSAL.exec(error.message);
-  return refusal ? `「${refusal[1]}」使用的密码凭据尚不可用。` : null;
+  return refusal ? t('connections.passwordUnavailable', { host: refusal[1] }) : null;
 }
 
 /**
@@ -141,7 +142,7 @@ async function saveHost(host: SavedHost, secret: string | null): Promise<void> {
   try {
     await store.save(host, previousName, secret);
   } catch (error) {
-    editorError.value = failureLine('保存失败，请重试。', error);
+    editorError.value = failureLine(t('connections.saveFailed'), error);
     return;
   } finally {
     saving.value = false;
@@ -159,7 +160,7 @@ async function forgetCredentials(): Promise<void> {
   try {
     await store.forgetSecrets(name);
   } catch (error) {
-    editorError.value = failureLine('无法清除已保存凭据，请重试。', error);
+    editorError.value = failureLine(t('connections.clearCredentialFailed'), error);
     return;
   } finally {
     saving.value = false;
@@ -196,23 +197,23 @@ function toggleConnect(host: SavedHost): void {
 
     <template v-else>
       <header class="connections__bar">
-        <h1 class="connections__title">连接</h1>
-        <button type="button" class="connections__add" aria-label="新增连接" @click="openNew">
+        <h1 class="connections__title">{{ t('connections.title') }}</h1>
+        <button type="button" class="connections__add" :aria-label="t('connections.add')" @click="openNew">
           <AppIcon name="plus" />
         </button>
       </header>
 
-      <p v-if="connecting" class="connections__status">正在连接…</p>
+      <p v-if="connecting" class="connections__status">{{ t('connections.connecting') }}</p>
       <p v-if="store.lastError" class="connections__error" role="alert">{{ store.lastError }}</p>
 
       <div
         v-if="store.pendingSwitch"
         class="connections__confirm"
         role="alertdialog"
-        aria-label="切换到其他主机"
+        :aria-label="t('connections.switchAria')"
         data-testid="connections-switch-confirm"
       >
-        <p class="connections__confirm-text">切换到「{{ store.pendingSwitch }}」会断开当前连接。</p>
+        <p class="connections__confirm-text">{{ t('connections.switchConfirm', { host: store.pendingSwitch }) }}</p>
         <div class="connections__confirm-actions">
           <button
             type="button"
@@ -220,7 +221,7 @@ function toggleConnect(host: SavedHost): void {
             data-testid="connections-switch-cancel"
             @click="store.cancelSwitch()"
           >
-            取消
+            {{ t('connections.cancel') }}
           </button>
           <button
             type="button"
@@ -228,7 +229,7 @@ function toggleConnect(host: SavedHost): void {
             data-testid="connections-switch-confirm-ok"
             @click="void store.confirmSwitch()"
           >
-            切换
+            {{ t('connections.switch') }}
           </button>
         </div>
       </div>
@@ -259,7 +260,7 @@ function toggleConnect(host: SavedHost): void {
               v-if="holdsSecret(host)"
               class="connections__secret"
               role="img"
-              aria-label="已保存凭据"
+              :aria-label="t('connections.credentialAria')"
               data-testid="host-secret-lock"
             >
               <LockIcon :size="16" />
@@ -269,7 +270,7 @@ function toggleConnect(host: SavedHost): void {
           <button
             type="button"
             class="connections__more"
-            :aria-label="`${host.name} 的更多操作`"
+            :aria-label="t('connections.moreActions', { name: host.name })"
             :aria-expanded="menuFor === host.name"
             @click="menuFor = menuFor === host.name ? null : host.name"
           >
@@ -278,18 +279,18 @@ function toggleConnect(host: SavedHost): void {
 
           <div v-if="menuFor === host.name" class="connections__menu" role="menu">
             <button type="button" role="menuitem" class="connections__menu-item" @click="openEdit(host)">
-              <AppIcon name="edit-2" /> 编辑
+              <AppIcon name="edit-2" /> {{ t('connections.edit') }}
             </button>
             <button type="button" role="menuitem" class="connections__menu-item" @click="removeHost(host.name)">
-              <AppIcon name="trash-2" /> 删除
+              <AppIcon name="trash-2" /> {{ t('connections.delete') }}
             </button>
           </div>
         </li>
       </ul>
 
       <div v-else class="connections__empty">
-        <p class="connections__empty-text">还没有连接</p>
-        <button type="button" class="connections__empty-button" @click="openNew">新增连接</button>
+        <p class="connections__empty-text">{{ t('connections.empty') }}</p>
+        <button type="button" class="connections__empty-button" @click="openNew">{{ t('connections.add') }}</button>
       </div>
     </template>
   </section>

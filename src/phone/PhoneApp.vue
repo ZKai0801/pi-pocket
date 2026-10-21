@@ -29,6 +29,7 @@ import ChatScreen from '../components/sessions/ChatScreen.vue';
 import SettingsTab from '../components/settings/SettingsTab.vue';
 import TerminalScreen from '../components/terminal/TerminalScreen.vue';
 import { installThemeSync } from './themeSync';
+import { installLocaleSync } from './localeSync';
 import { ConnectionController } from '../session/connectionController';
 import { hostKeyAnswer, hostKeyCard, hostKeyRefusalMessage } from '../session/hostKeyCard';
 import { type HomeSurface } from '../session/homeSurface';
@@ -180,6 +181,7 @@ let removeTerminalOutput: (() => void) | undefined;
 let removeBackButton: (() => void) | undefined;
 let disposeAppStateLifecycle: (() => void) | undefined;
 let stopThemeSync: (() => void) | undefined;
+let stopLocaleSync: (() => void) | undefined;
 let terminalDataHandler: ((data: string) => void) | null = null;
 /** Output that landed between `attach()` and the screen's `onData()` registration. */
 let pendingTerminalOutput = '';
@@ -588,11 +590,45 @@ async function decideHostKey(choice: HostKeyTrustChoice): Promise<void> {
 
 /* -------------------------------------------------------- terminal screen */
 
-function openTerminal(path: string): void {
-  // v1 mapping, flagged for dogfood sign-off: the aplexer session name is the
-  // workspace folder's basename, not a resolved host-session lookup.
-  const name = projectBasename(path);
-  if (name.length === 0) return;
+/** Trailing slashes off, so `/home/a/git/x` and `/home/a/git/x/` are one path. */
+function normalizeDir(value: string): string {
+  const trimmed = value.replace(/\/+$/, '');
+  return trimmed.length === 0 ? '/' : trimmed;
+}
+
+/**
+ * The aplexer session 打开终端 attaches to for a project folder.
+ *
+ * The v1 mapping guessed the session name from the folder's basename, which
+ * only holds while aplexer names its sessions after the workspace. The live
+ * session list is authoritative: take the row whose workspace IS this folder,
+ * else a row named after the basename, and only then fall back to the v1
+ * guess (which the terminal screen reports as 找不到会话 if the host
+ * disagrees). An empty list is re-listed once before giving up, so a terminal
+ * opened straight after a connect still resolves.
+ */
+async function resolveTerminalSession(path: string): Promise<string | null> {
+  const fallback = projectBasename(path);
+  if (fallback.length === 0) return null;
+  const active = controller;
+  if (!active) return fallback;
+  let rows = active.getSnapshot().sessions;
+  if (rows.length === 0) {
+    const listing = await active.refreshSessions().catch(() => null);
+    if (listing?.ok) rows = active.getSnapshot().sessions;
+  }
+  const wanted = normalizeDir(path);
+  const byWorkspace = rows.find(
+    (row) => row.workspace !== null && normalizeDir(row.workspace) === wanted,
+  );
+  if (byWorkspace) return byWorkspace.name;
+  const byName = rows.find((row) => row.name === fallback);
+  return byName?.name ?? fallback;
+}
+
+async function openTerminal(path: string): Promise<void> {
+  const name = await resolveTerminalSession(path);
+  if (name === null || name.length === 0) return;
   terminalTarget.value = { name, title: name };
 }
 
@@ -633,6 +669,7 @@ onMounted(() => {
   // The live theme (设置 tab): the boot in main.ts painted the saved choice;
   // this keeps re-picks and OS dark-mode flips applied without a restart.
   stopThemeSync = installThemeSync(document.documentElement);
+  stopLocaleSync = installLocaleSync(document.documentElement);
   removeBackButton = installBackButton({
     app: CapacitorApp,
     onError: (error) => {
@@ -677,6 +714,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopThemeSync?.();
+  stopLocaleSync?.();
   removeKeyboardViewportListeners?.();
   keyboardInsetsStateSync?.dispose();
   removeKeyboardInsetsListener?.();

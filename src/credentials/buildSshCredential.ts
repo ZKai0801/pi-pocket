@@ -8,6 +8,7 @@
  */
 import type { SshCredential } from '@pocketshell/core';
 import type { HostAuth } from '@/platform/android/hostStore';
+import { t } from '../i18n';
 
 /** Resolves a sealed secret by id; `null` when it is absent or undecryptable. */
 export type SecretLookup = (secretId: string) => Promise<string | null>;
@@ -15,7 +16,7 @@ export type SecretLookup = (secretId: string) => Promise<string | null>;
 /** A password host whose sealed password is gone, so the dial cannot proceed. */
 export class MissingPasswordCredential extends Error {
   constructor() {
-    super('这台主机保存的密码已丢失，请在连接编辑页重新输入。');
+    super(t('credential.passwordLost'));
     this.name = 'MissingPasswordCredential';
   }
 }

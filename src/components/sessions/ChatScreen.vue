@@ -12,6 +12,7 @@ import { useSessionsStore } from '../../stores/sessions';
 import type { PiTurn } from '../../pi/types';
 import ChatBubble from './ChatBubble.vue';
 import ChatComposer from './ChatComposer.vue';
+import { t } from '../../i18n';
 
 const store = useSessionsStore();
 
@@ -21,7 +22,7 @@ const title = computed(() => {
   const name = store.open?.name;
   if (name) return name;
   const id = store.open?.id;
-  return id ? id : '会话';
+  return id ? id : t('chat.title');
 });
 
 /** The chat's own project: the folder whose terminal the header opens. */
@@ -138,14 +139,14 @@ function goBack(): void {
 <template>
   <section class="chat">
     <header class="chat__bar">
-      <button type="button" class="chat__back" aria-label="返回列表" @click="goBack">
+      <button type="button" class="chat__back" :aria-label="t('chat.backAria')" @click="goBack">
         <AppIcon name="arrow-left" />
       </button>
       <h1 class="chat__title">{{ title }}</h1>
       <button
         type="button"
         class="chat__terminal"
-        aria-label="打开终端"
+        :aria-label="t('chat.openTerminal')"
         data-testid="chat-open-terminal"
         :disabled="terminalPath === null"
         @click="openTerminal"
@@ -169,12 +170,12 @@ function goBack(): void {
         />
       </div>
 
-      <p v-if="store.open === null && store.state === 'loading'" class="chat__status">正在打开会话…</p>
+      <p v-if="store.open === null && store.state === 'loading'" class="chat__status">{{ t('chat.opening') }}</p>
 
       <div v-else-if="store.open === null && store.state === 'error'" class="chat__failed">
         <p class="chat__error-box" role="alert">{{ store.error }}</p>
         <button type="button" class="chat__retry" @click="void refresh()">
-          <AppIcon name="refresh" /> 重试
+          <AppIcon name="refresh" /> {{ t('chat.retry') }}
         </button>
       </div>
 
@@ -182,7 +183,7 @@ function goBack(): void {
         <div v-if="store.state === 'error'" class="chat__error" role="alert">
           <p class="chat__error-text">{{ store.error }}</p>
           <button type="button" class="chat__retry" @click="void refresh()">
-            <AppIcon name="refresh" /> 重试
+            <AppIcon name="refresh" /> {{ t('chat.retry') }}
           </button>
         </div>
 
@@ -209,6 +210,10 @@ function goBack(): void {
   height: 100%;
   background: var(--chat-bg);
   padding: var(--sp-3);
+  /* One phone-width ratio for every bubble: a bubble is a share of the
+     screen, never a share of its own content (a fenced block scrolls inside
+     it). ChatBubble reads this; the fallback there keeps it standalone. */
+  --chat-bubble-max-width: 78%;
 }
 
 .chat__bar {
@@ -274,12 +279,20 @@ function goBack(): void {
   white-space: nowrap;
 }
 
+/* Vertical only: the transcript must never pan sideways. A bubble that used
+   to be widened by one long code line made `overflow-x` compute to auto here
+   (an `auto` y-axis turns a `visible` x-axis into `auto`), which is what let
+   the whole chat slide left and right. */
 .chat__scroller {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .chat__pull {
@@ -386,6 +399,7 @@ function goBack(): void {
 
 .chat__turns {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: var(--sp-3);
   padding-bottom: var(--sp-3);

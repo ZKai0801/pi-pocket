@@ -7,6 +7,7 @@ import {
   type NativeSshKeyVaultPlugin,
   type SshKeyMetadata,
 } from '@/native/sshKeyVault';
+import { t } from '../i18n';
 
 export interface SshKeyHostReference {
   hostId: string;
@@ -45,10 +46,10 @@ export class CredentialKeyManager {
   async pickAndImport(options: { label: string; passphrase?: string }): Promise<SshKeyMetadata | null> {
     const picked = await this.vault.pickKeyDocument();
     if (picked.cancelled) return null;
-    if (!picked.documentId) throw new Error('Android 未返回 SSH 密钥的文档引用。');
+    if (!picked.documentId) throw new Error(t('keys.noDocumentReference'));
     const key = parseSshKeyMetadata(await this.vault.importPickedKey({
       documentId: picked.documentId,
-      label: options.label.trim() || picked.name || '导入的密钥',
+      label: options.label.trim() || picked.name || t('keys.importedLabel'),
       ...(options.passphrase ? { passphrase: options.passphrase } : {}),
     }));
     return key;
@@ -60,10 +61,10 @@ export class CredentialKeyManager {
    * The caller owns clearing its input field whatever the outcome.
    */
   async importText(options: { text: string; label: string; passphrase?: string }): Promise<SshKeyMetadata> {
-    if (!options.text.trim()) throw new Error('请先粘贴私钥。');
+    if (!options.text.trim()) throw new Error(t('keys.pasteFirst'));
     return parseSshKeyMetadata(await this.vault.importKeyText({
       text: options.text,
-      label: options.label.trim() || '粘贴的密钥',
+      label: options.label.trim() || t('keys.pastedLabel'),
       ...(options.passphrase ? { passphrase: options.passphrase } : {}),
     }));
   }
@@ -79,13 +80,13 @@ export class CredentialKeyManager {
   /** Copy the public line to the Android clipboard natively. */
   async copyPublicKey(handleId: string, passphrase?: string): Promise<void> {
     const result = await this.vault.copyPublicKey({ handleId, ...(passphrase ? { passphrase } : {}) });
-    if (result.copied !== true) throw new Error('无法复制公钥。');
+    if (result.copied !== true) throw new Error(t('keys.copyFailed'));
   }
 
   /** Open the Android share sheet with the public line. */
   async sharePublicKey(handleId: string, passphrase?: string): Promise<void> {
     const result = await this.vault.sharePublicKey({ handleId, ...(passphrase ? { passphrase } : {}) });
-    if (result.shared !== true) throw new Error('无法分享公钥。');
+    if (result.shared !== true) throw new Error(t('keys.shareFailed'));
   }
 
   async generate(options: { label: string; algorithm: 'Ed25519' | 'RSA-3072' }): Promise<SshKeyMetadata> {
@@ -98,20 +99,20 @@ export class CredentialKeyManager {
   ): Promise<DeleteKeyResult> {
     const keys = await this.list();
     const key = keys.find((candidate) => candidate.handleId === handleId);
-    if (!key) throw new Error('所选密钥已不可用，请刷新列表后重试。');
+    if (!key) throw new Error(t('keys.keyUnavailable'));
     const affectedHosts = await this.references.list(handleId);
     if (affectedHosts.length > 0 && (!confirmedHosts || !sameReferences(affectedHosts, confirmedHosts))) {
       return { status: 'confirmation-required', affectedHosts };
     }
     if (!await this.references.detach(handleId, affectedHosts)) {
-      throw new Error('主机密钥关联在删除前已变更，请刷新主机后重试。');
+      throw new Error(t('keys.hostLinksChanged'));
     }
     try {
       const result = await this.vault.deleteKey({ handleId, fingerprintSha256: key.fingerprintSha256 });
-      if (result.deleted !== true) throw new Error('Android 密钥库未确认删除。');
+      if (result.deleted !== true) throw new Error(t('keys.deleteNotConfirmed'));
     } catch (error) {
       if (!await this.references.restore(handleId, affectedHosts)) {
-        throw new Error('密钥删除失败且主机关联未能恢复，请在连接前刷新已保存的主机。');
+        throw new Error(t('keys.deleteFailedRestore'));
       }
       throw error;
     }
@@ -120,7 +121,7 @@ export class CredentialKeyManager {
   }
 
   keyCredential(handleId: string, passphrase?: string | null): SshKeyHandleCredential {
-    if (!handleId.trim()) throw new Error('请先选择一把 SSH 密钥。');
+    if (!handleId.trim()) throw new Error(t('keys.selectFirst'));
     return {
       kind: 'key-handle',
       handleId,

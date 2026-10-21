@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia';
 import { parseFontSize } from '@ui/fonts';
 import { parseThemeChoice, THEME_CHOICE_DEFAULT } from '@ui/themes';
+import { normalizeUiLanguage, parseUiLanguage, UI_LANGUAGE_DEFAULT } from '../i18n';
 
 /**
  * Phone-route preferences not owned by the shared settings store (theme,
- * text size, and the Android-only dictation language and silence window).
+ * interface language, text size, and the Android-only dictation language
+ * and silence window).
  * Background grace and reconnect-on-return are NOT here: their one
  * owner is the shared settings store (core packages/ui `stores/settings.ts`,
  * key `pocketshell.settings.v1`, D42), which the Connections group edits and
@@ -29,6 +31,7 @@ export const VOICE_SILENCE_MAX_SECONDS = 60;
 
 export interface AppSettings {
   themeChoice: string;
+  uiLanguage: string;
   terminalFontSize: number;
   voiceLanguage: VoiceLanguageCode;
   voiceSilenceSeconds: number;
@@ -36,6 +39,7 @@ export interface AppSettings {
 
 export const DEFAULT_APP_SETTINGS: Readonly<AppSettings> = {
   themeChoice: THEME_CHOICE_DEFAULT,
+  uiLanguage: UI_LANGUAGE_DEFAULT,
   terminalFontSize: 16,
   voiceLanguage: VOICE_LANGUAGE_AUTO,
   voiceSilenceSeconds: VOICE_SILENCE_DEFAULT_SECONDS,
@@ -76,6 +80,7 @@ export function parseAppSettings(raw: unknown): AppSettings {
   const input = raw as Record<string, unknown>;
   return {
     themeChoice: parseThemeChoice(input.themeChoice) ?? DEFAULT_APP_SETTINGS.themeChoice,
+    uiLanguage: parseUiLanguage(input.uiLanguage) ?? DEFAULT_APP_SETTINGS.uiLanguage,
     terminalFontSize: parseFontSize(input.terminalFontSize) ?? DEFAULT_APP_SETTINGS.terminalFontSize,
     voiceLanguage: normalizeVoiceLanguage(input.voiceLanguage),
     voiceSilenceSeconds: normalizeVoiceSilenceSeconds(input.voiceSilenceSeconds),
@@ -108,6 +113,10 @@ export const useAppSettings = defineStore('appSettings', {
       const parsed = parseThemeChoice(choice);
       if (parsed === undefined) return;
       this.themeChoice = parsed;
+      this.persist();
+    },
+    setUiLanguage(language: unknown) {
+      this.uiLanguage = normalizeUiLanguage(language);
       this.persist();
     },
     setTerminalFontSize(size: unknown) {

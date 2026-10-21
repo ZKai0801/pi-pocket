@@ -15,6 +15,7 @@ import { mobileMonoFontFamily } from '../../sharedUiDefaults';
 import { useAppSettings } from '../../stores/appSettings';
 import { terminalGeometryChanged, type TerminalGeometry, type TerminalResizeRequest } from '../../terminalGeometry';
 import { terminalPty, type TerminalPty } from '../../session/terminalPty';
+import { t } from '../../i18n';
 
 const props = defineProps<{
   /** The aplexer session name to attach to (the opener resolves the mapping). */
@@ -84,7 +85,7 @@ async function attach(): Promise<void> {
   } catch {
     phase.value = 'error';
     errorKind.value = 'uninstalled';
-    errorText.value = '请先连接';
+    errorText.value = t('terminal.connectFirst');
     return;
   }
   pty = seam;
@@ -108,7 +109,7 @@ async function attach(): Promise<void> {
   if (!result.ok) {
     phase.value = 'error';
     errorKind.value = 'attach';
-    errorText.value = result.error ?? '无法打开终端';
+    errorText.value = result.error ?? t('terminal.openFailed');
     return;
   }
 
@@ -180,7 +181,7 @@ function close(): void {
       <button
         type="button"
         class="terminal-screen__close"
-        aria-label="关闭"
+        :aria-label="t('terminal.closeAria')"
         data-testid="terminal-screen-close"
         @click="close"
       >
@@ -191,7 +192,7 @@ function close(): void {
     <div v-if="phase === 'error'" class="terminal-screen__failed" role="alert" data-testid="terminal-screen-error">
       <AppIcon name="alert-triangle" class="terminal-screen__failed-icon" />
       <p class="terminal-screen__error-box">{{ errorText }}</p>
-      <p v-if="errorKind === 'attach'" class="terminal-screen__error-sub">会话：{{ sessionName }}</p>
+      <p v-if="errorKind === 'attach'" class="terminal-screen__error-sub">{{ t('terminal.session') }}{{ sessionName }}</p>
       <div class="terminal-screen__actions">
         <button
           v-if="errorKind === 'attach'"
@@ -200,7 +201,7 @@ function close(): void {
           data-testid="terminal-screen-retry"
           @click="void attach()"
         >
-          <AppIcon name="refresh" /> 重试
+          <AppIcon name="refresh" /> {{ t('chat.retry') }}
         </button>
         <button
           type="button"
@@ -208,13 +209,13 @@ function close(): void {
           data-testid="terminal-screen-dismiss"
           @click="close"
         >
-          关闭
+          {{ t('terminal.close') }}
         </button>
       </div>
     </div>
 
     <div v-else class="terminal-screen__stage" data-testid="terminal-screen-viewport">
-      <p v-if="phase === 'connecting'" class="terminal-screen__status">正在打开终端…</p>
+      <p v-if="phase === 'connecting'" class="terminal-screen__status">{{ t('terminal.opening') }}</p>
       <TerminalViewport
         ref="viewport"
         class="terminal-screen__viewport"

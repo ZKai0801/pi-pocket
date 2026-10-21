@@ -8,6 +8,7 @@ import {
 } from '@/credentials/keyManagement';
 import type { AuthorizedKeyInstallResult } from '@/credentials/authorizedKeys';
 import type { SshKeyMetadata } from '@/native/sshKeyVault';
+import { t } from '../i18n';
 
 export interface SshKeyHostInstallTarget {
   /** `user@host` of the live connection the key would be installed on. */
@@ -37,7 +38,7 @@ const busy = ref(false);
 const message = ref('');
 const error = ref('');
 const pendingDelete = ref<{ key: SshKeyMetadata; result: Extract<DeleteKeyResult, { status: 'confirmation-required' }> } | null>(null);
-const generateLabel = computed(() => label.value.trim() || `${algorithm.value} 密钥`);
+const generateLabel = computed(() => label.value.trim() || t('keys.defaultLabel', { algorithm: algorithm.value }));
 
 // The pasted private key lives only in the uncontrolled <textarea>: no
 // reactive copy, no store. It is read once on Import and the field is
@@ -92,11 +93,11 @@ async function importPastedKey() {
   try {
     const key = await props.manager.importText({ text, label: label.value, passphrase: passphrase.value });
     label.value = '';
-    message.value = `${key.label} 已保存到本机加密存储。`;
+    message.value = t('keys.savedMessage', { label: key.label });
     emit('select', key.handleId);
     emit('refresh');
   } catch (cause) {
-    error.value = `${failureMessage(cause, '密钥导入失败。')} 粘贴框已清空，请重新粘贴后重试。`;
+    error.value = `${failureMessage(cause, t('keys.importFailed'))} ${t('keys.importFailedPaste')}`;
   } finally {
     passphrase.value = '';
     busy.value = false;
@@ -111,12 +112,12 @@ async function importKey() {
     const key = await props.manager.pickAndImport({ label: label.value, passphrase: passphrase.value });
     if (key) {
       label.value = '';
-      message.value = `${key.label} 已保存到本机加密存储。`;
+      message.value = t('keys.savedMessage', { label: key.label });
       emit('select', key.handleId);
       emit('refresh');
     }
   } catch (cause) {
-    error.value = failureMessage(cause, '密钥导入失败。');
+    error.value = failureMessage(cause, t('keys.importFailed'));
   } finally {
     passphrase.value = '';
     busy.value = false;
@@ -130,12 +131,12 @@ async function generateKey() {
   try {
     const key = await props.manager.generate({ label: generateLabel.value, algorithm: algorithm.value });
     label.value = '';
-    message.value = `${key.label} 已生成。把它的公钥添加到服务器后即可使用。`;
+    message.value = t('keys.generatedMessage', { label: key.label });
     emit('select', key.handleId, true);
     emit('refresh');
     await showPublicKey(key);
   } catch (cause) {
-    error.value = failureMessage(cause, '密钥生成失败。');
+    error.value = failureMessage(cause, t('keys.generateFailed'));
   } finally {
     busy.value = false;
   }
@@ -180,7 +181,7 @@ async function loadPublicKey(key: Pick<SshKeyMetadata, 'handleId' | 'algorithm'>
     publicPassphraseNeeded.value = '';
   } catch (cause) {
     if (needsPassphrase(cause)) publicPassphraseNeeded.value = key.handleId;
-    publicError.value = failureMessage(cause, '无法读取公钥。');
+    publicError.value = failureMessage(cause, t('keys.publicReadFailed'));
   } finally {
     publicBusy.value = false;
   }
@@ -192,9 +193,9 @@ async function copyPublicKey(key: SshKeyMetadata) {
   publicMessage.value = '';
   try {
     await props.manager.copyPublicKey(key.handleId);
-    publicMessage.value = '公钥已复制。请粘贴到服务器的 ~/.ssh/authorized_keys 中。';
+    publicMessage.value = t('keys.publicCopied', { path: t('keys.authorizedKeysPath') });
   } catch (cause) {
-    publicError.value = failureMessage(cause, '无法复制公钥。');
+    publicError.value = failureMessage(cause, t('keys.publicCopyFailed'));
   } finally {
     publicBusy.value = false;
   }
@@ -207,7 +208,7 @@ async function sharePublicKey(key: SshKeyMetadata) {
   try {
     await props.manager.sharePublicKey(key.handleId);
   } catch (cause) {
-    publicError.value = failureMessage(cause, '无法分享公钥。');
+    publicError.value = failureMessage(cause, t('keys.publicShareFailed'));
   } finally {
     publicBusy.value = false;
   }
@@ -234,10 +235,10 @@ async function confirmInstall(key: SshKeyMetadata) {
   try {
     const result = await target.install(line);
     publicMessage.value = result === 'installed'
-      ? `已添加到 ${target.hostLabel}。现在可以用 ${key.label} 连接了。`
-      : `${target.hostLabel} 的 ~/.ssh/authorized_keys 里已有 ${key.label}，未做改动。`;
+      ? t('keys.installed', { host: target.hostLabel, key: key.label })
+      : t('keys.installAlready', { host: target.hostLabel, path: t('keys.authorizedKeysPath'), key: key.label });
   } catch (cause) {
-    publicError.value = failureMessage(cause, '无法把这把密钥添加到该主机。');
+    publicError.value = failureMessage(cause, t('keys.installFailed'));
   } finally {
     pendingInstallHandleId.value = '';
     publicBusy.value = false;
@@ -255,7 +256,7 @@ async function requestDelete(key: SshKeyMetadata) {
     }
     finishDelete(key.handleId, result);
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '无法删除密钥。';
+    error.value = cause instanceof Error ? cause.message : t('keys.deleteFailed');
   }
 }
 
@@ -272,7 +273,7 @@ async function confirmDelete() {
     }
     finishDelete(pending.key.handleId, result);
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '无法删除密钥。';
+    error.value = cause instanceof Error ? cause.message : t('keys.deleteFailed');
   } finally {
     busy.value = false;
     pendingDelete.value = null;
@@ -289,8 +290,8 @@ function finishDelete(handleId: string, result: Extract<DeleteKeyResult, { statu
   if (props.selectedHandleId === handleId) emit('select', '');
   const hosts = result.affectedHosts.length;
   message.value = hosts > 0
-    ? `密钥已删除，已解除 ${hosts} 个主机的关联。`
-    : '密钥已删除。';
+    ? t('keys.deleted', { count: hosts })
+    : t('keys.deletedPlain');
   emit('refresh');
 }
 
@@ -302,14 +303,14 @@ function cancelDelete() {
 <template>
   <main class="screen-content key-screen" data-testid="ssh-keys-screen">
     <section class="key-screen__intro">
-      <h1>密钥</h1>
-      <p>私钥只保存在本机加密存储中，这里只显示标签、指纹和公钥。</p>
+      <h1>{{ t('keys.title') }}</h1>
+      <p>{{ t('keys.intro') }}</p>
     </section>
 
     <section class="key-panel panel" aria-labelledby="ssh-key-list-title">
       <div class="panel-heading">
         <div>
-          <h2 id="ssh-key-list-title">已保存的密钥</h2>
+          <h2 id="ssh-key-list-title">{{ t('keys.savedTitle') }}</h2>
         </div>
         <span class="state-tag state-tag--muted" data-testid="ssh-key-count">{{ keys.length }}</span>
       </div>
@@ -318,8 +319,8 @@ function cancelDelete() {
       <div v-if="keys.length === 0" class="key-empty" data-testid="ssh-key-empty">
         <KeyIcon :size="20" />
         <div>
-          <strong>还没有密钥</strong>
-          <p>在下方粘贴私钥、导入密钥文件，或生成一把新密钥。</p>
+          <strong>{{ t('keys.emptyTitle') }}</strong>
+          <p>{{ t('keys.emptyBody') }}</p>
         </div>
       </div>
       <ul v-else class="key-list">
@@ -335,7 +336,7 @@ function cancelDelete() {
               <KeyIcon :size="18" />
               <span class="key-row__copy">
                 <strong>{{ key.label }}</strong>
-                <span class="key-row__details">{{ key.algorithm }}<span v-if="key.passphraseRequired"> · 需要口令</span></span>
+                <span class="key-row__details">{{ key.algorithm }}<span v-if="key.passphraseRequired"> {{ t('keys.needsPassphrase') }}</span></span>
                 <code>{{ key.fingerprintSha256 }}</code>
               </span>
               <AppIcon v-if="selectedHandleId === key.handleId" name="check" :size="16" />
@@ -343,7 +344,7 @@ function cancelDelete() {
             <button
               class="icon-button key-row__delete"
               type="button"
-              :aria-label="`删除 ${key.label}`"
+              :aria-label="t('keys.deleteAria', { label: key.label })"
               :data-testid="`delete-ssh-key-${key.handleId}`"
               @click="requestDelete(key)"
             ><AppIcon name="trash-2" /></button>
@@ -356,7 +357,7 @@ function cancelDelete() {
             :data-testid="`toggle-ssh-public-key-${key.handleId}`"
             @click="togglePublicKey(key)"
           >
-            <span>公钥 · 复制、分享或安装</span>
+            <span>{{ t('keys.publicTitle') }}</span>
             <AppIcon :name="expandedHandleId === key.handleId ? 'chevron-up' : 'chevron-down'" :size="16" />
           </button>
           <section
@@ -365,19 +366,19 @@ function cancelDelete() {
             class="key-public"
             :data-testid="`ssh-public-key-panel-${key.handleId}`"
           >
-            <p class="key-public__hint">把下面这一行加到每台要连接的服务器上的 <code>~/.ssh/authorized_keys</code> 中。</p>
+            <p class="key-public__hint">{{ t('keys.publicHint', { path: t('keys.authorizedKeysPath') }) }}</p>
             <code v-if="publicLines[key.handleId]" class="key-public__line" :data-testid="`ssh-public-key-${key.handleId}`">{{ publicLines[key.handleId] }}</code>
-            <p v-else-if="publicBusy" class="key-public__hint">正在读取公钥…</p>
+            <p v-else-if="publicBusy" class="key-public__hint">{{ t('keys.readingPublic') }}</p>
             <template v-if="publicPassphraseNeeded === key.handleId">
               <label class="form-field key-field">
-                <span>密钥口令 · 仅用于读取这一次公钥</span>
+                <span>{{ t('keys.passphraseTitle') }}</span>
                 <input v-model="publicPassphrase" :data-testid="`ssh-public-key-passphrase-${key.handleId}`" type="password" autocomplete="off" @focus="keepFieldVisible" />
               </label>
-              <button class="small-action key-action" type="button" :disabled="publicBusy || !publicPassphrase" @click="loadPublicKey(key)">显示公钥</button>
+              <button class="small-action key-action" type="button" :disabled="publicBusy || !publicPassphrase" @click="loadPublicKey(key)">{{ t('keys.showPublic') }}</button>
             </template>
             <div v-if="publicLines[key.handleId]" class="key-public__actions">
-              <button class="small-action key-action" type="button" :data-testid="`copy-ssh-public-key-${key.handleId}`" :disabled="publicBusy" @click="copyPublicKey(key)">复制</button>
-              <button class="small-action key-action" type="button" :data-testid="`share-ssh-public-key-${key.handleId}`" :disabled="publicBusy" @click="sharePublicKey(key)">分享</button>
+              <button class="small-action key-action" type="button" :data-testid="`copy-ssh-public-key-${key.handleId}`" :disabled="publicBusy" @click="copyPublicKey(key)">{{ t('keys.copy') }}</button>
+              <button class="small-action key-action" type="button" :data-testid="`share-ssh-public-key-${key.handleId}`" :disabled="publicBusy" @click="sharePublicKey(key)">{{ t('keys.share') }}</button>
               <button
                 v-if="hostInstall"
                 class="small-action key-action key-action--wide"
@@ -385,16 +386,16 @@ function cancelDelete() {
                 :data-testid="`install-ssh-public-key-${key.handleId}`"
                 :disabled="publicBusy"
                 @click="requestInstall(key)"
-              >安装到 {{ hostInstall.hostLabel }}</button>
+              >{{ t('keys.installTo', { host: hostInstall.hostLabel }) }}</button>
             </div>
-            <p v-if="publicLines[key.handleId] && !hostInstall" class="key-public__hint" :data-testid="`ssh-public-key-install-hint-${key.handleId}`">连接主机后，可以把这把密钥一步安装到主机上。</p>
+            <p v-if="publicLines[key.handleId] && !hostInstall" class="key-public__hint" :data-testid="`ssh-public-key-install-hint-${key.handleId}`">{{ t('keys.installHint') }}</p>
             <section v-if="hostInstall && pendingInstallHandleId === key.handleId" class="key-confirm" role="alertdialog" :aria-labelledby="`install-title-${key.handleId}`" data-testid="ssh-key-install-confirmation">
-              <strong :id="`install-title-${key.handleId}`">把 {{ key.label }} 安装到 {{ hostInstall.hostLabel }}？</strong>
-              <p>PocketShell 会把这条公钥加到已连接主机的 <code>~/.ssh/authorized_keys</code> 中；文件中已有的密钥不会被改动。</p>
+              <strong :id="`install-title-${key.handleId}`">{{ t('keys.installConfirm', { key: key.label, host: hostInstall.hostLabel }) }}</strong>
+              <p>{{ t('keys.installBody', { path: t('keys.authorizedKeysPath') }) }}</p>
               <div class="key-actions">
-                <button class="small-action key-action" type="button" data-testid="cancel-install-ssh-key" :disabled="publicBusy" @click="pendingInstallHandleId = ''">取消</button>
+                <button class="small-action key-action" type="button" data-testid="cancel-install-ssh-key" :disabled="publicBusy" @click="pendingInstallHandleId = ''">{{ t('keys.cancel') }}</button>
                 <button class="small-action key-action key-install-confirm" type="button" data-testid="confirm-install-ssh-key" :disabled="publicBusy" @click="confirmInstall(key)">
-                  {{ publicBusy ? '正在安装…' : '安装密钥' }}
+                  {{ publicBusy ? t('keys.installing') : t('keys.installAction') }}
                 </button>
               </div>
             </section>
@@ -405,15 +406,15 @@ function cancelDelete() {
       </ul>
 
       <section v-if="pendingDelete" class="key-confirm" role="alertdialog" aria-labelledby="key-delete-title" data-testid="ssh-key-delete-confirmation">
-        <strong id="key-delete-title">删除 {{ pendingDelete.key.label }}？</strong>
-        <p>这把密钥正在被以下已保存的连接使用，删除前会先解除这些关联：</p>
+        <strong id="key-delete-title">{{ t('keys.deleteConfirm', { key: pendingDelete.key.label }) }}</strong>
+        <p>{{ t('keys.deleteBody') }}</p>
         <ul>
           <li v-for="host in pendingDelete.result.affectedHosts" :key="host.hostId">{{ host.hostLabel }}</li>
         </ul>
         <div class="key-actions">
-          <button class="small-action key-action" type="button" data-testid="cancel-delete-ssh-key" :disabled="busy" @click="cancelDelete">取消</button>
+          <button class="small-action key-action" type="button" data-testid="cancel-delete-ssh-key" :disabled="busy" @click="cancelDelete">{{ t('keys.cancel') }}</button>
           <button class="small-action key-action key-delete-confirm" type="button" data-testid="confirm-delete-ssh-key" :disabled="busy" @click="confirmDelete">
-            {{ busy ? '正在删除…' : '解除关联并删除密钥' }}
+            {{ busy ? t('keys.deleting') : t('keys.deleteAction') }}
           </button>
         </div>
       </section>
@@ -422,17 +423,17 @@ function cancelDelete() {
     <section class="key-panel panel" :class="{ 'key-panel--first': keys.length === 0 }" aria-labelledby="ssh-key-add-title" data-testid="ssh-key-add-panel">
       <div class="panel-heading">
         <div>
-          <h2 id="ssh-key-add-title">添加密钥</h2>
+          <h2 id="ssh-key-add-title">{{ t('keys.addTitle') }}</h2>
         </div>
       </div>
-      <div class="key-tabs" role="tablist" aria-label="添加密钥的方式">
-        <button type="button" role="tab" :aria-selected="action === 'paste'" data-testid="ssh-key-paste-tab" @click="chooseAction('paste')">粘贴</button>
-        <button type="button" role="tab" :aria-selected="action === 'import'" data-testid="ssh-key-import-tab" @click="chooseAction('import')">文件</button>
-        <button type="button" role="tab" :aria-selected="action === 'generate'" data-testid="ssh-key-generate-tab" @click="chooseAction('generate')">生成</button>
+      <div class="key-tabs" role="tablist" :aria-label="t('keys.addAria')">
+        <button type="button" role="tab" :aria-selected="action === 'paste'" data-testid="ssh-key-paste-tab" @click="chooseAction('paste')">{{ t('keys.tabPaste') }}</button>
+        <button type="button" role="tab" :aria-selected="action === 'import'" data-testid="ssh-key-import-tab" @click="chooseAction('import')">{{ t('keys.tabImport') }}</button>
+        <button type="button" role="tab" :aria-selected="action === 'generate'" data-testid="ssh-key-generate-tab" @click="chooseAction('generate')">{{ t('keys.tabGenerate') }}</button>
       </div>
       <template v-if="action === 'paste'">
         <label class="form-field key-field">
-          <span>私钥</span>
+          <span>{{ t('keys.privateKey') }}</span>
           <textarea
             ref="pasteInput"
             class="key-paste"
@@ -443,45 +444,45 @@ function cancelDelete() {
             autocapitalize="none"
             spellcheck="false"
             data-gramm="false"
-            placeholder="在此粘贴私钥"
+            :placeholder="t('keys.pastePlaceholder')"
             @input="notePasteInput"
             @focus="keepFieldVisible"
           ></textarea>
         </label>
-        <p class="key-helper">粘贴完整的私钥（Ed25519 或 RSA），包括开头的 BEGIN 行和结尾的 END 行。内容会加密保存在本机，这个输入框随后立即清空。</p>
+        <p class="key-helper">{{ t('keys.pasteHelper') }}</p>
       </template>
       <label class="form-field key-field">
-        <span>密钥标签</span>
-        <input v-model="label" data-testid="ssh-key-label" autocomplete="off" maxlength="80" placeholder="我的笔记本" @focus="keepFieldVisible" />
+        <span>{{ t('keys.label') }}</span>
+        <input v-model="label" data-testid="ssh-key-label" autocomplete="off" maxlength="80" :placeholder="t('keys.labelPlaceholder')" @focus="keepFieldVisible" />
       </label>
       <template v-if="action === 'paste' || action === 'import'">
         <label class="form-field key-field">
-          <span>口令（如果密钥有口令）</span>
+          <span>{{ t('keys.passphraseOptional') }}</span>
           <input v-model="passphrase" data-testid="ssh-key-import-passphrase" type="password" autocomplete="off" @focus="keepFieldVisible" />
         </label>
       </template>
       <template v-if="action === 'paste'">
         <button class="action-button" type="button" data-testid="import-pasted-ssh-key" :disabled="busy || !pasteHasText" @click="importPastedKey">
-          {{ busy ? '正在导入…' : '导入粘贴的私钥' }}
+          {{ busy ? t('keys.importing') : t('keys.importPaste') }}
         </button>
       </template>
       <template v-else-if="action === 'import'">
-        <p class="key-helper">支持 Ed25519 与 RSA 密钥。密钥文件直接从系统文件选择器中读取。</p>
+        <p class="key-helper">{{ t('keys.importFileHelper') }}</p>
         <button class="action-button" type="button" data-testid="import-ssh-key" :disabled="busy" @click="importKey">
-          {{ busy ? '正在导入…' : '选择私钥文件' }}
+          {{ busy ? t('keys.importing') : t('keys.importFile') }}
         </button>
       </template>
       <template v-else>
         <label class="form-field key-field">
-          <span>算法</span>
+          <span>{{ t('keys.algorithm') }}</span>
           <select v-model="algorithm" data-testid="ssh-key-algorithm">
             <option value="Ed25519">Ed25519</option>
             <option value="RSA-3072">RSA 3072</option>
           </select>
         </label>
-        <p class="key-helper">新密钥只保存在本机加密存储中。生成后可以复制或分享它的公钥，也可以安装到已连接的主机。</p>
+        <p class="key-helper">{{ t('keys.generateHelper') }}</p>
         <button class="action-button" type="button" data-testid="generate-ssh-key" :disabled="busy" @click="generateKey">
-          {{ busy ? '正在生成…' : `生成 ${algorithm}` }}
+          {{ busy ? t('keys.generating') : t('keys.generate', { algorithm }) }}
         </button>
       </template>
       <p v-if="error" class="connection-message" role="alert" data-testid="ssh-key-error">{{ error }}</p>

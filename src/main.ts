@@ -34,7 +34,11 @@ async function boot(): Promise<void> {
   // carries the user's palette rather than flashing the shipped dark one. The
   // shell's own `installThemeSync` keeps it live from here.
   const { readAppSettings } = await import('./stores/appSettings');
-  applySharedUiDefaults(document.documentElement, readAppSettings().themeChoice);
+  const saved = readAppSettings();
+  applySharedUiDefaults(document.documentElement, saved.themeChoice);
+  // Same reason for the language: the first frame speaks the saved one.
+  const { applyUiLanguage, normalizeUiLanguage } = await import('./i18n');
+  applyUiLanguage(document.documentElement, normalizeUiLanguage(saved.uiLanguage));
   const { default: PhoneApp } = await import('./phone/PhoneApp.vue');
   const app = createApp(PhoneApp);
   // Settings → Diagnostics/About/Update services and launch-time error capture (#2861).

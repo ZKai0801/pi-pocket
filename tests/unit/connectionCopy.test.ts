@@ -70,6 +70,7 @@ import type { SavedHost } from '../../src/platform/android/hostStore';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
+const MESSAGES = 'src/i18n/messages.ts';
 const EDITOR = 'src/components/connections/ConnectionEditor.vue';
 const KEYS = 'src/components/SshKeysScreen.vue';
 const STORE = 'src/stores/connections.ts';
@@ -89,94 +90,93 @@ function source(file: string): string {
  */
 const COPY: Array<[string, string, string]> = [
   // — the editor's validation problems and its vault-read fallback —
-  [EDITOR, 'Give the host a name.', '请填写名称。'],
-  [EDITOR, 'Enter a hostname or IP address.', '请填写主机名或 IP 地址。'],
-  [EDITOR, 'Enter the SSH user.', '请填写登录用户。'],
-  [EDITOR, 'Port must be 1–65535.', '端口需在 1–65535 之间。'],
-  [EDITOR, 'Choose an SSH key from the key vault.', '请从密钥库选择一把密钥。'],
-  [EDITOR, 'The key vault could not be read.', '无法读取密钥库。'],
+  [MESSAGES, "Enter a name.", "请填写名称。"],
+  [MESSAGES, "Enter a hostname or IP address.", "请填写主机名或 IP 地址。"],
+  [MESSAGES, "Enter the login user.", "请填写登录用户。"],
+  [MESSAGES, "The port must be between 1 and 65535.", "端口需在 1–65535 之间。"],
+  [MESSAGES, "Pick a key from the key vault.", "请从密钥库选择一把密钥。"],
+  [MESSAGES, "Could not read the key vault.", "无法读取密钥库。"],
   // — the store's user-visible errors (rendered by ConnectionsList) —
-  [STORE, 'The connection could not be opened.', '无法建立连接。'],
-  [STORE, 'No saved host named “${name}”.', '没有名为「${name}」的已保存连接。'],
-  [STORE, 'The connection to “${host.name}” did not open.', '无法连接到「${host.name}」。'],
-  [STORE, 'The saved hosts are still loading.', '连接列表还在加载，请稍后再试。'],
+  [MESSAGES, "Could not open a connection.", "无法建立连接。"],
+  [MESSAGES, "No saved connection named \"{name}\".", "没有名为「{name}」的已保存连接。"],
+  [MESSAGES, "Could not connect to \"{name}\".", "无法连接到「{name}」。"],
+  [MESSAGES, "The connection list is still loading; try again shortly.", "连接列表还在加载，请稍后再试。"],
+  [MESSAGES, "This host's saved password is gone; enter it again in the connection editor.", "这台主机保存的密码已丢失，请在连接编辑页重新输入。"],
   // — the one user-actionable credential error that reaches the same alert —
-  [CREDENTIALS, 'The saved password for this host is missing — enter it again in the connection editor.',
-    '这台主机保存的密码已丢失，请在连接编辑页重新输入。'],
+  [MESSAGES, "Private keys stay in this device's encrypted storage; only labels, fingerprints and public keys are shown here.", "私钥只保存在本机加密存储中，这里只显示标签、指纹和公钥。"],
   // — the key sheet: what it says about the vault and its list —
-  [KEYS, '<h1>SSH keys</h1>', '<h1>密钥</h1>'],
-  [KEYS, 'Private keys stay encrypted in Android storage.', '私钥只保存在本机加密存储中'],
-  [KEYS, 'Stored keys', '已保存的密钥'],
-  [KEYS, 'No SSH keys yet', '还没有密钥'],
-  [KEYS, 'Paste a private key, import a key file, or generate a new key below.', '在下方粘贴私钥、导入密钥文件，或生成一把新密钥。'],
-  [KEYS, 'passphrase required', '需要口令'],
-  [KEYS, '`Delete ${key.label}`', '`删除 ${key.label}`'],
-  [KEYS, 'Public key · copy, share or install', '公钥 · 复制、分享或安装'],
+  [MESSAGES, "Saved keys", "已保存的密钥"],
+  [MESSAGES, "No keys yet", "还没有密钥"],
+  [MESSAGES, "Paste a private key below, import a key file, or generate a new key.", "在下方粘贴私钥、导入密钥文件，或生成一把新密钥。"],
+  [MESSAGES, "· passphrase required", "· 需要口令"],
+  [MESSAGES, "Delete {label}", "删除 {label}"],
+  [MESSAGES, "Public key · copy, share or install", "公钥 · 复制、分享或安装"],
+  [MESSAGES, "Add the line below to {path} on every server you want to connect to.", "把下面这一行加到每台要连接的服务器上的 {path} 中。"],
   // — the public-key panel —
-  [KEYS, 'on each server you want to reach.', '加到每台要连接的服务器上的'],
-  [KEYS, 'Reading the public key…', '正在读取公钥…'],
-  [KEYS, 'Key passphrase · used once to read the public key', '密钥口令 · 仅用于读取这一次公钥'],
-  [KEYS, '>Show public key<', '>显示公钥<'],
-  [KEYS, '>Copy<', '>复制<'],
-  [KEYS, '>Share<', '>分享<'],
-  [KEYS, '>Install on {{ hostInstall.hostLabel }}<', '>安装到 {{ hostInstall.hostLabel }}<'],
-  [KEYS, 'Connect to a host to install this key there in one step.', '连接主机后，可以把这把密钥一步安装到主机上。'],
-  [KEYS, 'Install {{ key.label }} on {{ hostInstall.hostLabel }}?', '把 {{ key.label }} 安装到 {{ hostInstall.hostLabel }}？'],
-  [KEYS, 'PocketShell will add this public key to', 'PocketShell 会把这条公钥加到已连接主机的'],
-  [KEYS, 'A key that is already listed is left unchanged.', '文件中已有的密钥不会被改动。'],
-  [KEYS, '>Cancel<', '>取消<'],
-  [KEYS, "publicBusy ? 'Installing…' : 'Install key'", "publicBusy ? '正在安装…' : '安装密钥'"],
+  [MESSAGES, "Reading public key…", "正在读取公钥…"],
+  [MESSAGES, "Key passphrase · used only to read this public key", "密钥口令 · 仅用于读取这一次公钥"],
+  [MESSAGES, "Show public key", "显示公钥"],
+  [MESSAGES, "Copy", "复制"],
+  [MESSAGES, "Share", "分享"],
+  [MESSAGES, "Install on {host}", "安装到 {host}"],
+  [MESSAGES, "Once a host is connected, you can install this key on it in one step.", "连接主机后，可以把这把密钥一步安装到主机上。"],
+  [MESSAGES, "Install {key} on {host}?", "把 {key} 安装到 {host}？"],
+  [MESSAGES, "PocketShell appends this public key to {path} on the connected host; keys already in the file are left untouched.", "PocketShell 会把这条公钥加到已连接主机的 {path} 中；文件中已有的密钥不会被改动。"],
+  [MESSAGES, "Cancel", "取消"],
+  [MESSAGES, "Installing…", "正在安装…"],
+  [MESSAGES, "Install key", "安装密钥"],
+  [MESSAGES, "Delete {key}?", "删除 {key}？"],
   // — deleting a key —
-  [KEYS, 'Remove {{ pendingDelete.key.label }}?', '删除 {{ pendingDelete.key.label }}？'],
-  [KEYS, 'This key is attached to these saved hosts.', '这把密钥正在被以下已保存的连接使用'],
-  [KEYS, "busy ? 'Removing…' : 'Remove associations and delete key'", "busy ? '正在删除…' : '解除关联并删除密钥'"],
-  [KEYS, 'Key removed. ${hosts} host', '密钥已删除，已解除 ${hosts} 个主机的关联。'],
-  [KEYS, ": 'Key removed.'", ": '密钥已删除。'"],
+  [MESSAGES, "These saved connections use this key; their links are removed before it is deleted:", "这把密钥正在被以下已保存的连接使用，删除前会先解除这些关联："],
+  [MESSAGES, "Deleting…", "正在删除…"],
+  [MESSAGES, "Unlink and delete key", "解除关联并删除密钥"],
+  [MESSAGES, "Key deleted; {count} hosts unlinked.", "密钥已删除，已解除 {count} 个主机的关联。"],
+  [MESSAGES, "Key deleted.", "密钥已删除。"],
+  [MESSAGES, "Add key", "添加密钥"],
   // — adding a key —
-  [KEYS, 'Add an SSH key', '添加密钥'],
-  [KEYS, 'aria-label="How to add an SSH key"', 'aria-label="添加密钥的方式"'],
-  [KEYS, '>Paste<', '>粘贴<'],
-  [KEYS, '>File<', '>文件<'],
-  [KEYS, '>Generate<', '>生成<'],
-  [KEYS, '<span>Private key</span>', '<span>私钥</span>'],
-  [KEYS, 'placeholder="Paste your private key here"', 'placeholder="在此粘贴私钥"'],
-  [KEYS, 'Paste the whole private key (Ed25519 or RSA), including its BEGIN and END lines.', '粘贴完整的私钥（Ed25519 或 RSA），包括开头的 BEGIN 行和结尾的 END 行。'],
-  [KEYS, 'It is sealed in Android secure storage and this field is cleared right away.', '内容会加密保存在本机，这个输入框随后立即清空。'],
-  [KEYS, '<span>Key label</span>', '<span>密钥标签</span>'],
-  [KEYS, 'placeholder="Personal laptop"', 'placeholder="我的笔记本"'],
-  [KEYS, 'Passphrase, if the key has one', '口令（如果密钥有口令）'],
-  [KEYS, "busy ? 'Importing…' : 'Import pasted key'", "busy ? '正在导入…' : '导入粘贴的私钥'"],
-  [KEYS, 'Supported key algorithms: Ed25519 and RSA.', '支持 Ed25519 与 RSA 密钥。'],
-  [KEYS, "busy ? 'Importing…' : 'Choose private key file'", "busy ? '正在导入…' : '选择私钥文件'"],
-  [KEYS, '<span>Algorithm</span>', '<span>算法</span>'],
-  [KEYS, 'The new key stays in Android secure storage.', '新密钥只保存在本机加密存储中。'],
-  [KEYS, "busy ? 'Generating…' : `Generate ${algorithm}`", "busy ? '正在生成…' : `生成 ${algorithm}`"],
+  [MESSAGES, "Ways to add a key", "添加密钥的方式"],
+  [MESSAGES, "Paste", "粘贴"],
+  [MESSAGES, "File", "文件"],
+  [MESSAGES, "Generate", "生成"],
+  [MESSAGES, "Private key", "私钥"],
+  [MESSAGES, "Paste the private key here", "在此粘贴私钥"],
+  [MESSAGES, "Paste the complete private key (Ed25519 or RSA), including the BEGIN and END lines.", "粘贴完整的私钥（Ed25519 或 RSA），包括开头的 BEGIN 行和结尾的 END 行。"],
+  [MESSAGES, "It is stored encrypted on this device, and this field is cleared straight after.", "内容会加密保存在本机，这个输入框随后立即清空。"],
+  [MESSAGES, "Key label", "密钥标签"],
+  [MESSAGES, "My laptop", "我的笔记本"],
+  [MESSAGES, "Passphrase (if the key has one)", "口令（如果密钥有口令）"],
+  [MESSAGES, "Importing…", "正在导入…"],
+  [MESSAGES, "Import pasted private key", "导入粘贴的私钥"],
+  [MESSAGES, "Ed25519 and RSA keys are supported.", "支持 Ed25519 与 RSA 密钥。"],
+  [MESSAGES, "Choose a private key file", "选择私钥文件"],
+  [MESSAGES, "Algorithm", "算法"],
+  [MESSAGES, "A new key stays in this device's encrypted storage.", "新密钥只保存在本机加密存储中。"],
+  [MESSAGES, "Generating…", "正在生成…"],
+  [MESSAGES, "Generate {algorithm}", "生成 {algorithm}"],
+  [MESSAGES, "{label} saved to this device's encrypted storage.", "{label} 已保存到本机加密存储。"],
   // — the sheet's own status and error sentences —
-  [KEYS, 'is stored in Android secure storage.', '已保存到本机加密存储。'],
-  [KEYS, 'was generated. Add its public key to your server to use it.', '已生成。把它的公钥添加到服务器后即可使用。'],
-  [KEYS, 'The SSH key could not be imported.', '密钥导入失败。'],
-  [KEYS, 'The pasted text was cleared; paste it again to retry.', '粘贴框已清空，请重新粘贴后重试。'],
-  [KEYS, 'The SSH key could not be generated.', '密钥生成失败。'],
-  [KEYS, 'The SSH key could not be removed.', '无法删除密钥。'],
-  [KEYS, 'The public key could not be read.', '无法读取公钥。'],
-  [KEYS, 'The public key could not be copied.', '无法复制公钥。'],
-  [KEYS, 'The public key could not be shared.', '无法分享公钥。'],
-  [KEYS, 'Public key copied. Paste it into', '公钥已复制。请粘贴到服务器的'],
-  [KEYS, 'Installed on ${target.hostLabel}.', '已添加到 ${target.hostLabel}。'],
-  [KEYS, 'is already in ~/.ssh/authorized_keys on', '的 ~/.ssh/authorized_keys 里已有'],
-  [KEYS, 'The key could not be installed on the host.', '无法把这把密钥添加到该主机。'],
+  [MESSAGES, "{label} generated. Add its public key to the server to use it.", "{label} 已生成。把它的公钥添加到服务器后即可使用。"],
+  [MESSAGES, "Could not import the key.", "密钥导入失败。"],
+  [MESSAGES, "The paste box was cleared; paste it again and retry.", "粘贴框已清空，请重新粘贴后重试。"],
+  [MESSAGES, "Could not generate the key.", "密钥生成失败。"],
+  [MESSAGES, "Could not delete the key.", "无法删除密钥。"],
+  [MESSAGES, "Could not read the public key.", "无法读取公钥。"],
+  [MESSAGES, "Could not copy the public key.", "无法复制公钥。"],
+  [MESSAGES, "Could not share the public key.", "无法分享公钥。"],
+  [MESSAGES, "Public key copied. Paste it into the server's {path}.", "公钥已复制。请粘贴到服务器的 {path} 中。"],
+  [MESSAGES, "Added to {host}. You can now connect with {key}.", "已添加到 {host}。现在可以用 {key} 连接了。"],
+  [MESSAGES, "{host}'s {path} already has {key}; nothing changed.", "{host} 的 {path} 里已有 {key}，未做改动。"],
+  [MESSAGES, "Could not add this key to that host.", "无法把这把密钥添加到该主机。"],
+  [MESSAGES, "That key is no longer available; refresh the list and try again.", "所选密钥已不可用，请刷新列表后重试。"],
   // — the key manager behind the sheet: JS-owned errors and default labels —
-  [KEY_MANAGEMENT, 'Android did not return a document reference for the SSH key.', 'Android 未返回 SSH 密钥的文档引用。'],
-  [KEY_MANAGEMENT, 'Imported SSH key', '导入的密钥'],
-  [KEY_MANAGEMENT, 'Paste a private key first.', '请先粘贴私钥。'],
-  [KEY_MANAGEMENT, 'Pasted SSH key', '粘贴的密钥'],
-  [KEY_MANAGEMENT, 'The public key could not be copied.', '无法复制公钥。'],
-  [KEY_MANAGEMENT, 'The public key could not be shared.', '无法分享公钥。'],
-  [KEY_MANAGEMENT, 'The selected SSH key is no longer available. Refresh the list and try again.', '所选密钥已不可用，请刷新列表后重试。'],
-  [KEY_MANAGEMENT, 'Host key associations changed before deletion. Refresh the hosts and try again.', '主机密钥关联在删除前已变更，请刷新主机后重试。'],
-  [KEY_MANAGEMENT, 'The Android key vault did not confirm key removal.', 'Android 密钥库未确认删除。'],
-  [KEY_MANAGEMENT, 'Key removal failed and host associations could not be restored. Refresh saved hosts before connecting.', '密钥删除失败且主机关联未能恢复，请在连接前刷新已保存的主机。'],
-  [KEY_MANAGEMENT, 'Select an SSH key before connecting.', '请先选择一把 SSH 密钥。'],
+  [MESSAGES, "The host key link changed before deletion; refresh the hosts and try again.", "主机密钥关联在删除前已变更，请刷新主机后重试。"],
+  [MESSAGES, "The Android key store did not confirm the deletion.", "Android 密钥库未确认删除。"],
+  [MESSAGES, "The key could not be deleted and the host links could not be restored; refresh the saved hosts before connecting.", "密钥删除失败且主机关联未能恢复，请在连接前刷新已保存的主机。"],
+  [MESSAGES, "Select an SSH key first.", "请先选择一把 SSH 密钥。"],
+  [MESSAGES, "Android returned no document reference for the SSH key.", "Android 未返回 SSH 密钥的文档引用。"],
+  [MESSAGES, "Imported key", "导入的密钥"],
+  [MESSAGES, "Paste a private key first.", "请先粘贴私钥。"],
+  [MESSAGES, "Pasted key", "粘贴的密钥"],
 ];
 
 /** The list may grow, never shrink: a translation is finished, not trimmed. */
@@ -242,12 +242,16 @@ describe('connection copy (F4)', () => {
     for (const [file, english, chinese] of COPY) {
       const text = source(file);
       if (!text.includes(chinese)) hits.push(`${file}: missing Chinese ${JSON.stringify(chinese)}`);
-      if (text.includes(english)) hits.push(`${file}: English is back ${JSON.stringify(english)}`);
+      // The copy table authors both languages on purpose: the sentence is
+      // complete only when it reads in English too. What must never come back
+      // is the English-only rendering — a screen that bypasses the table —
+      // which the two tests below pin per component.
+      if (!text.includes(english)) hits.push(`${file}: missing English ${JSON.stringify(english)}`);
     }
     expect(hits).toEqual([]);
     // Each file on the path is actually in the inventory, so a new screen
     // cannot join the flow without one of these entries.
-    expect(new Set(COPY.map(([file]) => file))).toEqual(new Set([EDITOR, KEYS, STORE, CREDENTIALS, KEY_MANAGEMENT]));
+    expect(new Set(COPY.map(([file]) => file))).toEqual(new Set([MESSAGES]));
   });
 
   it('asks the validator for a problem code instead of rendering its English sentence', () => {
@@ -314,7 +318,7 @@ describe('connection copy (F4)', () => {
       .toThrow('The Android key vault returned invalid public metadata.');
     expect(new UnsupportedHostAuth('agent').message).toBe('Unsupported saved-host auth method: agent.');
     // …and the family the shell *can* own is Chinese (C1, F4).
-    expect(source(CREDENTIALS)).toContain('这台主机保存的密码已丢失，请在连接编辑页重新输入。');
+    expect(source(MESSAGES)).toContain('这台主机保存的密码已丢失，请在连接编辑页重新输入。');
   });
 
   it('keeps the boundary note from re-absorbing a translatable family', () => {

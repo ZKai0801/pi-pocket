@@ -20,6 +20,7 @@ import type { AndroidHostStore, HostAuth, SavedHost } from '../platform/android/
 import type { RememberedSecretKind, RememberedSecrets } from '../native/rememberedSecrets';
 import { buildSshCredential } from '../credentials/buildSshCredential';
 import { connectionPort, type ConnectionPort } from '../session/connectionPort';
+import { t } from '../i18n';
 
 /** The exact method surface the store needs from the Android host source. */
 export type ConnectionsHosts = Pick<AndroidHostStore, 'savedHosts' | 'save' | 'remove' | 'resolve'>;
@@ -85,7 +86,7 @@ const NO_REMEMBERED_SECRETS: RememberedSecrets = {
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
-  return '无法建立连接。';
+  return t('store.connectFailed');
 }
 
 /** Which sealed secret a newly typed value becomes for this host. */
@@ -401,7 +402,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
         // A validation failure, not a dial: it must not disturb a live
         // connection. Record the error and leave `activeName`/`status` saying
         // what is actually connected (D8).
-        failFor(name, `没有名为「${name}」的已保存连接。`);
+        failFor(name, t('store.connectionNotFound', { name }));
         return;
       }
       // D8: one live connection — close the current host before opening another.
@@ -459,7 +460,7 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
       // thrown one — never a false "connected" (D8).
       if (!result.ok) {
         state.status = 'error';
-        failFor(host.name, `无法连接到「${host.name}」。`);
+        failFor(host.name, t('store.connectionRefused', { name: host.name }));
         return;
       }
 
@@ -554,7 +555,7 @@ export const useConnectionsStore = defineStore('connections', () => {
     remove: (name) => { realHosts?.remove(name); },
     resolve: (request, credential) => realHosts
       ? realHosts.resolve(request, credential)
-      : Promise.reject(new Error('连接列表还在加载，请稍后再试。')),
+      : Promise.reject(new Error(t('store.connectionsLoading'))),
   };
 
   const store = createConnectionsStore({ hosts: lazyHosts, port: shellPort, secrets: lazySecrets });

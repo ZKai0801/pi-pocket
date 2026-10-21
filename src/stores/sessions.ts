@@ -44,6 +44,7 @@ import type { SavedHost } from '../platform/android/hostStore';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { useConnectionsStore } from './connections';
 import { useProjectsStore } from './projects';
+import { t } from '../i18n';
 
 export type SessionsState = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -119,17 +120,17 @@ function errorMessage(error: unknown): string {
 // "did not become ready" must win over the generic timeout wording it carries,
 // and the build's stale error must be recognised before the generic patterns.
 const TURN_ERROR_COPY: ReadonlyArray<readonly [RegExp, string]> = [
-  [/\bchat changed\b|\bsuperseded\b/, '会话已切换，请重新发送。'],
-  [/already running|already in progress|\brunning\b/i, '上一条消息仍在处理中，请稍候。'],
-  [/disposed/i, '当前会话已断开，请重新打开。'],
-  [/already attached to a session/i, '该会话已打开，无法新建会话。'],
-  [/not-sent|not sent/i, '消息未发送成功，请重试。'],
-  [/empty/i, '消息为空。'],
-  [/not become ready|\bready\b/i, 'Pi 尚未准备好，请稍后重试。'],
-  [/new session file/i, '新会话创建超时，请重试。'],
-  [/timed out|timeout/i, '等待回复超时，请重试。'],
-  [/did not confirm|write/i, '消息写入失败，请重试。'],
-  [/opener|installed|live ssh connection/i, '发送通道尚未就绪，请稍后重试。'],
+  [/\bchat changed\b|\bsuperseded\b/, t('store.sessionSwitched')],
+  [/already running|already in progress|\brunning\b/i, t('store.turnBusy')],
+  [/disposed/i, t('store.sessionDisconnected')],
+  [/already attached to a session/i, t('store.sessionAlreadyOpen')],
+  [/not-sent|not sent/i, t('store.sendFailed')],
+  [/empty/i, t('store.emptyMessage')],
+  [/not become ready|\bready\b/i, t('store.piNotReady')],
+  [/new session file/i, t('store.newSessionTimeout')],
+  [/timed out|timeout/i, t('store.replyTimeout')],
+  [/did not confirm|write/i, t('store.writeFailed')],
+  [/opener|installed|live ssh connection/i, t('store.channelNotReady')],
 ];
 
 /** The Chinese copy for a runner failure; unknown messages pass through. */
@@ -166,10 +167,10 @@ const DAY_MS = 24 * HOUR_MS;
 /** 刚刚 / N 分钟 / N 小时 / N 天, then a date (spec §8.5 relative time). */
 export function relativeTime(updatedAtMs: number, nowMs: number = Date.now()): string {
   const age = nowMs - updatedAtMs;
-  if (age < MINUTE_MS) return '刚刚';
-  if (age < HOUR_MS) return `${Math.floor(age / MINUTE_MS)} 分钟`;
-  if (age < DAY_MS) return `${Math.floor(age / HOUR_MS)} 小时`;
-  if (age < 7 * DAY_MS) return `${Math.floor(age / DAY_MS)} 天`;
+  if (age < MINUTE_MS) return t('time.justNow');
+  if (age < HOUR_MS) return t('time.minutes', { count: Math.floor(age / MINUTE_MS) });
+  if (age < DAY_MS) return t('time.hours', { count: Math.floor(age / HOUR_MS) });
+  if (age < 7 * DAY_MS) return t('time.days', { count: Math.floor(age / DAY_MS) });
   const date = new Date(updatedAtMs);
   const pad = (value: number): string => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
@@ -351,13 +352,13 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       !deps.runner ||
       (startingNew ? projectPath === null : sessionFile === null)
     ) {
-      state.sendError = '当前无法发送消息。';
+      state.sendError = t('store.sendUnavailable');
       return 'error';
     }
     const runner = deps.runner;
     if (runner.isBusy()) return 'busy';
     if (text.trim() === '') {
-      state.sendError = '消息为空。';
+      state.sendError = t('store.emptyMessage');
       return 'error';
     }
 
@@ -624,7 +625,7 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     ) {
       return cached.runner;
     }
-    if (projectPath === null) throw new Error('会话缺少项目目录，无法发送。');
+    if (projectPath === null) throw new Error(t('store.sessionMissingProject'));
     if (cached !== null) disposeChat();
 
     const command = await commandFor(host ?? '', started);
