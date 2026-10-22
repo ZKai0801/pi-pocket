@@ -5,6 +5,7 @@ import {
   listSessionDirsCommand,
   listSessionFilesCommand,
   readProjectCwdCommand,
+  readSessionLinesCommand,
   readSessionTailCommand,
 } from './piCommands';
 
@@ -13,7 +14,13 @@ export interface PiTransport {
     command: string,
     timeoutMs: number,
   ): Promise<{ stdout: string; stderr: string; exitCode: number | null }>;
-  sftpRead(path: string, maxBytes: number): Promise<string>;
+  /**
+   * Read a remote text file from its head to EOF — or to `maxBytes`, whichever
+   * comes first — in bounded transfers of at most `chunkBytes` (default: the
+   * native plugin bound). Returns the decoded text; the caller's parser
+   * tolerates a half-written final line.
+   */
+  sftpRead(path: string, maxBytes: number, chunkBytes?: number): Promise<string>;
 }
 
 export interface PiProject {
@@ -38,13 +45,28 @@ export class PiRepositoryError extends Error {
 }
 
 const SESSION_TAIL_BYTES = 65536;
-const SESSION_FULL_BYTES = 262144;
+/** Bytes per SFTP transfer when reading a whole session file. */
+const SESSION_READ_CHUNK_BYTES = 262144;
+/**
+ * Safety bound for one session read. A conversation past this is not a
+ * conversation; the parse keeps whatever was read and the chat shows it.
+ */
+const SESSION_MAX_READ_BYTES = 16 * 1024 * 1024;
+/** Lines per exec page in the SFTP-unavailable fallback read. */
+const SESSION_READ_LINES = 4096;
 const EXEC_TIMEOUT_MS = 15000;
 const SESSION_DIR_PATTERN = /^--.*--$/;
 
 function projectNameFromPath(path: string): string {
   const index = path.lastIndexOf('/');
   return index === -1 ? path : path.slice(index + 1);
+}
+
+/** Complete lines in a `head -n` page: a trailing newline closes its last line, the absence of one ends the file. */
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  const newlines = text.split('\n').length - 1;
+  return text.endsWith('\n') ? newlines : newlines + 1;
 }
 
 export function sessionIdFromPath(path: string): string {
@@ -124,17 +146,49 @@ export class PiRepository {
   }
 
   async readSession(path: string): Promise<ParsedPiSession> {
-    let text: string;
+    return parsePiSession(await this.readSessionText(path));
+  }
+
+  /**
+   * The whole session file. The previous single head-anchored 256 KiB read
+   * silently dropped everything past it — and in a tool-heavy session that is
+   * exactly where the assistant text lives, since thinking/toolCall/toolResult
+   * entries (dropped by the parser anyway) dominate the file's bytes. The read
+   * is paged in bounded transfers until the file ends.
+   */
+  private async readSessionText(path: string): Promise<string> {
     try {
-      text = await this.transport.sftpRead(path, SESSION_FULL_BYTES);
+      return await this.transport.sftpRead(path, SESSION_MAX_READ_BYTES, SESSION_READ_CHUNK_BYTES);
     } catch {
-      const tail = await this.transport.exec(
-        readSessionTailCommand(path, SESSION_FULL_BYTES),
+      return this.readSessionTextViaExec(path);
+    }
+  }
+
+  /**
+   * Exec fallback for when SFTP is unavailable, paged by LINES rather than
+   * bytes: a byte range can split a multi-byte UTF-8 character (each page is
+   * decoded on its own), a line never can.
+   */
+  private async readSessionTextViaExec(path: string): Promise<string> {
+    const parts: string[] = [];
+    let total = 0;
+    let startLine = 1;
+    for (;;) {
+      const page = await this.transport.exec(
+        readSessionLinesCommand(path, startLine, SESSION_READ_LINES),
         EXEC_TIMEOUT_MS,
       );
-      text = tail.stdout;
+      const text = page.stdout;
+      if (text.length === 0) break;
+      parts.push(text);
+      total += text.length;
+      const lines = countLines(text);
+      // A short page is the file's end; a page that hits the bound may or may
+      // not be, so only the bound ends the loop when the file is still going.
+      if (lines < SESSION_READ_LINES || total >= SESSION_MAX_READ_BYTES) break;
+      startLine += lines;
     }
-    return parsePiSession(text);
+    return parts.join('');
   }
 
   private readCwd(header: string): string | null {

@@ -23,6 +23,13 @@ export function readSessionTailCommand(path: string, maxBytes: number): string {
   return `tail -c ${maxBytes} -- ${quoteShell(path)} 2>/dev/null`;
 }
 
+/** Lines `startLine..startLine+lineCount-1` (1-based), for paged fallback reads. */
+export function readSessionLinesCommand(path: string, startLine: number, lineCount: number): string {
+  const from = Math.max(1, Math.floor(startLine));
+  const count = Math.max(1, Math.floor(lineCount));
+  return `tail -n +${from} -- ${quoteShell(path)} 2>/dev/null | head -n ${count}`;
+}
+
 export function resolveSessionRootCommand(root: string): string {
   return `test -d ${quoteShell(root)} && echo yes`;
 }

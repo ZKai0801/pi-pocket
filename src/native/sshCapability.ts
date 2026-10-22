@@ -3,6 +3,7 @@ import {
   readSshCapabilityError,
   type SshCapability,
   type SshResourceSnapshot,
+  type SshSftpOptions,
 } from '@pocketshell/core';
 
 export type {
@@ -39,6 +40,17 @@ export interface NativeSftpExpectedMetadata {
   isDirectory: false;
   sizeBytes: number;
   modifiedEpochMs: number;
+}
+
+/**
+ * `sftpRead` options plus the Android plugin's optional byte `offset`, used to
+ * page through a large file instead of head-truncating it. The pinned core
+ * contract does not carry the field; the native plugin reads it when present
+ * and every other platform ignores the extra key.
+ */
+export interface SftpReadWithOffsetOptions extends SshSftpOptions {
+  maxBytes: number;
+  offset?: number;
 }
 
 export interface NativeSftpWriteIfUnchangedOptions {

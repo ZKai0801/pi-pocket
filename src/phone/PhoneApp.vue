@@ -57,7 +57,7 @@ import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
 import { projectBasename, useSessionsStore } from '../stores/sessions';
 import { useConnectionsStore } from '../stores/connections';
 import { useProjectsStore } from '../stores/projects';
-import { sshCapability } from '../native/sshCapability';
+import { sshCapability, type SftpReadWithOffsetOptions } from '../native/sshCapability';
 import { keyboardInsets, type KeyboardInsetsState } from '../native/keyboardInsets';
 import { createKeyboardInsetsStateSync } from '../native/keyboardInsetsState';
 import { createLocalTrustStore } from '../platform/android/trustStore';
@@ -337,10 +337,21 @@ const piTransport = createPiTransport(
     },
   },
   {
-    async sftpRead({ path, maxBytes }) {
+    async sftpRead({ path, maxBytes, offset }) {
       const connection = liveConnectionRef();
       const requestId = nextRequestId();
-      const result = await sshCapability.sftpRead({ ...connection, requestId, path, maxBytes });
+      // The Android plugin reads an optional byte `offset` so a large session
+      // file can be paged instead of head-truncated (see
+      // SftpReadWithOffsetOptions); absent offset behaves exactly like the
+      // core contract's head-anchored read.
+      const options: SftpReadWithOffsetOptions = {
+        ...connection,
+        requestId,
+        path,
+        maxBytes,
+        ...(offset === undefined ? {} : { offset }),
+      };
+      const result = await sshCapability.sftpRead(options);
       if (result.requestId !== requestId) throw new Error('SFTP read returned a stale request.');
       return { dataBase64: result.dataBase64 };
     },

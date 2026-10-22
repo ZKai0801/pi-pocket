@@ -344,7 +344,12 @@ export function createMockSshPlugin(options: MockSshOptions): MockSshPlugin {
       await delay();
       const { file } = sftpPath(request, true);
       if (file?.kind !== 'file') fail('SFTP_NOT_FILE', 'SFTP path is not a regular file.');
-      return { requestId: request.requestId, dataBase64: bytesToBase64(file.content.subarray(0, Number(request.maxBytes ?? file.content.length))) };
+      // Byte offset for paged reads (the Android plugin's optional `offset`);
+      // absent behaves like the native head-anchored read.
+      const requestedOffset = Number(request.offset ?? 0);
+      const start = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.floor(requestedOffset) : 0;
+      const maxBytes = Number(request.maxBytes ?? file.content.length);
+      return { requestId: request.requestId, dataBase64: bytesToBase64(file.content.subarray(start, start + maxBytes)) };
     },
     async sftpWrite(request) {
       const connection = requireConnection(request);

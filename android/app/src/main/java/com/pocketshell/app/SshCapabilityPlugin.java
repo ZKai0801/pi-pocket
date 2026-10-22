@@ -842,6 +842,10 @@ public final class SshCapabilityPlugin extends Plugin {
             String path = requiredString(options, "path");
             String rootPath = optionalString(options, "rootPath");
             int maxBytes = boundedInt(options, "maxBytes", 0, MAX_SFTP_TRANSFER_BYTES, MAX_SFTP_TRANSFER_BYTES);
+            // Optional byte offset to start reading at (0 = the head). Callers
+            // that read a large file in bounded transfers page through it with
+            // this; absent keeps every earlier caller's head-anchored read.
+            long offset = boundedLong(options, "offset", 0, Long.MAX_VALUE, 0);
             SFTPClient client = requireSftp(connection);
             ByteArrayOutputStream bytes = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
             synchronized (connection.sftpLock) {
@@ -854,13 +858,13 @@ public final class SshCapabilityPlugin extends Plugin {
                     }
                     try (RemoteFile file = client.open(readPath, Collections.singleton(OpenMode.READ))) {
                         byte[] block = new byte[Math.min(8192, Math.max(1, maxBytes))];
-                        long offset = 0;
+                        long readAt = offset;
                         while (bytes.size() < maxBytes) {
                             int limit = Math.min(block.length, maxBytes - bytes.size());
-                            int count = file.read(offset, block, 0, limit);
+                            int count = file.read(readAt, block, 0, limit);
                             if (count <= 0) break;
                             bytes.write(block, 0, count);
-                            offset += count;
+                            readAt += count;
                         }
                     }
                 } catch (Exception error) {
@@ -1939,6 +1943,20 @@ public final class SshCapabilityPlugin extends Plugin {
     private static int boundedInt(JSObject options, String name, int min, int max, int defaultValue) throws PluginFailure {
         Integer value = options.getInteger(name);
         int resolved = value == null ? defaultValue : value;
+        if (resolved < min || resolved > max) throw new PluginFailure("INVALID_ARGUMENT", name + " is outside its supported range.");
+        return resolved;
+    }
+
+    private static long boundedLong(JSObject options, String name, long min, long max, long defaultValue) throws PluginFailure {
+        Long value = null;
+        if (options.has(name)) {
+            try {
+                value = options.getLong(name);
+            } catch (Exception error) {
+                throw new PluginFailure("INVALID_ARGUMENT", name + " must be an integer.");
+            }
+        }
+        long resolved = value == null ? defaultValue : value;
         if (resolved < min || resolved > max) throw new PluginFailure("INVALID_ARGUMENT", name + " is outside its supported range.");
         return resolved;
     }

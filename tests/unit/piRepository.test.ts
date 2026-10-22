@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PiRepository, PiRepositoryError, type PiTransport } from '../../src/pi/piRepository';
+import { createPiTransport } from '../../src/pi/piTransport';
 
 const ROOT = '/home/projects/.pi-agent/sessions';
 const DIR = `${ROOT}/--home-kai--`;
@@ -59,5 +60,65 @@ describe('pi repository', () => {
     const parsed = await new PiRepository(t, ROOT).readSession(`${DIR}/x.jsonl`);
     expect(parsed.turns).toEqual([]);
     expect(t.exec).toHaveBeenCalled();
+  });
+
+  it('readSession: reads a file past the old 256 KiB head truncation', async () => {
+    // The regression this guards: a head-anchored single read stopped at
+    // 256 KiB, and in a tool-heavy session everything past it is dropped
+    // tool records — so the chat showed only the user's own messages.
+    // Here the assistant's text sits at the very end of a ~430 KiB file.
+    const filler = 'x'.repeat(700);
+    const lines = [
+      '{"type":"session","version":3,"id":"01a1534c","cwd":"/home/kai"}',
+      '{"type":"message","id":"u","parentId":"s","timestamp":"2026-10-18T01:52:32.023Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1792288352007}}',
+      ...Array.from(
+        { length: 500 },
+        (_, index) =>
+          `{"type":"message","id":"t${index}","parentId":"u","timestamp":"2026-10-18T01:53:00.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"${filler}"}]}}`,
+      ),
+      '{"type":"message","id":"a","parentId":"u","timestamp":"2026-10-18T01:54:40.896Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"timestamp":1792288360896}}',
+    ];
+    const content = `${lines.join('\n')}\n`;
+    expect(new TextEncoder().encode(content).length).toBeGreaterThan(256 * 1024);
+
+    const bytes = new TextEncoder().encode(content);
+    const calls: Array<{ path: string; maxBytes: number; offset?: number }> = [];
+    const sftp = {
+      sftpRead: async (options: { path: string; maxBytes: number; offset?: number }) => {
+        calls.push(options);
+        const start = Math.floor(options.offset ?? 0);
+        return { dataBase64: Buffer.from(bytes.subarray(start, start + options.maxBytes)).toString('base64') };
+      },
+    };
+    const t: PiTransport = createPiTransport({ exec: vi.fn() }, sftp);
+
+    const parsed = await new PiRepository(t, ROOT).readSession(`${DIR}/big.jsonl`);
+    expect(parsed.turns).toEqual([
+      { role: 'user', text: 'hi', timestampMs: 1792288352007 },
+      { role: 'assistant', text: 'done', timestampMs: 1792288360896 },
+    ]);
+    // The read really paged past the old truncation point.
+    expect(calls.length).toBeGreaterThan(1);
+    expect(Math.max(...calls.map((call) => Math.floor(call.offset ?? 0)))).toBeGreaterThanOrEqual(256 * 1024);
+  });
+
+  it('readSession: the exec fallback pages by lines, not bytes', async () => {
+    const path = `${DIR}/x.jsonl`;
+    const firstPageCommand = `tail -n +1 -- '${path}' 2>/dev/null | head -n 4096`;
+    const secondPageCommand = `tail -n +4097 -- '${path}' 2>/dev/null | head -n 4096`;
+    const pages: Record<string, string> = {
+      [firstPageCommand]: `${Array.from({ length: 4096 }, (_, index) => `{"n":${index}}`).join('\n')}\n`,
+      [secondPageCommand]: '{"n":4096}\n{"n":4097}',
+    };
+    const commands: string[] = [];
+    const t: PiTransport = {
+      exec: vi.fn(async (command: string) => {
+        commands.push(command);
+        return { stdout: pages[command] ?? '', stderr: '', exitCode: 0 };
+      }),
+      sftpRead: vi.fn(async () => { throw new Error('sftp unavailable'); }),
+    };
+    await new PiRepository(t, ROOT).readSession(path);
+    expect(commands).toEqual([firstPageCommand, secondPageCommand]);
   });
 });
