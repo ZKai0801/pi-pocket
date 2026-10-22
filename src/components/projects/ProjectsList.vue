@@ -35,7 +35,9 @@ function savePiDir(): void {
 }
 
 // Pull-to-refresh on the project list: a resisted stretch from the top edge
-// that re-runs discovery past half the cap.
+// that only re-runs discovery once the drag clears a deliberate threshold.
+// Values are CSS px of visual stretch - with PULL_RESISTANCE the finger has to
+// travel PULL_TRIGGER_PX / PULL_RESISTANCE (200 px) before releasing refreshes.
 const scroller = ref<HTMLElement | null>(null);
 const pullDistance = ref(0);
 const refreshing = ref(false);
@@ -43,10 +45,13 @@ let touchStartY = 0;
 let startedAtTop = false;
 let touching = false;
 
-const PULL_MAX_PX = 72;
+const PULL_MAX_PX = 96;
+const PULL_RESISTANCE = 0.4;
+const PULL_TRIGGER_PX = 80;
 
 const showPull = computed(() => pullDistance.value > 0 || refreshing.value);
 const pullHeight = computed(() => (refreshing.value ? 24 : pullDistance.value));
+const pullArmed = computed(() => !refreshing.value && pullDistance.value >= PULL_TRIGGER_PX);
 
 function onPullStart(event: TouchEvent): void {
   const element = scroller.value;
@@ -59,17 +64,24 @@ function onPullStart(event: TouchEvent): void {
 
 function onPullMove(event: TouchEvent): void {
   if (!touching || !startedAtTop) return;
+  const element = scroller.value;
   const y = event.touches[0]?.clientY;
-  if (y === undefined) return;
+  if (!element || y === undefined) return;
+  if (element.scrollTop > 0) {
+    // The list scrolled instead of stretching - drop this gesture.
+    touching = false;
+    pullDistance.value = 0;
+    return;
+  }
   const delta = y - touchStartY;
-  // Half the finger travel, capped: the list resists being dragged down.
-  pullDistance.value = delta > 0 ? Math.min(PULL_MAX_PX, delta * 0.5) : 0;
+  // Resisted stretch, capped: the list drags at a fraction of the finger travel.
+  pullDistance.value = delta > 0 ? Math.min(PULL_MAX_PX, delta * PULL_RESISTANCE) : 0;
 }
 
 function onPullEnd(): void {
   if (!touching) return;
   touching = false;
-  const release = pullDistance.value >= PULL_MAX_PX / 2;
+  const release = pullDistance.value >= PULL_TRIGGER_PX;
   pullDistance.value = 0;
   if (release) void refresh();
 }
@@ -131,7 +143,10 @@ function addCurrentDirectory(): void {
         <AppIcon
           :name="refreshing ? 'refresh' : 'chevron-down'"
           class="projects__pull-icon"
-          :class="{ 'projects__pull-icon--spinning': refreshing }"
+          :class="{
+            'projects__pull-icon--armed': pullArmed,
+            'projects__pull-icon--spinning': refreshing,
+          }"
         />
       </div>
 
@@ -368,6 +383,13 @@ function addCurrentDirectory(): void {
   width: 18px;
   height: 18px;
   color: var(--fg-secondary);
+  transition: color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+/* Past the trigger: releasing now refreshes, so say so. */
+.projects__pull-icon--armed {
+  color: var(--accent);
+  transform: rotate(180deg);
 }
 
 .projects__pull-icon--spinning {
