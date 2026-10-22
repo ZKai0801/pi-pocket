@@ -205,3 +205,214 @@ describe('sessions store', () => {
     expect(store.state).toBe('ready');
   });
 });
+
+describe('sessions store session backup', () => {
+  const backup: ParsedPiSession = {
+    version: 3,
+    id: 'a',
+    cwd: '/home/kai',
+    name: null,
+    turns: [{ role: 'user', text: 'old', timestampMs: 1 }],
+  };
+  const fresh: ParsedPiSession = {
+    ...backup,
+    turns: [...backup.turns, { role: 'assistant', text: 'new', timestampMs: 2 }],
+  };
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('paints the local backup instantly and replaces it with the fresh read', async () => {
+    const read = deferred<ParsedPiSession>();
+    const loadCachedSession = vi.fn(async () => backup);
+    const saveCachedSession = vi.fn(async () => {});
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: () => read.promise,
+      loadCachedSession,
+      saveCachedSession,
+    } as never);
+
+    const opened = store.openSession('/r/a.jsonl');
+    await tick();
+    // The backup is on screen while the server read is still in flight.
+    expect(store.open).toEqual(backup);
+    expect(store.state).toBe('ready');
+    expect(loadCachedSession).toHaveBeenCalledWith(null, '/r/a.jsonl');
+
+    read.resolve(fresh);
+    await opened;
+    expect(store.open).toEqual(fresh);
+    expect(store.state).toBe('ready');
+    expect(saveCachedSession).toHaveBeenCalledWith(null, '/r/a.jsonl', fresh);
+  });
+
+  it('keeps the cold-open spinner path on a backup miss', async () => {
+    const read = deferred<ParsedPiSession>();
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: () => read.promise,
+      loadCachedSession: vi.fn(async () => null),
+      saveCachedSession: vi.fn(async () => {}),
+    } as never);
+
+    const opened = store.openSession('/r/a.jsonl');
+    await tick();
+    expect(store.open).toBeNull();
+    expect(store.state).toBe('loading');
+
+    read.resolve(fresh);
+    await opened;
+    expect(store.open).toEqual(fresh);
+    expect(store.state).toBe('ready');
+  });
+
+  it('keeps the painted backup and shows the error when the server read fails', async () => {
+    const saveCachedSession = vi.fn(async () => {});
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => {
+        throw new Error('sftp failed');
+      }),
+      loadCachedSession: vi.fn(async () => backup),
+      saveCachedSession,
+    } as never);
+
+    await store.openSession('/r/a.jsonl');
+    expect(store.open).toEqual(backup);
+    expect(store.state).toBe('error');
+    expect(store.error).toContain('sftp failed');
+    expect(store.openPath).toBe('/r/a.jsonl');
+    // A failed read is never remembered as the conversation's state.
+    expect(saveCachedSession).not.toHaveBeenCalled();
+  });
+
+  it('swallows a backup load failure and opens from the server read alone', async () => {
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => fresh),
+      loadCachedSession: vi.fn(async () => {
+        throw new Error('idb blocked');
+      }),
+      saveCachedSession: vi.fn(async () => {}),
+    } as never);
+
+    await store.openSession('/r/a.jsonl');
+    expect(store.open).toEqual(fresh);
+    expect(store.state).toBe('ready');
+    expect(store.error).toBeNull();
+  });
+
+  it('does not repaint the backup when refreshing the open chat', async () => {
+    const loadCachedSession = vi.fn(async () => backup);
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => fresh),
+      loadCachedSession,
+      saveCachedSession: vi.fn(async () => {}),
+    } as never);
+
+    await store.openSession('/r/a.jsonl');
+    expect(loadCachedSession).toHaveBeenCalledTimes(1);
+
+    await store.refresh();
+    expect(loadCachedSession).toHaveBeenCalledTimes(1);
+    expect(store.open).toEqual(fresh);
+    expect(store.state).toBe('ready');
+  });
+
+  it('host switch: drops a backup that resolves after the host changed', async () => {
+    const backupLoaded = deferred<ParsedPiSession | null>();
+    const read = deferred<ParsedPiSession>();
+    let host = 'A';
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: () => read.promise,
+      loadCachedSession: () => backupLoaded.promise,
+      saveCachedSession: vi.fn(async () => {}),
+      hostId: () => host,
+    } as never);
+
+    const opened = store.openSession('/r/a.jsonl');
+    host = 'B';
+    store.hostChanged();
+    backupLoaded.resolve(backup);
+    read.resolve(fresh);
+    await opened;
+
+    expect(store.open).toBeNull();
+    expect(store.openPath).toBeNull();
+    expect(store.state).not.toBe('ready');
+  });
+
+  it('remembers the fresh parse after a turn in the open chat', async () => {
+    const replied: ParsedPiSession = {
+      ...backup,
+      turns: [...backup.turns, { role: 'assistant', text: 'ok', timestampMs: 3 }],
+    };
+    const runner = {
+      send: vi.fn(async () => ({ ok: true as const, session: replied })),
+      startNew: vi.fn(),
+      isBusy: vi.fn(() => false),
+      dispose: vi.fn(),
+    };
+    const saveCachedSession = vi.fn(async () => {});
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => fresh),
+      runner,
+      saveCachedSession,
+      hostId: () => 'alexey',
+    } as never);
+
+    await store.openSession('/r/a.jsonl');
+    expect(await store.send('hi')).toBe('sent');
+    expect(saveCachedSession).toHaveBeenLastCalledWith('alexey', '/r/a.jsonl', replied);
+  });
+
+  it('remembers the fresh parse under the adopted file after a draft turn', async () => {
+    const replied: ParsedPiSession = {
+      ...backup,
+      turns: [...backup.turns, { role: 'assistant', text: 'ok', timestampMs: 3 }],
+    };
+    const runner = {
+      send: vi.fn(),
+      startNew: vi.fn(async () => ({ ok: true as const, sessionFile: '/r/new.jsonl', session: replied })),
+      isBusy: vi.fn(() => false),
+      dispose: vi.fn(),
+    };
+    const saveCachedSession = vi.fn(async () => {});
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => fresh),
+      runner,
+      saveCachedSession,
+      hostId: () => 'alexey',
+    } as never);
+
+    store.newConversation({ path: '/home/kai', name: 'kai' });
+    expect(await store.send('hi')).toBe('sent');
+    expect(saveCachedSession).toHaveBeenCalledTimes(1);
+    expect(saveCachedSession).toHaveBeenCalledWith('alexey', '/r/new.jsonl', replied);
+  });
+
+  it('does not remember anything when the turn fails', async () => {
+    const runner = {
+      send: vi.fn(async () => ({ ok: false as const, error: 'The turn timed out before Pi wrote a new assistant reply.' })),
+      startNew: vi.fn(),
+      isBusy: vi.fn(() => false),
+      dispose: vi.fn(),
+    };
+    const saveCachedSession = vi.fn(async () => {});
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => fresh),
+      runner,
+      saveCachedSession,
+      hostId: () => 'alexey',
+    } as never);
+
+    await store.openSession('/r/a.jsonl');
+    expect(await store.send('hi')).toBe('error');
+    // Only the open's save; the failed turn wrote nothing.
+    expect(saveCachedSession).toHaveBeenCalledTimes(1);
+  });
+});

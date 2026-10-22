@@ -42,6 +42,7 @@ import { piLive } from '../session/piLive';
 import { turnPtyOpener } from '../session/turnPty';
 import type { SavedHost } from '../platform/android/hostStore';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
+import { sessionBackupCache } from '../pi/sessionCache';
 import { useConnectionsStore } from './connections';
 import { useProjectsStore } from './projects';
 import { t } from '../i18n';
@@ -97,6 +98,15 @@ export interface SessionsStore extends SessionsStoreState {
 export interface SessionsStoreDeps {
   listSessions(project: PiProject): Promise<PiSessionMeta[]>;
   readSession(path: string): Promise<ParsedPiSession>;
+  /**
+   * The locally backed-up parse of `path` on `host`, painted while the
+   * server's fresh read is in flight so the chat opens instantly. Optional so
+   * host-less callers (and the existing tests) keep compiling; a miss or a
+   * failure is `null` and the open proceeds from the server read alone.
+   */
+  loadCachedSession?(host: string | null, path: string): Promise<ParsedPiSession | null>;
+  /** Remember a fresh parse for the next cold start. Best-effort: failures are swallowed. */
+  saveCachedSession?(host: string | null, path: string, session: ParsedPiSession): Promise<void>;
   /**
    * The active host's name, read at claim time and again at write time (D8):
    * a run captured on one host must not write under another. Defaults to
@@ -268,6 +278,13 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     return loadInFlight.promise;
   }
 
+  // Remembering a backup is best-effort: a full disk or a closed IndexedDB
+  // must never fail the open or the turn that produced the fresh parse.
+  function rememberSession(host: string | null, path: string, session: ParsedPiSession): void {
+    if (!deps.saveCachedSession) return;
+    void deps.saveCachedSession(host, path, session).catch(() => undefined);
+  }
+
   // Same treatment for reads, keyed on { host, path }; a failed open keeps
   // the previous chat and path intact (R11.2) — only the state says the
   // re-read failed.
@@ -282,8 +299,34 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       host,
       path,
       promise: (async () => {
-        state.state = 'loading';
-        state.error = null;
+        // A cold open paints the local backup first: the chat appears at once
+        // and the server's fresh read replaces it the moment it lands (spec
+        // §8.6). A refresh of the already-open chat skips this — what is on
+        // screen is newer than any backup, and repainting it would flash
+        // stale turns. A backup miss leaves the cold-open path unchanged.
+        const coldOpen = state.openPath !== path || state.open === null;
+        let paintedBackup = false;
+        if (coldOpen && deps.loadCachedSession) {
+          let backup: ParsedPiSession | null = null;
+          try {
+            backup = await deps.loadCachedSession(host, path);
+          } catch {
+            backup = null;
+          }
+          if (openToken !== token || hostId() !== host) return;
+          if (backup !== null) {
+            state.open = backup;
+            state.openPath = path;
+            state.startingNew = false;
+            state.error = null;
+            state.state = 'ready';
+            paintedBackup = true;
+          }
+        }
+        if (!paintedBackup) {
+          state.state = 'loading';
+          state.error = null;
+        }
         try {
           const session = await deps.readSession(path);
           if (openToken !== token || hostId() !== host) return;
@@ -291,8 +334,11 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
           state.openPath = path;
           state.startingNew = false;
           state.state = 'ready';
+          rememberSession(host, path, session);
         } catch (error) {
           if (openToken !== token || hostId() !== host) return;
+          // A painted backup survives a failed re-read (R11.2's twin): the
+          // chat stays on screen and only the error bar reports the failure.
           state.state = 'error';
           state.error = errorMessage(error);
         } finally {
@@ -407,6 +453,10 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
             rememberAdoptedSession(adoptedFile, result.session);
           }
         }
+        // The turn just wrote the file, so its parse is the freshest backup
+        // this chat can have — remember it for the next cold start.
+        const rememberedPath = startingNew ? adoptedFile : sessionFile;
+        if (rememberedPath !== null) rememberSession(host, rememberedPath, result.session);
         return 'sent';
       }
       state.sendError = localiseTurnError(result.error);
@@ -524,6 +574,28 @@ async function newestSessionFileOnActiveHost(projectPath: string): Promise<strin
     name: projectBasename(projectPath),
   });
   return sessions.length > 0 ? sessions[0]?.path ?? null : null;
+}
+
+/**
+ * The local backup of an opened conversation (spec §8.6): the chat paints it
+ * instantly on a cold open while the server's fresh read is in flight, and
+ * every fresh read or turn re-saves it. Keyed by the claim's host — a session
+ * file path alone is not unique across hosts — and backed by IndexedDB with
+ * the TTL/LRU sweep in `sessionCache`. Best-effort by contract: the store
+ * swallows a failure, so these never reject in practice.
+ */
+function loadCachedSessionOnActiveHost(host: string | null, path: string): Promise<ParsedPiSession | null> {
+  return sessionBackupCache()
+    .load(host, path)
+    .then((entry) => entry?.session ?? null);
+}
+
+function saveCachedSessionOnActiveHost(
+  host: string | null,
+  path: string,
+  session: ParsedPiSession,
+): Promise<void> {
+  return sessionBackupCache().save(host, path, session);
 }
 
 export interface TurnRunnerCacheDeps {
@@ -791,6 +863,10 @@ export const useSessionsStore = defineStore('sessions', () => {
       return new PiRepository(piLive().transport(), root).listSessions(project);
     },
     readSession: readActiveSession,
+    // Instant cold-open paint from the local backup; the server's fresh read
+    // replaces it and re-saves. A cache failure is swallowed by the store.
+    loadCachedSession: loadCachedSessionOnActiveHost,
+    saveCachedSession: saveCachedSessionOnActiveHost,
     // D8: claims are keyed to the active host and re-checked at write time,
     // so a run captured on one host cannot write under another.
     hostId: () => connections.activeName,
