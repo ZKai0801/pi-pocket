@@ -93,10 +93,25 @@ const TAB_HOME_SURFACE: Record<PhoneTab, HomeSurface> = {
   settings: 'connection',
 };
 
-/** Topmost overlay/sheet wins: the terminal, then the Projects directory sheet. */
+/**
+ * The chat composer's command sheet. The chat is not a back-stack view (Back at
+ * the 会话 root closes the chat), so the sheet is an overlay instead: Android
+ * Back dismisses it and leaves the conversation open.
+ */
+const chatCommandsOpen = ref(false);
+
+function setChatCommandsOpen(open: boolean): void {
+  chatCommandsOpen.value = open;
+}
+
+/** Topmost overlay/sheet wins: the terminal, then the chat's command sheet, then the Projects directory sheet. */
 function closeTopmostOverlay(): boolean {
   if (terminalTarget.value !== null) {
     terminalTarget.value = null;
+    return true;
+  }
+  if (chatCommandsOpen.value) {
+    chatCommandsOpen.value = false;
     return true;
   }
   if (projects.browse.open) {
@@ -158,6 +173,16 @@ watch(
     } else if (backStack.current('sessions') === 'chat') {
       backStack.pop('sessions');
     }
+  },
+);
+
+// The command sheet belongs to one open chat: leaving the tab, closing the
+// chat or switching to another one takes the sheet with it. (Back is handled
+// in `closeTopmostOverlay`, so the chat survives that press.)
+watch(
+  [activeTab, () => sessions.open],
+  () => {
+    chatCommandsOpen.value = false;
   },
 );
 
@@ -763,6 +788,8 @@ onBeforeUnmount(() => {
       <SettingsTab v-show="activeTab === 'settings'" />
       <ChatScreen
         v-show="activeTab === 'sessions' && sessions.open !== null"
+        :commands-open="chatCommandsOpen"
+        @update:commands-open="setChatCommandsOpen"
         @open-terminal="openTerminal"
       />
       <SessionList v-show="activeTab === 'sessions' && sessions.open === null" />

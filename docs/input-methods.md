@@ -218,6 +218,81 @@ Already covered in [vision.md](vision.md) §4. Whole commands or prompt template
 
 Distinct from the terminal hotkeys panel: chips send literal text strings; the hotkeys panel sends key codes / control bytes (and `Ctrl+<key>` from its `Ctrl+…` page).
 
+### Chat command sheet (「+」)
+
+The 会话 chat's composer has one action slot with two modes. With text in the
+draft it is the filled 发送 button. With an **empty** draft there is nothing to
+send, so it becomes 「+」, which opens pi's command sheet (spec §42: a sheet, not
+a second agent UI). This exists because a leading `/` is the most expensive
+character to type on a soft keyboard.
+
+- The sheet lists the app-shipped pi vocabulary (`src/pi/piSlashCommands.ts`)
+  plus what the host actually has installed: extension commands registered by
+  `pi.registerCommand(...)`, prompt templates from `~/.pi/agent/prompts` and the
+  project's `.pi/prompts`, and skills. Discovery is one `exec` probe per chat
+  project (`piSlashProbeCommand`); pi exposes no command-list RPC, so a failed
+  probe lists the built-ins and says so instead of inventing rows.
+- A tap **inserts** the command into the draft — `/model ` keeps a trailing
+  space for the argument, `/skill:` does not — and the action becomes 发送
+  again. Nothing is executed by the sheet, so the user still reviews and sends.
+- Rows whose bare form opens a pi TUI surface (the model picker, `/tree`,
+  `/login`, …) carry a 终端 tag: this chat renders the session file, not the
+  TUI, so those belong in the terminal.
+
+#### Second step: the options sheet
+
+Two commands take a value from a fixed set, so a tap opens a smaller sheet over
+the command sheet instead of inserting the bare form:
+
+- **`/model`** lists what the host can actually reach. The list cannot ship
+  with the app — pi only lists models whose provider has usable credentials —
+  so it comes from `pi --list-models` in the chat's project (one `exec`, 15 s
+  budget, cached per project). A probe failure offers 重试 rather than
+  pretending the host has no models.
+- **`/thinking`** lists pi's documented levels (`off` … `max`), app-shipped
+  copy, no probe.
+
+The list scrolls; a row is the commit. Picking one inserts the **text form**
+(`/model anthropic/claude-sonnet-4`, `/thinking high`) into the draft, which is
+the point of the extra step: pi's own picker draws into the turn PTY, where
+this chat has nowhere to show it, and the bare command would leave that picker
+open for the next message to fall into.
+
+The small sheet is one layer inside the command sheet: its ✕ returns to the
+command list, its own scrim is a separate layer, and closing the command sheet
+(Android Back included) takes both.
+
+Tapping 发送 on the bare form of either command opens the same options sheet
+instead of sending it, so the typed route and the 「+」 route end in the same
+place.
+
+#### Sending a command
+
+A line that starts with a `/command` token takes a different delivery path from
+a message: pi handles the command in-process and appends **no assistant turn**,
+so the turn's completion rule ("the file gained an assistant reply") would wait
+out its 120 s timeout over work that had already finished. `PiTurnRunner`'s
+`runCommand` therefore completes when pi has the bytes, and the chat leaves the
+transcript alone (refresh by pull-to-refresh if the command rewrote it, e.g.
+`/compact`).
+
+Two consequences worth knowing:
+
+- A command whose bare form takes the terminal over — a picker, a full-screen
+  surface, or a session switch (`/new`, `/resume`, `/fork`) — leaves that PTY
+  useless for the next line: a picker would treat the next message's Enter as a
+  pick, and a switched PTY would answer into a conversation the chat is not
+  reading. The runner marks the PTY and drops it just before the next write, so
+  the command finishes first (an Esc could abort a `/compact`) and the next
+  message re-opens pi on the chat's own session file. The composer says so in a
+  muted note rather than a red error: the command did reach pi.
+- In a draft (no session file yet) a command runs on the sessionless process
+  and does not create a conversation, so `/model` or `/thinking` chosen before
+  the first message still applies to it.
+
+- Android Back closes the sheet and leaves the chat open; closing the chat,
+  switching chats or leaving the tab takes the sheet with it.
+
 ---
 
 ## Screen real estate

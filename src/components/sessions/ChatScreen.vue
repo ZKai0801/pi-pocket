@@ -9,14 +9,96 @@
 import { computed, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import { useSessionsStore } from '../../stores/sessions';
+import { useConnectionsStore } from '../../stores/connections';
 import type { PiTurn } from '../../pi/types';
+import { discoverPiCommands, type PiSlashCommand } from '../../pi/piSlashCommands';
+import { parsePiModelList } from '../../pi/piCommandOptions';
+import { piListModelsCommand } from '../../pi/piCommands';
+import { resolvePiCommand } from '../../pi/resolvePiCommand';
+import { piLive } from '../../session/piLive';
+import { createChatCommandCatalog } from '../../session/chatCommands';
+import { createChatCommandOptions } from '../../session/chatCommandOptions';
 import ChatBubble from './ChatBubble.vue';
 import ChatComposer from './ChatComposer.vue';
 import { t } from '../../i18n';
 
 const store = useSessionsStore();
+const connections = useConnectionsStore();
 
-const emit = defineEmits<{ 'open-terminal': [path: string] }>();
+const props = withDefaults(defineProps<{
+  /** The composer's command sheet; the shell owns it so Android Back closes it. */
+  commandsOpen?: boolean;
+}>(), {
+  commandsOpen: false,
+});
+
+const emit = defineEmits<{
+  'open-terminal': [path: string];
+  'update:commands-open': [open: boolean];
+}>();
+
+// The sheet lists pi's own vocabulary, so the host answers once per project
+// (built-ins are always shown, whether or not the probe answers).
+const commands = createChatCommandCatalog({
+  projectPath: () => store.open?.cwd ?? null,
+  discover: (project) => discoverPiCommands(piLive().transport(), project),
+});
+
+function loadCommands(): void {
+  void commands.load({ force: commands.state === 'error' });
+}
+
+/** Same budget as the repository's other host probes: one exec, never a blocking wait. */
+const MODEL_LIST_TIMEOUT_MS = 15_000;
+
+// The resolved pi path outlives a single picker: `/model` can be opened
+// several times in one chat and `resolvePiCommand` is a shell round-trip.
+let resolvedPi: { host: string | null; command: string } | null = null;
+
+/**
+ * The models this host can reach, for the `/model` picker. pi lists only the
+ * models whose provider has usable credentials, so the app cannot ship this
+ * list; it runs `pi --list-models` in the chat's project instead.
+ */
+async function listModels(project: string): Promise<ReturnType<typeof parsePiModelList>> {
+  const host = connections.activeName;
+  const override = host === null
+    ? undefined
+    : connections.hosts.find((entry) => entry.name === host)?.piCommand?.trim();
+  let command = resolvedPi !== null && resolvedPi.host === host ? resolvedPi.command : null;
+  if (command === null) {
+    const resolution = await resolvePiCommand(
+      piLive().transport(),
+      override !== undefined && override.length > 0 ? override : undefined,
+    );
+    if (!resolution.ok) throw new Error(resolution.error);
+    command = resolution.command;
+    resolvedPi = { host, command };
+  }
+  const result = await piLive().transport().exec(
+    piListModelsCommand(command, project),
+    MODEL_LIST_TIMEOUT_MS,
+  );
+  const models = parsePiModelList(result.stdout);
+  // An empty list with a non-zero exit is a failure, not "no models": the
+  // picker must offer its retry rather than claim the host has none.
+  if (models.length === 0 && result.exitCode !== 0) {
+    const detail = result.stderr.trim();
+    throw new Error(detail === '' ? `the model list exited ${result.exitCode}` : detail);
+  }
+  return models;
+}
+
+// Options come from the app for `/thinking` and from the host for `/model`;
+// the catalog owns both so the composer never talks to the transport.
+const commandOptions = createChatCommandOptions({
+  projectPath: () => store.open?.cwd ?? null,
+  listModels,
+});
+
+function loadOptions(command: PiSlashCommand): void {
+  void commandOptions.load(command.command, { force: commandOptions.state === 'error' });
+}
 
 const title = computed(() => {
   const name = store.open?.name;
@@ -197,7 +279,19 @@ function goBack(): void {
     </div>
 
     <footer class="chat__composer">
-      <ChatComposer :send="store.send" :sending="store.sending" :error="store.sendError" />
+      <ChatComposer
+        :send="store.send"
+        :sending="store.sending"
+        :error="store.sendError"
+        :notice="store.sendNotice"
+        :commands="commands.commands"
+        :commands-state="commands.state"
+        :command-options="commandOptions"
+        :sheet-open="props.commandsOpen"
+        @update:sheet-open="emit('update:commands-open', $event)"
+        @request-commands="loadCommands"
+        @request-options="loadOptions"
+      />
     </footer>
   </section>
 </template>
