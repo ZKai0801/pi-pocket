@@ -66,6 +66,9 @@ keystore.properties
 # Local scratch dir for screenshots viewed via PocketShell
 .tmp/
 
+# Per-worktree agent notes/memory kept next to the checkout, not part of it.
+.workbuddy/
+
 # Per-machine toolchain discovery (JDK/SDK/adb/emulator paths written by
 # scripts/android-doctor.ps1 -Write). Absolute paths are machine-specific and
 # must never be committed; the doctor re-derives them on any other box.
