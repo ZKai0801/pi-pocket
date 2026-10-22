@@ -50,14 +50,17 @@ const PI_SLASH_PROBE_OUTPUT = [
 ].join('\n');
 
 /**
- * What the fake box reports for the chat's `/model` picker. `pi --list-models`
- * only lists models whose provider has credentials, so browser dev mode needs
- * a fixture here to exercise the picker at all.
+ * What the fake box reports for the chat's `/model` picker, in the shape pi
+ * actually prints: a `provider` column first, then the model id, then the
+ * capabilities. The fixture copied a bullet list of `provider/model` ids until
+ * 2026-10-23, which is why the parser looked right here and returned provider
+ * names on a real host.
  */
 const PI_MODEL_LIST_OUTPUT = [
-  'anthropic/claude-sonnet-4',
-  'anthropic/claude-opus-4',
-  'openai/gpt-5-codex',
+  'provider   model                   context  max-out  thinking  images',
+  'anthropic  claude-sonnet-4-5       200K     64K      yes       yes',
+  'anthropic  claude-opus-4-1         200K     32K      yes       yes',
+  'openai     gpt-5.1-codex           400K     128K     yes       yes',
 ].join('\n');
 
 const encoder = new TextEncoder();

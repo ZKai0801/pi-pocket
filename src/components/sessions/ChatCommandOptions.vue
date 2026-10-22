@@ -20,8 +20,11 @@ withDefaults(defineProps<{
   command: string;
   options: readonly PiCommandOption[];
   state?: ChatOptionState;
+  /** The host's own explanation for a failed probe, if it gave one. */
+  error?: string | null;
 }>(), {
   state: 'idle',
+  error: null,
 });
 
 const emit = defineEmits<{
@@ -59,12 +62,19 @@ const emit = defineEmits<{
         <p v-if="state === 'loading'" class="choices__status" data-testid="chat-command-options-status">
           {{ t('commands.options.loading') }}
         </p>
-        <p v-else-if="state === 'error'" class="choices__notice" role="status" data-testid="chat-command-options-status">
-          <span>{{ t('commands.options.failed') }}</span>
-          <button type="button" class="choices__retry" @click="emit('retry')">
-            <AppIcon name="refresh" /> {{ t('commands.options.retry') }}
-          </button>
-        </p>
+        <div v-else-if="state === 'error'" class="choices__failed" data-testid="chat-command-options-status">
+          <p class="choices__notice" role="status">
+            <span>{{ t('commands.options.failed') }}</span>
+            <button type="button" class="choices__retry" @click="emit('retry')">
+              <AppIcon name="refresh" /> {{ t('commands.options.retry') }}
+            </button>
+          </p>
+          <!-- The host's own words. Without them "could not read the list" is
+               the end of the story: pi reports the reason on stderr. -->
+          <p v-if="error" class="choices__reason" data-testid="chat-command-options-reason">
+            {{ error }}
+          </p>
+        </div>
         <p v-else-if="options.length === 0" class="choices__status" data-testid="chat-command-options-status">
           {{ t('commands.options.empty') }}
         </p>
@@ -174,6 +184,20 @@ const emit = defineEmits<{
   gap: var(--sp-2);
   background: var(--warning-soft);
   color: var(--warning);
+}
+
+/* The host's reason, under the retry: smaller than the sentence above it so
+   the actionable line stays the headline, and mono because it is usually a
+   path or a command error verbatim. `--fg-secondary`, not `--fg-muted`: this
+   is real information at 12px, where muted fails the contrast bar. */
+.choices__reason {
+  overflow-wrap: anywhere;
+  margin: 0;
+  border-top: 1px solid var(--border-soft);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  color: var(--fg-secondary);
+  font: var(--fw-regular) var(--fs-100) var(--font-mono);
+  line-height: 1.45;
 }
 
 .choices__retry {

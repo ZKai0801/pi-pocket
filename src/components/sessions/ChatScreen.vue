@@ -12,7 +12,11 @@ import { useSessionsStore } from '../../stores/sessions';
 import { useConnectionsStore } from '../../stores/connections';
 import type { PiTurn } from '../../pi/types';
 import { discoverPiCommands, type PiSlashCommand } from '../../pi/piSlashCommands';
-import { parsePiModelList } from '../../pi/piCommandOptions';
+import {
+  parsePiModelList,
+  piModelListOutcome,
+  type PiModelListOutcome,
+} from '../../pi/piCommandOptions';
 import { piListModelsCommand } from '../../pi/piCommands';
 import { resolvePiCommand } from '../../pi/resolvePiCommand';
 import { piLive } from '../../session/piLive';
@@ -48,17 +52,49 @@ function loadCommands(): void {
   void commands.load({ force: commands.state === 'error' });
 }
 
-/** Same budget as the repository's other host probes: one exec, never a blocking wait. */
-const MODEL_LIST_TIMEOUT_MS = 15_000;
+/**
+ * One exec that starts pi, so it is not the repository's cheap-probe budget:
+ * pi builds its session runtime (extensions compiled on the fly) before it
+ * prints the list. 30 s is the slow-cold-start ceiling, not a typical wait.
+ */
+const MODEL_LIST_TIMEOUT_MS = 30_000;
 
 // The resolved pi path outlives a single picker: `/model` can be opened
 // several times in one chat and `resolvePiCommand` is a shell round-trip.
 let resolvedPi: { host: string | null; command: string } | null = null;
 
 /**
+ * Run the probe once and describe a failure in the caller's words. A transport
+ * fault (a timeout, a dropped connection) is caught here and becomes ordinary
+ * text, because the sheet can only render text; `piModelListOutcome` judges
+ * the run itself.
+ */
+async function runModelList(
+  command: string,
+  project: string,
+  builtInsOnly: boolean,
+): Promise<PiModelListOutcome> {
+  let result: { stdout: string; stderr: string; exitCode: number | null };
+  try {
+    result = await piLive().transport().exec(
+      piListModelsCommand(command, project, { builtInsOnly }),
+      MODEL_LIST_TIMEOUT_MS,
+    );
+  } catch (error) {
+    return { models: [], failure: error instanceof Error ? error.message : String(error) };
+  }
+  return piModelListOutcome(result.stdout, result.stderr, result.exitCode);
+}
+
+/**
  * The models this host can reach, for the `/model` picker. pi lists only the
  * models whose provider has usable credentials, so the app cannot ship this
  * list; it runs `pi --list-models` in the chat's project instead.
+ *
+ * A failure is retried once with `--no-extensions`: pi loads the extension
+ * tree before it prints anything, so one broken extension turns the whole
+ * probe into a non-zero exit. The built-in catalogue needs none of it, and a
+ * provider registered by an extension is still typeable by hand.
  */
 async function listModels(project: string): Promise<ReturnType<typeof parsePiModelList>> {
   const host = connections.activeName;
@@ -75,18 +111,13 @@ async function listModels(project: string): Promise<ReturnType<typeof parsePiMod
     command = resolution.command;
     resolvedPi = { host, command };
   }
-  const result = await piLive().transport().exec(
-    piListModelsCommand(command, project),
-    MODEL_LIST_TIMEOUT_MS,
-  );
-  const models = parsePiModelList(result.stdout);
-  // An empty list with a non-zero exit is a failure, not "no models": the
-  // picker must offer its retry rather than claim the host has none.
-  if (models.length === 0 && result.exitCode !== 0) {
-    const detail = result.stderr.trim();
-    throw new Error(detail === '' ? `the model list exited ${result.exitCode}` : detail);
-  }
-  return models;
+  const full = await runModelList(command, project, false);
+  if (full.failure === null) return full.models;
+  const builtIns = await runModelList(command, project, true);
+  if (builtIns.failure === null) return builtIns.models;
+  // Both runs failed: report the full run's reason, it is the one that
+  // describes the install the user actually has.
+  throw new Error(full.failure);
 }
 
 // Options come from the app for `/thinking` and from the host for `/model`;

@@ -88,6 +88,33 @@ describe('chat command options', () => {
     expect(catalog.optionsFor('/model')).toHaveLength(1);
   });
 
+  it('keeps the host reason for the failed probe, and clears it on retry', async () => {
+    // The sheet shows this under the retry: without it, "could not read the
+    // model list" is all the user ever sees, whatever the host actually said.
+    const listModels = vi.fn()
+      .mockRejectedValueOnce(new Error('error: cannot read ~/.pi/agent/models.json'))
+      .mockResolvedValueOnce(MODELS);
+    const catalog = createChatCommandOptions({ projectPath: () => '/p', listModels });
+
+    await catalog.load('/model');
+    expect(catalog.error).toBe('error: cannot read ~/.pi/agent/models.json');
+
+    await catalog.load('/model', { force: true });
+    expect(catalog.error).toBeNull();
+  });
+
+  it('carries a non-Error rejection as text instead of losing it', async () => {
+    const catalog = createChatCommandOptions({
+      projectPath: () => '/p',
+      listModels: () => Promise.reject('pi --list-models exited 1'),
+    });
+
+    await catalog.load('/model');
+
+    expect(catalog.state).toBe('error');
+    expect(catalog.error).toBe('pi --list-models exited 1');
+  });
+
   it('does nothing without an open chat', async () => {
     const listModels = vi.fn(async () => MODELS);
     const catalog = createChatCommandOptions({ projectPath: () => null, listModels });

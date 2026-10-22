@@ -246,9 +246,22 @@ the command sheet instead of inserting the bare form:
 
 - **`/model`** lists what the host can actually reach. The list cannot ship
   with the app — pi only lists models whose provider has usable credentials —
-  so it comes from `pi --list-models` in the chat's project (one `exec`, 15 s
-  budget, cached per project). A probe failure offers 重试 rather than
-  pretending the host has no models.
+  so it comes from `pi --list-models` in the chat's project (one `exec`, 30 s
+  budget, cached per project). The output is a table whose **first column is
+  the provider**, so a row becomes the `provider/model` pair `/model` accepts
+  (`anthropic` + `claude-sonnet-4-5` → `anthropic/claude-sonnet-4-5`); reading
+  only the first column would offer provider names.
+  - pi builds its whole session runtime, extensions included, before printing
+    that list, so a single broken extension fails the probe. A failure is
+    retried once with `--no-extensions`: the built-in catalogue needs none of
+    it, and a provider an extension registers is still typeable by hand.
+  - A probe failure offers 重试 **and prints the host's own reason** under it
+    (the first line of stderr, or of stdout when pi exited 0 without a table).
+    Nothing else in the app surfaces stderr, so without that line a failed
+    probe is indistinguishable from a host with no models.
+  - `pi --list-models` exiting 0 with `No models available. Use /login …` is
+    not a failure: it means no provider has credentials, and the sheet says so
+    instead of showing a retry.
 - **`/thinking`** lists pi's documented levels (`off` … `max`), app-shipped
   copy, no probe.
 

@@ -27,6 +27,12 @@ export interface ChatCommandOptionsDeps {
 export interface ChatCommandOptions {
   /** The model list's state; the app-shipped lists are always `'ready'`. */
   readonly state: ChatOptionState;
+  /**
+   * Why the last host answer failed, in the host's own words. Shown under the
+   * retry so "could not read the list" is not the end of the story — the
+   * reason lives on stderr, which nothing else in the app surfaces.
+   */
+  readonly error: string | null;
   /** The rows for `command`; empty while a host list is still loading. */
   optionsFor(command: string): readonly PiCommandOption[];
   /**
@@ -38,9 +44,10 @@ export interface ChatCommandOptions {
 }
 
 export function createChatCommandOptions(deps: ChatCommandOptionsDeps): ChatCommandOptions {
-  const state = reactive<{ models: PiCommandOption[]; state: ChatOptionState }>({
+  const state = reactive<{ models: PiCommandOption[]; state: ChatOptionState; error: string | null }>({
     models: [],
     state: 'idle',
+    error: null,
   });
 
   /** The project whose model probe already answered `'ready'`. */
@@ -61,6 +68,7 @@ export function createChatCommandOptions(deps: ChatCommandOptionsDeps): ChatComm
     if (inFlight !== null && inFlight.project === project) return inFlight.promise;
 
     state.state = 'loading';
+    state.error = null;
     const promise = (async (): Promise<void> => {
       try {
         const models = await deps.listModels(project);
@@ -70,9 +78,10 @@ export function createChatCommandOptions(deps: ChatCommandOptionsDeps): ChatComm
         state.models = models;
         loadedProject = project;
         state.state = 'ready';
-      } catch {
+      } catch (error) {
         if (deps.projectPath() !== project) return;
         state.models = [];
+        state.error = error instanceof Error ? error.message : String(error);
         loadedProject = null;
         state.state = 'error';
       } finally {
@@ -91,6 +100,7 @@ export function createChatCommandOptions(deps: ChatCommandOptionsDeps): ChatComm
 
   return reactive({
     get state() { return state.state; },
+    get error() { return state.error; },
     optionsFor,
     load,
   });

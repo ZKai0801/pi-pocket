@@ -314,6 +314,25 @@ describe('chat composer', () => {
     ]);
   });
 
+  it('shows the host reason when the model probe fails, not just "could not read"', async () => {
+    const commandOptions = createChatCommandOptions({
+      projectPath: () => '/home/dev/git/pocketshell',
+      listModels: async () => {
+        throw new Error('error: cannot read ~/.pi/agent/models.json');
+      },
+    });
+    const composer = mountComposer(vi.fn(async () => 'sent' as const), { commandOptions });
+
+    composer.button().click();
+    await nextTick();
+    rowFor('/model').click();
+    await settle();
+
+    expect(composer.optionsSheet()).not.toBeNull();
+    const reason = document.querySelector('[data-testid="chat-command-options-reason"]');
+    expect(reason?.textContent?.trim()).toBe('error: cannot read ~/.pi/agent/models.json');
+  });
+
   it('keeps the command sheet open when the option sheet is closed', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const), {
       commandOptions: catalogWith(),

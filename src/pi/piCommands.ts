@@ -42,9 +42,25 @@ export function resolveSessionRootCommand(root: string): string {
  * `.pi/settings.json` narrows the list exactly as it does for `/model`.
  * `piCommand` is the resolved absolute path (`resolvePiCommand`'s contract:
  * no whitespace, no shell metacharacters).
+ *
+ * stderr is left alone on purpose: pi prints why it could not list (a broken
+ * `models.json`, a crashing extension, an unreadable install) on stderr, and
+ * the caller shows that text when the probe fails. Redirecting it to
+ * `/dev/null` is what makes "could not read the model list" unexplainable.
+ *
+ * `builtInsOnly` drops `--no-extensions` into the call. pi builds its whole
+ * session runtime — extensions included, compiled on the fly — before it
+ * prints this list, so a single bad extension fails the probe; the retry runs
+ * without them. It is a flag, so the `[search]` argument of `--list-models`
+ * cannot swallow it.
  */
-export function piListModelsCommand(piCommand: string, projectPath: string): string {
-  return `cd ${quoteShell(projectPath)} && ${quoteShell(piCommand)} --list-models 2>/dev/null`;
+export function piListModelsCommand(
+  piCommand: string,
+  projectPath: string,
+  options: { builtInsOnly?: boolean } = {},
+): string {
+  const flags = options.builtInsOnly === true ? ' --no-extensions' : '';
+  return `cd ${quoteShell(projectPath)} && ${quoteShell(piCommand)}${flags} --list-models`;
 }
 
 export function piOverrideProbeCommand(override: string): string {

@@ -4,6 +4,7 @@ import {
   listSessionDirsCommand,
   listSessionFilesCommand,
   piNodeGlobProbeCommand,
+  piListModelsCommand,
   piOverrideProbeCommand,
   piPathProbeCommand,
   quoteShell,
@@ -45,5 +46,18 @@ describe('pi commands', () => {
       .toBe("p=$(command -v pi) && test -f \"$p\" && test -x \"$p\" && test -s \"$p\" && printf '%s\\n' \"$p\"");
     expect(piNodeGlobProbeCommand())
       .toBe("p=$(ls -1 /home/projects/softwares/node-*/bin/pi 2>/dev/null | head -n1) && test -f \"$p\" && test -x \"$p\" && test -s \"$p\" && printf '%s\\n' \"$p\"");
+  });
+
+  it('commands: asks for the model list in the project, stderr left intact', () => {
+    // No `2>/dev/null`: pi explains a failed listing on stderr, and the picker
+    // shows that text. Discarding it is why the failure was unexplainable.
+    expect(piListModelsCommand('/opt/bin/pi', '/home/projects/app'))
+      .toBe("cd '/home/projects/app' && '/opt/bin/pi' --list-models");
+  });
+
+  it('commands: the built-ins-only retry drops extension discovery', () => {
+    // `--no-extensions` is a flag, so `--list-models` cannot take it as search.
+    expect(piListModelsCommand('/opt/bin/pi', '/home/projects/app', { builtInsOnly: true }))
+      .toBe("cd '/home/projects/app' && '/opt/bin/pi' --no-extensions --list-models");
   });
 });

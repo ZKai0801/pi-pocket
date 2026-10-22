@@ -211,6 +211,7 @@ function retryOptions(): void {
       :command="pending?.command ?? ''"
       :options="pendingOptions"
       :state="pendingState"
+      :error="props.commandOptions?.error ?? null"
       @select="pickOption"
       @close="closeOptions"
       @retry="retryOptions"
