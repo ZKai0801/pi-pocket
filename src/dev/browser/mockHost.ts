@@ -37,6 +37,29 @@ export interface MockFile {
 export const MOCK_HOME = '/home/dev';
 export const MOCK_HOSTNAME = 'devbox';
 
+/**
+ * What the fake box has installed for pi: one extension command, one prompt
+ * template and one skill, in the probe's `kind<TAB>name<TAB>source` shape. The
+ * chat composer's command sheet merges these under its built-ins, so browser
+ * dev mode shows the discovered groups instead of an empty host.
+ */
+const PI_SLASH_PROBE_OUTPUT = [
+  `cmd\tnix\t${MOCK_HOME}/.pi/agent/extensions`,
+  `tpl\treview\t${MOCK_HOME}/.pi/agent/prompts`,
+  `skill\tdeploy\t${MOCK_HOME}/git/pocketshell/.pi/skills`,
+].join('\n');
+
+/**
+ * What the fake box reports for the chat's `/model` picker. `pi --list-models`
+ * only lists models whose provider has credentials, so browser dev mode needs
+ * a fixture here to exercise the picker at all.
+ */
+const PI_MODEL_LIST_OUTPUT = [
+  'anthropic/claude-sonnet-4',
+  'anthropic/claude-opus-4',
+  'openai/gpt-5-codex',
+].join('\n');
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -241,6 +264,8 @@ export class MockHost {
   /** Run one non-interactive command the way `exec` would on the box. */
   exec(command: string): MockExecResult {
     const inner = unwrapCommand(command);
+    if (inner.startsWith('# pi-slash-probe')) return { exitCode: 0, stdout: `${PI_SLASH_PROBE_OUTPUT}\n`, stderr: '' };
+    if (inner.includes('--list-models')) return { exitCode: 0, stdout: `${PI_MODEL_LIST_OUTPUT}\n`, stderr: '' };
     if (inner.startsWith('echo "<<<PS_SS_TLN>>>"')) return { exitCode: 0, stdout: listenerScan(), stderr: '' };
     if (inner.startsWith('for pid in ')) {
       const pids = inner.slice('for pid in '.length).split(';')[0].trim().split(/\s+/u).map(Number);

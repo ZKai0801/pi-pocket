@@ -16,6 +16,7 @@ function stubRunner(): StubRunner {
   return {
     send: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     startNew: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
+    runCommand: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),
   };

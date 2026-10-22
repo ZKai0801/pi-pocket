@@ -31,10 +31,12 @@ import {
 import { sessionPreview } from '../pi/parsePiSession';
 import {
   createPiTurnRunner,
+  type PiCommandRunResult,
   type PiTurnRunner,
   type PiTurnSendResult,
   type PiTurnStartNewResult,
 } from '../pi/piTurnRunner';
+import { parseSlashLine } from '../pi/piInteractivity';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession } from '../pi/types';
@@ -63,6 +65,11 @@ export interface SessionsStoreState {
   sending: boolean;
   /** The last send failure, already in the UI's language. */
   sendError: string | null;
+  /**
+   * A note about a send that succeeded: today, a command that ran in a surface
+   * this chat cannot show. Never an error — the command did reach pi.
+   */
+  sendNotice: string | null;
   /** The open chat is a draft: its first send creates the session file. */
   startingNew: boolean;
 }
@@ -135,6 +142,7 @@ const TURN_ERROR_COPY: ReadonlyArray<readonly [RegExp, string]> = [
   [/disposed/i, t('store.sessionDisconnected')],
   [/already attached to a session/i, t('store.sessionAlreadyOpen')],
   [/not-sent|not sent/i, t('store.sendFailed')],
+  [/not a pi command/i, t('store.sendFailed')],
   [/empty/i, t('store.emptyMessage')],
   [/not become ready|\bready\b/i, t('store.piNotReady')],
   [/new session file/i, t('store.newSessionTimeout')],
@@ -196,6 +204,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     error: null,
     sending: false,
     sendError: null,
+    sendNotice: null,
     startingNew: false,
   });
 
@@ -241,6 +250,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       sendToken += 1;
       state.sending = false;
       state.sendError = null;
+      state.sendNotice = null;
       state.startingNew = false;
     }
     const token = ++loadToken;
@@ -362,6 +372,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.open = { version: 3, id: '', cwd: project.path, name: null, turns: [] };
     state.openPath = null;
     state.sendError = null;
+    state.sendNotice = null;
     // A draft is not a list load failure: never show the old error/retry.
     state.state = 'idle';
     state.error = null;
@@ -389,6 +400,13 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   // One turn at a time in the open chat (D10). The claim carries the host and
   // path it was made for, and both are re-checked at settlement (D8), so a
   // turn that lands after a host/project/chat switch never paints `open`.
+  //
+  // A `/command` makes the same claim but completes differently: pi runs it
+  // in-process and appends no assistant turn, so the turn's "wait for a new
+  // assistant reply" rule would sit on its 120 s timeout over work that had
+  // already finished. `runCommand` resolves as soon as pi has the bytes, the
+  // transcript is left untouched, and a command that opened a surface this
+  // chat cannot render raises `sendNotice` instead of a fake failure.
   async function send(text: string): Promise<'sent' | 'busy' | 'error'> {
     const startingNew = state.startingNew;
     const projectPath = startingNew ? state.open?.cwd ?? null : null;
@@ -407,16 +425,25 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.sendError = t('store.emptyMessage');
       return 'error';
     }
+    const slash = parseSlashLine(text);
 
     const host = hostId();
     const token = ++sendToken;
     state.sending = true;
     state.sendError = null;
+    state.sendNotice = null;
     try {
-      let result: PiTurnSendResult;
+      let result: PiTurnSendResult | null = null;
+      let command: PiCommandRunResult | null = null;
       let adoptedFile: string | null = null;
       try {
-        if (startingNew) {
+        if (slash !== null) {
+          // A draft runs the command on the sessionless process: nothing has
+          // been written yet, so there is no session file to attach to.
+          command = startingNew
+            ? await runner.runCommand(null, slash.line)
+            : await runner.runCommand(sessionFile as string, slash.line);
+        } else if (startingNew) {
           // A draft's first turn creates the file; the project directory is
           // part of the claim, so a project switch mid-turn drops the write.
           const created = await runner.startNew(projectPath as string, text);
@@ -426,7 +453,11 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
           result = await runner.send(sessionFile as string, text);
         }
       } catch (error) {
-        result = { ok: false, error: errorMessage(error) };
+        if (slash !== null) {
+          command = { ok: false, error: errorMessage(error) };
+        } else {
+          result = { ok: false, error: errorMessage(error) };
+        }
       }
       // A stale claim's turn is abandoned, never shown (D8): the host changed,
       // the chat closed, the draft's project changed, or another project
@@ -442,6 +473,16 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       if (staleClaim) {
         return 'error';
       }
+      if (command !== null) {
+        if (!command.ok) {
+          state.sendError = localiseTurnError(command.error);
+          return 'error';
+        }
+        if (command.hiddenUi) state.sendNotice = t('store.commandTerminalOnly');
+        return 'sent';
+      }
+      // Every branch above assigns one of the two results.
+      if (result === null) return 'error';
       if (result.ok) {
         state.open = result.session;
         if (startingNew) {
@@ -472,6 +513,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     sendToken += 1;
     state.sending = false;
     state.sendError = null;
+    state.sendNotice = null;
     state.startingNew = false;
     state.open = null;
     state.openPath = null;
@@ -486,6 +528,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     sendToken += 1;
     state.sending = false;
     state.sendError = null;
+    state.sendNotice = null;
     state.startingNew = false;
     loadInFlight = null;
     openInFlight = null;
@@ -508,6 +551,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     set sending(value: boolean) { state.sending = value; },
     get sendError() { return state.sendError; },
     set sendError(value: string | null) { state.sendError = value; },
+    get sendNotice() { return state.sendNotice; },
+    set sendNotice(value: string | null) { state.sendNotice = value; },
     get startingNew() { return state.startingNew; },
     set startingNew(value: boolean) { state.startingNew = value; },
     load,
@@ -738,9 +783,9 @@ export interface TurnRunnerFacadeDeps {
  * the store keeps the draft, while the runner never survives an attempt.
  */
 export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner {
-  let pendingTurn: Promise<PiTurnSendResult | PiTurnStartNewResult> | null = null;
+  let pendingTurn: Promise<PiTurnSendResult | PiTurnStartNewResult | PiCommandRunResult> | null = null;
 
-  function track<T extends PiTurnSendResult | PiTurnStartNewResult>(
+  function track<T extends PiTurnSendResult | PiTurnStartNewResult | PiCommandRunResult>(
     run: Promise<T>,
   ): Promise<T> {
     pendingTurn = run;
@@ -775,6 +820,35 @@ export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner
     return track(run);
   }
 
+  /**
+   * A command is serialised with the turns it shares a PTY with, but it is not
+   * a turn: it never adopts a session file and never touches the draft. A
+   * draft's command runs on the sessionless runner and leaves it in place, so
+   * a choice made before the first message (`/model`, `/thinking`) still
+   * applies to that message instead of dying with the PTY.
+   */
+  function runCommand(sessionFile: string | null, command: string): Promise<PiCommandRunResult> {
+    if (pendingTurn !== null) {
+      return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
+    }
+    const draft = sessionFile === null;
+    const claimed = draft
+      ? deps.startingNew() && deps.openPath() === null
+      : !deps.startingNew() && deps.openPath() === sessionFile;
+    if (!claimed) {
+      return Promise.resolve({ ok: false, error: STALE_TURN_ERROR });
+    }
+    const run = (async (): Promise<PiCommandRunResult> => {
+      try {
+        const runner = await deps.runnerFor(sessionFile ?? '');
+        return await runner.runCommand(sessionFile, command);
+      } catch (error) {
+        return failure(error);
+      }
+    })();
+    return track(run);
+  }
+
   function startNew(projectPath: string, message: string): Promise<PiTurnStartNewResult> {
     if (pendingTurn !== null) {
       return Promise.resolve({ ok: false, error: BUSY_TURN_ERROR });
@@ -801,6 +875,7 @@ export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner
   return {
     send,
     startNew,
+    runCommand,
     isBusy: () => pendingTurn !== null || deps.isBusy(),
     dispose: () => deps.dispose(),
   };
@@ -930,6 +1005,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     error: toRef(store, 'error'),
     sending: toRef(store, 'sending'),
     sendError: toRef(store, 'sendError'),
+    sendNotice: toRef(store, 'sendNotice'),
     startingNew: toRef(store, 'startingNew'),
     load: store.load,
     openSession: store.openSession,

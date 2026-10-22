@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { PiTurnRunner } from '../../src/pi/piTurnRunner';
+import type { PiTurnRunner, PiTurnStartNewResult } from '../../src/pi/piTurnRunner';
 import type { ParsedPiSession } from '../../src/pi/types';
 import { createTurnRunnerFacade } from '../../src/stores/sessions';
 
@@ -22,6 +22,7 @@ function fakeRunner(overrides: Partial<PiTurnRunner> = {}): PiTurnRunner {
       sessionFile: '/r/new.jsonl',
       session,
     })),
+    runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),
     ...overrides,
@@ -111,5 +112,63 @@ describe('turn runner facade', () => {
     expect(failedDraft.startNew).toHaveBeenCalledTimes(1);
     expect(retryDraft.startNew).toHaveBeenCalledTimes(1);
     expect(h.disposeChat).toHaveBeenCalledTimes(2);
+  });
+  it('runs a command on the adopted chat without disposing its runner', async () => {
+    const h = harness();
+    h.adopt('/r/new.jsonl');
+
+    await expect(h.facade.runCommand('/r/new.jsonl', '/compact')).resolves.toEqual({
+      ok: true,
+      hiddenUi: false,
+    });
+
+    expect(h.runnerFor).toHaveBeenCalledWith('/r/new.jsonl');
+    expect(h.disposeChat).not.toHaveBeenCalled();
+  });
+
+  it('runs a draft command on the sessionless runner and keeps it for the first turn', async () => {
+    const draft = fakeRunner();
+    const h = harness(draft);
+
+    await expect(h.facade.runCommand(null, '/model openai/gpt-5')).resolves.toMatchObject({ ok: true });
+
+    expect(h.runnerFor).toHaveBeenCalledWith('');
+    expect(draft.runCommand).toHaveBeenCalledWith(null, '/model openai/gpt-5');
+    // Disposing now would throw away the model chosen before the first message.
+    expect(h.disposeChat).not.toHaveBeenCalled();
+  });
+
+  it('refuses a command claimed for another chat', async () => {
+    const h = harness();
+    h.adopt('/r/new.jsonl');
+
+    await expect(h.facade.runCommand('/r/other.jsonl', '/compact')).resolves.toEqual({
+      ok: false,
+      error: 'The chat changed before the turn could start.',
+    });
+    await expect(h.facade.runCommand(null, '/compact')).resolves.toEqual({
+      ok: false,
+      error: 'The chat changed before the turn could start.',
+    });
+    expect(h.runnerFor).not.toHaveBeenCalled();
+  });
+
+  it('serialises a command behind the turn in flight', async () => {
+    let finishTurn!: () => void;
+    const draft = fakeRunner({
+      startNew: vi.fn(() => new Promise<PiTurnStartNewResult>((resolve) => {
+        finishTurn = () => resolve({ ok: true as const, sessionFile: '/r/new.jsonl', session });
+      })),
+    });
+    const h = harness(draft);
+
+    const turn = h.facade.startNew('/p/a', 'hi');
+    await expect(h.facade.runCommand(null, '/compact')).resolves.toEqual({
+      ok: false,
+      error: 'A turn is already running in this chat.',
+    });
+    finishTurn();
+    await turn;
+    expect(draft.runCommand).not.toHaveBeenCalled();
   });
 });

@@ -5,6 +5,7 @@ import {
   type PtyWriteAcknowledgement,
 } from '../session/composerDelivery';
 import type { TurnPtyGeometry, TurnPtyHandle } from '../session/turnPty';
+import { parseSlashLine, takesOverTerminal } from './piInteractivity';
 import { buildPiOpenCommand, toTurnLine } from './piTurn';
 import { createConsoleTracker, isPiReady } from './turnReadiness';
 import type { ParsedPiSession } from './types';
@@ -18,6 +19,7 @@ const TURN_TIMEOUT_ERROR = 'The turn timed out before Pi wrote a new assistant r
 const NEW_SESSION_TIMEOUT_ERROR = 'No new session file appeared before the timeout.';
 export const SESSION_ALREADY_OPEN_ERROR = 'This runner is already attached to a session.';
 const EMPTY_MESSAGE_ERROR = 'The message is empty.';
+const NOT_A_COMMAND_ERROR = 'This line is not a Pi command.';
 
 const DISPOSED = Symbol('disposed');
 const TURN_DEADLINE = Symbol('turn deadline');
@@ -67,9 +69,26 @@ export type PiTurnStartNewResult =
   | { ok: true; sessionFile: string; session: ParsedPiSession }
   | { ok: false; error: string };
 
+/**
+ * A command is delivered, not awaited: pi handles it in-process and writes no
+ * assistant turn, so waiting for one would block for the whole turn timeout
+ * over work that already finished. `hiddenUi` means the command opened a
+ * surface this chat cannot render, which costs the runner its PTY before the
+ * next line (see `piInteractivity`).
+ */
+export type PiCommandRunResult =
+  | { ok: true; hiddenUi: boolean }
+  | { ok: false; error: string };
+
 export interface PiTurnRunner {
   send(sessionFile: string, message: string): Promise<PiTurnSendResult>;
   startNew(projectPath: string, message: string): Promise<PiTurnStartNewResult>;
+  /**
+   * Deliver one `/command` and return once pi has accepted the bytes.
+   * `sessionFile === null` runs it on the sessionless draft process, so a
+   * command picked before the first message does not create a session.
+   */
+  runCommand(sessionFile: string | null, command: string): Promise<PiCommandRunResult>;
   isBusy(): boolean;
   dispose(): void;
 }
@@ -79,6 +98,12 @@ interface OpenTurn {
   tracker: ReturnType<typeof createConsoleTracker>;
   delivery: ReturnType<typeof createComposerDeliveryController>;
   ready: boolean;
+  /**
+   * The last line was a command that took the terminal over, so this PTY must
+   * not answer the chat's next line: it is dropped (and pi re-opened on the
+   * chat's own session file) before anything else is written.
+   */
+  restartPending: boolean;
 }
 
 export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
@@ -225,9 +250,35 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       { submitDelayMs: deps.submitDelayMs },
     );
     delivery.setTransportState('connected');
-    open = { handle, tracker, delivery, ready: false };
+    open = { handle, tracker, delivery, ready: false, restartPending: false };
     openSessionFile = sessionFile;
     return { ok: true };
+  }
+
+  /** Close the turn PTY and forget it, so the next delivery opens a fresh one. */
+  function dropTurn(): void {
+    const state = open;
+    open = null;
+    openSessionFile = null;
+    unsubscribeActive();
+    if (!state) return;
+    state.delivery.setTransportState('closed');
+    try {
+      state.handle.close();
+    } catch {
+      // Best-effort: a PTY that refuses to close is already unusable.
+    }
+  }
+
+  /**
+   * A command that took the terminal over leaves this PTY unable to answer for
+   * the chat — its picker would eat the next line, and a session switch would
+   * answer into a conversation this chat stopped reading. Dropping it here,
+   * right before the next write, lets the command finish first (unlike an Esc,
+   * which could abort a `/compact`) and still keeps the next line clean.
+   */
+  function dropTurnIfSuperseded(): void {
+    if (open?.restartPending === true) dropTurn();
   }
 
   async function waitForReady(
@@ -314,6 +365,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     busy = true;
     try {
       const deadline = now() + turnTimeoutMs;
+      dropTurnIfSuperseded();
       const opened = await ensureOpen(sessionFile, deps.projectPath);
       if (!opened.ok) return opened;
       const state = open;
@@ -359,6 +411,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     try {
       const deadline = now() + turnTimeoutMs;
       // A new conversation is opened without `--session`, in the project dir.
+      dropTurnIfSuperseded();
       const opened = await ensureOpen(null, projectPath);
       if (!opened.ok) return opened;
       const state = open;
@@ -410,6 +463,46 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     }
   }
 
+  /**
+   * Deliver one `/command`. Unlike a message there is no turn to wait for: pi
+   * handles the command itself and appends nothing to the session file, so the
+   * assistant poll would report its 120 s timeout over work that already ran.
+   * The contract is "pi accepted the bytes" — the ack from the PTY write — and
+   * nothing more.
+   */
+  async function runCommand(
+    sessionFile: string | null,
+    command: string,
+  ): Promise<PiCommandRunResult> {
+    if (disposed) return { ok: false, error: DISPOSED_ERROR };
+    if (busy) return { ok: false, error: BUSY_ERROR };
+    const slash = parseSlashLine(command);
+    if (slash === null) return { ok: false, error: NOT_A_COMMAND_ERROR };
+    busy = true;
+    try {
+      dropTurnIfSuperseded();
+      const opened = await ensureOpen(sessionFile, deps.projectPath);
+      if (!opened.ok) return opened;
+      const state = open;
+      if (!state) return { ok: false, error: DISPOSED_ERROR };
+
+      subscribe(state);
+      const ready = await waitForReady(state);
+      if (!ready.ok) return ready;
+      if (disposed) return { ok: false, error: DISPOSED_ERROR };
+
+      const deliveryFailure = await deliverLine(state, slash.line);
+      if (deliveryFailure !== null) return { ok: false, error: deliveryFailure };
+
+      const hiddenUi = !disposed && takesOverTerminal(slash);
+      if (hiddenUi) state.restartPending = true;
+      return { ok: true, hiddenUi };
+    } finally {
+      unsubscribeActive();
+      busy = false;
+    }
+  }
+
   function isBusy(): boolean {
     return busy;
   }
@@ -417,20 +510,9 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    const state = open;
-    open = null;
-    openSessionFile = null;
-    unsubscribeActive();
-    if (state) {
-      state.delivery.setTransportState('closed');
-      try {
-        state.handle.close();
-      } catch {
-        // Close is best-effort; the runner is already unusable.
-      }
-    }
+    dropTurn();
     wakeCurrentWait?.();
   }
 
-  return { send, startNew, isBusy, dispose };
+  return { send, startNew, runCommand, isBusy, dispose };
 }

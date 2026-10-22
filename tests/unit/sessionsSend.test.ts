@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
+  PiCommandRunResult,
   PiTurnRunner,
   PiTurnSendResult,
   PiTurnStartNewResult,
@@ -34,10 +35,13 @@ function runnerWith(
     ok: false,
     error: 'unused',
   }),
+  runCommand: (sessionFile: string | null, command: string) => Promise<PiCommandRunResult> =
+    async () => ({ ok: true, hiddenUi: false }),
 ): PiTurnRunner {
   return {
     send: vi.fn(send),
     startNew: vi.fn(startNew),
+    runCommand: vi.fn(runCommand),
     isBusy: vi.fn(() => busy),
     dispose: vi.fn(),
   };
@@ -494,5 +498,103 @@ describe('sessions store send', () => {
     expect(localiseTurnError('Pi did not become ready before the timeout.')).not.toBe(
       '等待回复超时，请重试。',
     );
+  });
+  it('routes a slash command to the command channel instead of a turn', async () => {
+    const runner = runnerWith(async () => ({ ok: true, session }));
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+
+    expect(await store.send('/compact keep the API notes')).toBe('sent');
+
+    expect(runner.runCommand).toHaveBeenCalledWith('/r/a.jsonl', '/compact keep the API notes');
+    expect(runner.send).not.toHaveBeenCalled();
+    // A command appends nothing to the session, so the transcript stands.
+    expect(store.open).toEqual(session);
+    expect(store.sendError).toBeNull();
+    expect(store.sendNotice).toBeNull();
+    expect(store.sending).toBe(false);
+  });
+
+  it('runs a draft command on the sessionless runner and keeps the draft', async () => {
+    const runner = runnerWith(async () => ({ ok: true, session }));
+    const store = storeWith(runner);
+    store.newConversation({ path: '/p/a', name: 'a' });
+
+    expect(await store.send('/thinking high')).toBe('sent');
+
+    expect(runner.runCommand).toHaveBeenCalledWith(null, '/thinking high');
+    expect(runner.startNew).not.toHaveBeenCalled();
+    // Nothing was written, so there is still no session file to adopt.
+    expect(store.openPath).toBeNull();
+    expect(store.startingNew).toBe(true);
+    expect(store.open).toEqual({ version: 3, id: '', cwd: '/p/a', name: null, turns: [] });
+  });
+
+  it('notes a command whose screen only the terminal can show', async () => {
+    const runner = runnerWith(
+      async () => ({ ok: true, session }),
+      false,
+      async () => ({ ok: false, error: 'unused' }),
+      async () => ({ ok: true, hiddenUi: true }),
+    );
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+
+    expect(await store.send('/tree')).toBe('sent');
+    expect(store.sendError).toBeNull();
+    expect(store.sendNotice).toBe('该命令的界面只能在终端里显示。下一条消息会重新连接到本会话。');
+
+    // The next send owns the slot again: a stale note must not sit over it.
+    expect(await store.send('hi')).toBe('sent');
+    expect(store.sendNotice).toBeNull();
+  });
+
+  it('reports a refused command as a send failure, not a timeout', async () => {
+    const runner = runnerWith(
+      async () => ({ ok: true, session }),
+      false,
+      async () => ({ ok: false, error: 'unused' }),
+      async () => ({ ok: false, error: 'This line is not a Pi command.' }),
+    );
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+
+    expect(await store.send('/compact')).toBe('error');
+    expect(store.sendError).toBe('消息未发送成功，请重试。');
+    expect(store.sendNotice).toBeNull();
+    expect(store.sending).toBe(false);
+  });
+
+  it('sends a message that opens with a path as a turn, not a command', async () => {
+    const runner = runnerWith(async () => ({ ok: true, session }));
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+
+    expect(await store.send('/usr/bin/foo is broken')).toBe('sent');
+    expect(runner.send).toHaveBeenCalledWith('/r/a.jsonl', '/usr/bin/foo is broken');
+    expect(runner.runCommand).not.toHaveBeenCalled();
+  });
+
+  it('drops a command whose chat closed before it settled', async () => {
+    let settle!: (value: PiCommandRunResult) => void;
+    const pendingCommand = new Promise<PiCommandRunResult>((resolve) => {
+      settle = resolve;
+    });
+    const runner = runnerWith(
+      async () => ({ ok: true, session }),
+      false,
+      async () => ({ ok: false, error: 'unused' }),
+      () => pendingCommand,
+    );
+    const store = storeWith(runner, () => 'A');
+    await store.openSession('/r/a.jsonl');
+
+    const pending = store.send('/tree');
+    store.closeChat();
+    settle({ ok: true, hiddenUi: true });
+
+    expect(await pending).toBe('error');
+    expect(store.sendNotice).toBeNull();
+    expect(store.sending).toBe(false);
   });
 });

@@ -60,11 +60,21 @@ function harness(options: {
   neverSettles?: boolean;
   newest?: Array<string | null | Error>;
   turnTimeoutMs?: number;
+  /** Give every reopened PTY its own handle, so a restart is visible. */
+  freshHandles?: boolean;
 }) {
   const handle = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
+  const handles: FakeHandle[] = [handle];
+  let opens = 0;
   const reads = [...options.reads];
   const newest = [...(options.newest ?? [null])];
-  const openPty = vi.fn(async (_command: string, _geometry: { cols: number; rows: number }) => handle);
+  const openPty = vi.fn(async (_command: string, _geometry: { cols: number; rows: number }) => {
+    opens += 1;
+    if (options.freshHandles !== true || opens === 1) return handle;
+    const next = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
+    handles.push(next);
+    return next;
+  });
   const readSession = vi.fn(async (_path: string) => {
     if (options.neverSettles) return new Promise<ParsedPiSession>(() => {});
     const next = reads.length > 1 ? reads.shift()! : reads[0]!;
@@ -93,7 +103,7 @@ function harness(options: {
     pollIntervalMs: 1_000,
     submitDelayMs: 0,
   });
-  return { handle, openPty, reads, readSession, newestSessionFile, runner };
+  return { handle, handles, openPty, reads, readSession, newestSessionFile, runner };
 }
 
 describe('createPiTurnRunner', () => {
@@ -407,6 +417,112 @@ describe('createPiTurnRunner', () => {
     });
     expect(h.handle.close).toHaveBeenCalledTimes(1);
     expect(h.handle.unsubscribe).toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
+  });
+  it('delivers a command and returns without polling for a reply', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.runCommand('/r/a.jsonl', '/compact keep the API notes');
+
+    expect(result).toEqual({ ok: true, hiddenUi: false });
+    expect(h.handle.writes).toEqual(['/compact keep the API notes', '\r']);
+    // The command writes no assistant turn, so waiting for one is the 120 s
+    // timeout this channel exists to avoid.
+    expect(h.readSession).not.toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('reuses the PTY for an in-place command, so the next message follows it', async () => {
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    await h.runner.runCommand('/r/a.jsonl', '/compact');
+    await expect(h.runner.send('/r/a.jsonl', 'hi')).resolves.toMatchObject({ ok: true });
+
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+    expect(h.handle.writes).toEqual(['/compact', '\r', 'hi', '\r']);
+  });
+
+  it('drops a terminal-owning command\'s PTY before the next line, not during it', async () => {
+    const h = harness({
+      autoReady: true,
+      freshHandles: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    const result = await h.runner.runCommand('/r/a.jsonl', '/tree');
+
+    expect(result).toEqual({ ok: true, hiddenUi: true });
+    // The command may still be running: killing its PTY now would abort it.
+    expect(h.handle.close).not.toHaveBeenCalled();
+
+    await expect(h.runner.send('/r/a.jsonl', 'hi')).resolves.toMatchObject({ ok: true });
+
+    // A picker left open would have eaten this message; the reopened PTY is
+    // attached to the chat's own session file instead.
+    expect(h.handle.close).toHaveBeenCalledTimes(1);
+    expect(h.openPty).toHaveBeenCalledTimes(2);
+    expect(h.openPty).toHaveBeenLastCalledWith(
+      buildPiOpenCommand('/opt/bin/pi', '/home/kai/project', '/r/a.jsonl'),
+      { cols: 80, rows: 24 },
+    );
+    expect(h.handles[1]?.writes).toEqual(['hi', '\r']);
+  });
+
+  it('runs a draft command on the sessionless PTY and adopts nothing', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.runCommand(null, '/model openai/gpt-5-codex');
+
+    expect(result).toEqual({ ok: true, hiddenUi: false });
+    expect(h.openPty).toHaveBeenCalledWith(
+      buildPiOpenCommand('/opt/bin/pi', '/home/kai/project'),
+      { cols: 80, rows: 24 },
+    );
+    expect(h.newestSessionFile).not.toHaveBeenCalled();
+    expect(h.handle.writes).toEqual(['/model openai/gpt-5-codex', '\r']);
+  });
+
+  it('refuses a line that is not a command without opening a PTY', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.runCommand('/r/a.jsonl', 'hello');
+
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/not a pi command/i) });
+    expect(h.openPty).not.toHaveBeenCalled();
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('refuses a command while a turn is in flight', async () => {
+    const h = harness({
+      autoReady: false,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    const first = h.runner.send('/r/a.jsonl', 'one');
+    const second = await h.runner.runCommand('/r/a.jsonl', '/name two');
+
+    expect(second).toEqual({ ok: false, error: expect.stringMatching(/running/i) });
+    await flushMicrotasks();
+    h.handle.emit('\u203a ');
+    await expect(first).resolves.toMatchObject({ ok: true });
+  });
+
+  it('reports a command delivery failure without leaving the runner busy', async () => {
+    const h = harness({
+      autoReady: true,
+      writeError: new Error('pty closed'),
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const result = await h.runner.runCommand('/r/a.jsonl', '/compact');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('pty closed');
+    expect(h.handle.writes).toEqual([]);
+    expect(h.readSession).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
   });
 });
