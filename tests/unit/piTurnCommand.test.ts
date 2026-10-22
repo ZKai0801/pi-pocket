@@ -1,16 +1,27 @@
 import { describe, expect, it } from 'vitest';
+import { piNodePathPrelude } from '../../src/pi/piCommands';
 import { buildPiOpenCommand, toTurnLine } from '../../src/pi/piTurn';
+
+// The turn PTY is a non-login shell, so pi cannot count on `node` being on
+// PATH; every open command starts with the bootstrap that puts it there.
+const PRELUDE = piNodePathPrelude('/opt/bin/pi');
 
 describe('pi turn command', () => {
   it('opens pi in the project directory on the session file', () => {
     expect(buildPiOpenCommand('/opt/bin/pi', '/home/projects/x', '/r/a.jsonl'))
-      .toBe("cd '/home/projects/x' && exec '/opt/bin/pi' --session '/r/a.jsonl'");
+      .toBe(`${PRELUDE} cd '/home/projects/x' && exec '/opt/bin/pi' --session '/r/a.jsonl'`);
   });
 
   it('opens a new conversation when no session file is given', () => {
     const command = buildPiOpenCommand('/opt/bin/pi', '/home/projects/x');
-    expect(command).toBe("cd '/home/projects/x' && exec '/opt/bin/pi'");
+    expect(command).toBe(`${PRELUDE} cd '/home/projects/x' && exec '/opt/bin/pi'`);
     expect(command).not.toContain('--session');
+  });
+
+  it('looks for node next to pi before it runs pi', () => {
+    expect(PRELUDE).toContain("command -v node >/dev/null 2>&1 ||");
+    expect(PRELUDE).toContain("in '/opt/bin'");
+    expect(PRELUDE).toContain('export PATH');
   });
 
   it('quotes a project path containing a space as one shell argument', () => {
@@ -25,7 +36,8 @@ describe('pi turn command', () => {
       '/r/a.jsonl',
     );
     expect(command).toBe(
-      "cd '/home/it'\\''s $HOME `id`' && exec 'pi'\\''$(id)`whoami`' --session '/r/a.jsonl'",
+      piNodePathPrelude("pi'$(id)`whoami`")
+      + " cd '/home/it'\\''s $HOME `id`' && exec 'pi'\\''$(id)`whoami`' --session '/r/a.jsonl'",
     );
   });
 

@@ -4,6 +4,7 @@ import {
   listSessionDirsCommand,
   listSessionFilesCommand,
   piNodeGlobProbeCommand,
+  piNodePathPrelude,
   piListModelsCommand,
   piOverrideProbeCommand,
   piPathProbeCommand,
@@ -11,6 +12,9 @@ import {
   readProjectCwdCommand,
   readSessionTailCommand,
 } from '../../src/pi/piCommands';
+
+/** pi needs `node` and these shells read no profile; every invocation has this. */
+const PI_NODE_PATH_PRELUDE = piNodePathPrelude('/opt/bin/pi');
 
 describe('pi commands', () => {
   it('encodePiCwd: matches the observed dir names', () => {
@@ -52,12 +56,32 @@ describe('pi commands', () => {
     // No `2>/dev/null`: pi explains a failed listing on stderr, and the picker
     // shows that text. Discarding it is why the failure was unexplainable.
     expect(piListModelsCommand('/opt/bin/pi', '/home/projects/app'))
-      .toBe("cd '/home/projects/app' && '/opt/bin/pi' --list-models");
+      .toBe(`${PI_NODE_PATH_PRELUDE} cd '/home/projects/app' && '/opt/bin/pi' --list-models`);
   });
 
   it('commands: the built-ins-only retry drops extension discovery', () => {
     // `--no-extensions` is a flag, so `--list-models` cannot take it as search.
     expect(piListModelsCommand('/opt/bin/pi', '/home/projects/app', { builtInsOnly: true }))
-      .toBe("cd '/home/projects/app' && '/opt/bin/pi' --no-extensions --list-models");
+      .toBe(`${PI_NODE_PATH_PRELUDE} cd '/home/projects/app' && '/opt/bin/pi' --no-extensions --list-models`);
+  });
+});
+
+describe('piNodePathPrelude', () => {
+  it('does nothing when node is already on PATH', () => {
+    expect(PI_NODE_PATH_PRELUDE.startsWith('command -v node >/dev/null 2>&1 ||')).toBe(true);
+  });
+
+  it('falls back to the directory pi itself lives in, then the versioned layouts', () => {
+    // node sits next to pi on every npm-style install, so that directory is
+    // the one answer this can derive instead of guess.
+    expect(PI_NODE_PATH_PRELUDE).toContain("for pi_node_dir in '/opt/bin'");
+    expect(PI_NODE_PATH_PRELUDE).toContain('"$HOME"/.nvm/versions/node/*/bin');
+    expect(PI_NODE_PATH_PRELUDE).toContain('/home/projects/softwares/node-*/bin');
+  });
+
+  it('stays silent and cannot fail, so it is safe ahead of an exec', () => {
+    expect(PI_NODE_PATH_PRELUDE).not.toContain('echo');
+    expect(PI_NODE_PATH_PRELUDE.endsWith(';')).toBe(true);
+    expect(piNodePathPrelude('pi')).toBe(PI_NODE_PATH_PRELUDE.replace("'/opt/bin'", "'pi'"));
   });
 });

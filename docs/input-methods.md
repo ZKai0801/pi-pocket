@@ -262,6 +262,14 @@ the command sheet instead of inserting the bare form:
   - `pi --list-models` exiting 0 with `No models available. Use /login …` is
     not a failure: it means no provider has credentials, and the sheet says so
     instead of showing a retry.
+  - Every shell this app drives is a **non-login** one — the exec channel and
+    the turn PTY both run `<shell> -c <command>`, so neither reads
+    `/etc/profile` nor `~/.bashrc`. pi's first line is `#!/usr/bin/env node`,
+    so on a host whose node lives under a versioned prefix or nvm it dies with
+    `/usr/bin/env: 'node': No such file or directory` — the same pi that works
+    when a person types it at an interactive prompt. `piNodePathPrelude`
+    prefixes every invocation: no-op when `node` is already on PATH, otherwise
+    it puts pi's own bin directory (then the usual per-version layouts) there.
 - **`/thinking`** lists pi's documented levels (`off` … `max`), app-shipped
   copy, no probe.
 
