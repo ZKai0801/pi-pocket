@@ -90,6 +90,15 @@ Never put a `$` in an `rm`/`rmdir` target - no `$(...)`, no `$VAR`, no `~`. Clau
 
 Research/Explore agents (and any agent without an explicit worktree) see the root checkout's stale, unsynced state, not `origin/main` - brief them to fetch and reference `origin/main` explicitly, or give them a throwaway worktree, before trusting a "feature X is missing" claim.
 
+## CodeGraph
+
+This repository is indexed locally by [CodeGraph](https://github.com/colbymchenry/codegraph) — a `.codegraph/` directory already exists at the repo root (built with `codegraph init`: 439 files, ~11.3k nodes, ~30.8k edges). When you need to understand or locate code, reach for CodeGraph **before** grep/find or reading whole files:
+
+- **Shell (always works):** `codegraph explore "<question, symbol, or file name>"` returns the relevant symbols' verbatim source plus the call paths between them in one call — including dynamic-dispatch hops grep can't follow. Name a symbol or file to read its current line-numbered source. Narrower, scriptable lookups: `codegraph query <symbol>`, `codegraph callers <symbol>`, `codegraph callees <symbol>`, `codegraph impact <symbol>`, `codegraph node <name>`, `codegraph files`. Health/upkeep: `codegraph status`, `codegraph sync` (incremental after pulls/edits), `codegraph index` (full rebuild).
+- **MCP tool (when wired):** `codegraph_explore` mirrors `codegraph explore`; prefer it over full-tree reads when the agent exposes CodeGraph MCP tools.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision (`codegraph init`). CodeGraph output is auxiliary context; the source of truth remains the working tree, config, and test results.
+
 ## Maintainer working style
 
 Decide-and-proceed autonomy: the maintainer wants calls made and recorded, not blocking questions - the bar for asking is genuinely irreversible + expensive + ambiguous. This is within the process (file the issue and proceed), not a license to skip it. Pushing/merging work that is already reviewer-`APPROVED` or otherwise fully authorized by process.md is not itself an ask-first case (2026-08-28: asked before pushing an already-approved fix and an already-approved sibling-repo commit; the maintainer's answer was "just do it" - a routine push of finished, authorized work doesn't clear the ask bar even when it hits an unfamiliar git hiccup like a force-push block, see [docs/lessons-learned.md](docs/lessons-learned.md)).
