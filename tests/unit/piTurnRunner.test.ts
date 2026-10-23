@@ -54,10 +54,18 @@ async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 20; index += 1) await Promise.resolve();
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function harness(options: {
   autoReady?: boolean;
   writeError?: Error;
-  reads: Array<ParsedPiSession | Error>;
+  reads: Array<ParsedPiSession | Error | Promise<ParsedPiSession>>;
   neverSettles?: boolean;
   newest?: Array<string | null | Error>;
   turnTimeoutMs?: number;
@@ -409,5 +417,148 @@ describe('createPiTurnRunner', () => {
     expect(h.handle.close).toHaveBeenCalledTimes(1);
     expect(h.handle.unsubscribe).toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginSend resolves once the line is delivered and keeps the reply pending in completed', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+
+    expect(begun).toMatchObject({ ok: true, sessionFile: '/r/a.jsonl' });
+    if (!begun.ok) return;
+    expect(h.handle.writes).toEqual(['hi', '\r']);
+    expect(h.runner.isBusy()).toBe(true);
+
+    reply.resolve(sessionWithAssistantTurns(1));
+    await expect(begun.completed).resolves.toEqual({
+      ok: true,
+      session: sessionWithAssistantTurns(1),
+    });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginSend reports a delivery failure without leaving the runner busy', async () => {
+    const h = harness({
+      autoReady: true,
+      writeError: new Error('pty closed'),
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+
+    expect(begun.ok).toBe(false);
+    expect(begun.ok === false && begun.error).toContain('pty closed');
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginStartNew returns the adopted file before the reply and completes later', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl', '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+    });
+
+    const begun = await h.runner.beginStartNew('/home/kai/project', 'hi');
+
+    expect(begun).toMatchObject({ ok: true, sessionFile: '/r/new.jsonl' });
+    if (!begun.ok) return;
+    expect(h.handle.writes).toEqual(['hi', '\r']);
+    expect(h.runner.isBusy()).toBe(true);
+
+    reply.resolve(sessionWithAssistantTurns(1));
+    await expect(begun.completed).resolves.toEqual({
+      ok: true,
+      session: sessionWithAssistantTurns(1),
+    });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginStartNew times out waiting for the adopted file and leaves the runner idle', async () => {
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl'],
+      reads: [sessionWithAssistantTurns(0)],
+      turnTimeoutMs: 3_000,
+    });
+
+    const begun = await h.runner.beginStartNew('/home/kai/project', 'hi');
+
+    expect(begun.ok).toBe(false);
+    expect(begun.ok === false && begun.error).toMatch(/new session file/i);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('steers the run in flight with Enter and waits for the extra reply', async () => {
+    const firstReply = deferred<ParsedPiSession>();
+    const secondReply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      // baseline, then the first reply, then the steered one.
+      reads: [sessionWithAssistantTurns(0), firstReply.promise, secondReply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(h.runner.queue('/r/a.jsonl', 'use ripgrep', 'steer')).resolves.toEqual({ ok: true });
+    // Same PTY, same shell: Enter is pi's steering key while a turn runs.
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+    expect(h.handle.writes).toEqual(['one', '\r', 'use ripgrep', '\r']);
+
+    // The first reply alone no longer settles the run: one more is owed.
+    firstReply.resolve(sessionWithAssistantTurns(1));
+    await flushMicrotasks();
+    expect(h.runner.isBusy()).toBe(true);
+
+    secondReply.resolve(sessionWithAssistantTurns(2));
+    await expect(begun.completed).resolves.toEqual({
+      ok: true,
+      session: sessionWithAssistantTurns(2),
+    });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('queues a follow-up with Alt+Enter and waits for its reply too', async () => {
+    const firstReply = deferred<ParsedPiSession>();
+    const secondReply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), firstReply.promise, secondReply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(h.runner.queue('/r/a.jsonl', 'then the tests', 'follow-up')).resolves.toEqual({
+      ok: true,
+    });
+    // No Enter: the body goes in as an insert, and ESC CR is pi's
+    // app.message.followUp — delivered only when the run has nothing left.
+    expect(h.handle.writes).toEqual(['one', '\r', 'then the tests', '\u001b\r']);
+
+    firstReply.resolve(sessionWithAssistantTurns(1));
+    await flushMicrotasks();
+    expect(h.runner.isBusy()).toBe(true);
+
+    secondReply.resolve(sessionWithAssistantTurns(2));
+    await expect(begun.completed).resolves.toMatchObject({ ok: true });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('refuses to queue when no turn is running', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    await expect(h.runner.queue('/r/a.jsonl', 'hi', 'steer')).resolves.toEqual({
+      ok: false,
+      error: expect.stringMatching(/no running turn/i),
+    });
+    expect(h.openPty).not.toHaveBeenCalled();
   });
 });

@@ -34,6 +34,11 @@ function openSession(path: string): void {
   void store.openSession(path);
 }
 
+/** The row's conversation has a turn running — possibly in the background. */
+function isRunning(path: string): boolean {
+  return store.running.includes(path);
+}
+
 function newConversation(): void {
   const project = store.lastProject;
   if (project === null) return;
@@ -76,7 +81,17 @@ function retry(): void {
         <ul v-if="store.sessions.length > 0" class="sessions__list">
           <li v-for="session in store.sessions" :key="session.path" class="sessions__row">
             <button type="button" class="sessions__item" @click="openSession(session.path)">
-              <AppIcon name="activity" class="sessions__glyph" />
+              <span
+                v-if="isRunning(session.path)"
+                class="sessions__pulse"
+                data-testid="session-running"
+                :data-running="session.path"
+                role="img"
+                :aria-label="t('sessions.running')"
+              >
+                <AppIcon name="activity" class="sessions__glyph sessions__glyph--running" />
+              </span>
+              <AppIcon v-else name="activity" class="sessions__glyph" />
               <span class="sessions__text">
                 <span class="sessions__head">
                   <span class="sessions__name">{{ session.name ?? session.id }}</span>
@@ -239,6 +254,44 @@ function retry(): void {
   height: 20px;
   flex: 0 0 auto;
   color: var(--accent);
+}
+
+/* A running conversation's glyph beats in place: the row keeps its alignment,
+   and the motion is the only difference from a finished one. */
+.sessions__pulse {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  animation: sessions-pulse 1.4s ease-in-out infinite;
+}
+
+.sessions__glyph--running {
+  width: 20px;
+  height: 20px;
+}
+
+@keyframes sessions-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.86);
+  }
+}
+
+/* Reduced motion: a static accent ring instead of the beat. */
+@media (prefers-reduced-motion: reduce) {
+  .sessions__pulse {
+    border: 2px solid var(--accent);
+    animation: none;
+  }
 }
 
 .sessions__text {

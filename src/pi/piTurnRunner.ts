@@ -17,7 +17,30 @@ const READINESS_ERROR = 'Pi did not become ready before the timeout.';
 const TURN_TIMEOUT_ERROR = 'The turn timed out before Pi wrote a new assistant reply.';
 const NEW_SESSION_TIMEOUT_ERROR = 'No new session file appeared before the timeout.';
 export const SESSION_ALREADY_OPEN_ERROR = 'This runner is already attached to a session.';
+export const NOT_RUNNING_ERROR = 'There is no running turn to add a message to.';
 const EMPTY_MESSAGE_ERROR = 'The message is empty.';
+
+/**
+ * Alt+Enter — pi's `app.message.followUp` (default on every non-Windows
+ * terminal): queue the line until the current run has no tool calls and no
+ * steering left. Enter alone is `tui.input.submit`, which pi turns into a
+ * *steering* message while a turn is running, so the plain path already means
+ * "change direction now": the two intents differ only by this prefix.
+ */
+const FOLLOW_UP_KEY = '\x1b\r';
+
+/** The pause pi needs between the pasted line and the key that submits it. */
+const SUBMIT_DELAY_MS = 250;
+
+/**
+ * How long a delivered turn is waited on. This is also how long its chat is
+ * reported as running, so it has to outlast a real agent turn — a build plus a
+ * test suite routinely takes minutes — instead of cutting the status off mid
+ * run. It bounds the poll; it does not cancel anything on the server, and every
+ * message queued into the run pushes the deadline out again, so a run the user
+ * keeps steering never times out underneath them.
+ */
+const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 
 const DISPOSED = Symbol('disposed');
 const TURN_DEADLINE = Symbol('turn deadline');
@@ -67,9 +90,47 @@ export type PiTurnStartNewResult =
   | { ok: true; sessionFile: string; session: ParsedPiSession }
   | { ok: false; error: string };
 
+/**
+ * A turn whose input has already been delivered: the message is on the
+ * server, so the chat may clear its composer and show the turn as running,
+ * while `completed` settles when Pi's reply lands in the session file. A
+ * failure here means the line never got there, and nothing is pending.
+ */
+export type PiTurnBegun =
+  | { ok: true; sessionFile: string; completed: Promise<PiTurnSendResult> }
+  | { ok: false; error: string };
+
+/**
+ * Where a message lands when a run is already in flight, in pi's own words:
+ *
+ * - `steer` — delivered after the current assistant turn's tool calls and
+ *   before the next request, so the model can change direction mid-run.
+ * - `follow-up` — delivered only once the run has no tool calls and no steering
+ *   left, i.e. queued behind the whole task.
+ *
+ * Neither interrupts anything already running on the server, and neither is a
+ * new turn: both join the run that is in flight.
+ */
+export type TurnQueueKind = 'steer' | 'follow-up';
+
+export type PiTurnQueueResult = { ok: true } | { ok: false; error: string };
+
 export interface PiTurnRunner {
   send(sessionFile: string, message: string): Promise<PiTurnSendResult>;
   startNew(projectPath: string, message: string): Promise<PiTurnStartNewResult>;
+  /**
+   * Deliver `message` and resolve as soon as the line is written (plus, for a
+   * draft, as soon as Pi's new session file is adopted). The reply is awaited
+   * through `completed`, so the caller is never blocked on the agent's runtime.
+   */
+  beginSend(sessionFile: string, message: string): Promise<PiTurnBegun>;
+  beginStartNew(projectPath: string, message: string): Promise<PiTurnBegun>;
+  /**
+   * Type one more message into the run that is already in flight, as `kind`
+   * says. Refused when nothing is running: a new turn goes through
+   * `beginSend`, so the caller can never confuse the two.
+   */
+  queue(sessionFile: string, message: string, kind: TurnQueueKind): Promise<PiTurnQueueResult>;
   isBusy(): boolean;
   dispose(): void;
 }
@@ -81,14 +142,31 @@ interface OpenTurn {
   ready: boolean;
 }
 
+/**
+ * The run a chat has in flight. `target` is the number of assistant turns the
+ * session file must hold before the run counts as settled: the first one is
+ * this run's, and every steering/follow-up message adds one, so the chat keeps
+ * saying "running" until the last queued instruction has actually been
+ * answered. That is what makes a follow-up (answered minutes later) keep the
+ * status alive instead of clearing it at the first reply.
+ */
+interface ActiveRun {
+  sessionFile: string;
+  target: number;
+  deadline: number;
+}
+
 export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   const sleep = deps.sleep ?? defaultSleep;
   const now = deps.now ?? Date.now;
   const readyTimeoutMs = deps.readyTimeoutMs ?? 20_000;
-  const turnTimeoutMs = deps.turnTimeoutMs ?? 120_000;
+  const turnTimeoutMs = deps.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
   const pollIntervalMs = deps.pollIntervalMs ?? 1_000;
 
   let busy = false;
+  // Set once a delivered turn's reply poll owns the claim; `queue` needs it to
+  // know the PTY it should type into is mid-run.
+  let run: ActiveRun | null = null;
   let disposed = false;
   let open: OpenTurn | null = null;
   // `null` means the open PTY is the sessionless draft process; a string is
@@ -244,36 +322,56 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     return { ok: true };
   }
 
-  async function pollForAssistant(
-    sessionFile: string,
-    baseline: number,
-    deadline: number,
-  ): Promise<PiTurnSendResult> {
+  async function pollForReplies(active: ActiveRun): Promise<PiTurnSendResult> {
     while (true) {
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
       try {
-        const session = await readAbortable(sessionFile, deadline);
+        // The deadline is re-read every pass: a queued message pushes it out.
+        const session = await readAbortable(active.sessionFile, active.deadline);
         if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
         if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
-        if (assistantTurnCount(session) > baseline) return { ok: true, session };
+        if (assistantTurnCount(session) >= active.target) return { ok: true, session };
       } catch {
         // A transient read failure is retried until the deadline.
       }
-      await wait(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+      await wait(Math.min(pollIntervalMs, Math.max(0, active.deadline - now())));
     }
   }
 
   /** Deliver one line + CR; returns null on delivery, the typed error otherwise. */
   async function deliverLine(state: OpenTurn, line: string): Promise<string | null> {
+    return deliverWith(state, line, 'submit');
+  }
+
+  /**
+   * Deliver one line and then Alt+Enter instead of Enter. The body goes
+   * through the same controller (`intent: 'insert'`, so no CR), and the key is
+   * written after the controller's own submit pause — the same gap Enter gets,
+   * so pi reads the modifier before the line is submitted.
+   */
+  async function deliverFollowUp(state: OpenTurn, line: string): Promise<string | null> {
+    const failure = await deliverWith(state, line, 'insert');
+    if (failure !== null) return failure;
+    await sleep(deps.submitDelayMs ?? SUBMIT_DELAY_MS);
+    if (disposed) return DISPOSED_ERROR;
+    try {
+      state.handle.write(FOLLOW_UP_KEY);
+    } catch (error) {
+      return messageOf(error);
+    }
+    return null;
+  }
+
+  async function deliverWith(
+    state: OpenTurn,
+    line: string,
+    intent: 'insert' | 'submit',
+  ): Promise<string | null> {
     const operationId = `pi-turn-${nextOperationId}`;
     nextOperationId += 1;
     let result: ComposerDeliveryResult;
     try {
-      result = await state.delivery.deliver({
-        operationId,
-        payload: line,
-        intent: 'submit',
-      });
+      result = await state.delivery.deliver({ operationId, payload: line, intent });
     } catch (error) {
       return messageOf(error);
     }
@@ -306,12 +404,55 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     }
   }
 
-  async function send(sessionFile: string, message: string): Promise<PiTurnSendResult> {
+  /**
+   * Own the tail of a delivered turn: poll for every reply the run still owes,
+   * then release the runner's data subscription and its busy flag. The claim is
+   * handed to this task the moment it is created, so `busy` stays true from the
+   * first write until the last reply (or the deadline) — a second *turn* in the
+   * same chat is refused in between, while `queue` may still add to this run.
+   */
+  function startCompletion(active: ActiveRun): Promise<PiTurnSendResult> {
+    run = active;
+    return (async (): Promise<PiTurnSendResult> => {
+      try {
+        return await pollForReplies(active);
+      } finally {
+        unsubscribeActive();
+        busy = false;
+        if (run === active) run = null;
+      }
+    })();
+  }
+
+  /**
+   * Read the assistant-turn baseline this turn has to beat. A brand-new
+   * conversation may not exist yet, and a transient failure is not fatal: the
+   * baseline stays 0, which simply means "any assistant turn". A disposal or a
+   * blown deadline is passed through, so the turn is refused before the line
+   * is written rather than delivered without a reply to wait for.
+   */
+  async function assistantBaseline(
+    sessionFile: string,
+    deadline: number,
+  ): Promise<number | typeof DISPOSED | typeof TURN_DEADLINE> {
+    try {
+      const session = await readAbortable(sessionFile, deadline);
+      if (session === DISPOSED || session === TURN_DEADLINE) return session;
+      return assistantTurnCount(session);
+    } catch {
+      return 0;
+    }
+  }
+
+  async function beginSend(sessionFile: string, message: string): Promise<PiTurnBegun> {
     if (disposed) return { ok: false, error: DISPOSED_ERROR };
     if (busy) return { ok: false, error: BUSY_ERROR };
     const line = toTurnLine(message);
     if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
     busy = true;
+    // Set once the reply poll owns the claim; until then this function still
+    // has to clean up after itself.
+    let handedOff = false;
     try {
       const deadline = now() + turnTimeoutMs;
       const opened = await ensureOpen(sessionFile, deps.projectPath);
@@ -324,30 +465,25 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       if (!ready.ok) return ready;
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
 
-      let baseline = 0;
-      try {
-        const session = await readAbortable(sessionFile, deadline);
-        if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
-        if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
-        baseline = assistantTurnCount(session);
-      } catch {
-        // A brand-new conversation may not exist yet.
-      }
-      if (disposed) return { ok: false, error: DISPOSED_ERROR };
+      const baseline = await assistantBaseline(sessionFile, deadline);
+      if (baseline === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
+      if (baseline === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
 
       const deliveryFailure = await deliverLine(state, line);
       if (deliveryFailure !== null) return { ok: false, error: deliveryFailure };
-      return await pollForAssistant(sessionFile, baseline, deadline);
+
+      const completed = startCompletion({ sessionFile, target: baseline + 1, deadline });
+      handedOff = true;
+      return { ok: true, sessionFile, completed };
     } finally {
-      unsubscribeActive();
-      busy = false;
+      if (!handedOff) {
+        unsubscribeActive();
+        busy = false;
+      }
     }
   }
 
-  async function startNew(
-    projectPath: string,
-    message: string,
-  ): Promise<PiTurnStartNewResult> {
+  async function beginStartNew(projectPath: string, message: string): Promise<PiTurnBegun> {
     if (disposed) return { ok: false, error: DISPOSED_ERROR };
     if (busy) return { ok: false, error: BUSY_ERROR };
     if (open !== null && openSessionFile !== null) {
@@ -356,6 +492,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     const line = toTurnLine(message);
     if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
     busy = true;
+    let handedOff = false;
     try {
       const deadline = now() + turnTimeoutMs;
       // A new conversation is opened without `--session`, in the project dir.
@@ -395,19 +532,77 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       );
       if (!adopted.ok) return adopted;
 
-      // The new file exists; wait for its first assistant turn on the same
+      // The new file exists; its first assistant turn is awaited on the same
       // deadline (a brand-new session has no assistant turns to beat).
-      const completed = await pollForAssistant(adopted.sessionFile, 0, deadline);
-      if (!completed.ok) return completed;
-      return {
-        ok: true,
-        sessionFile: adopted.sessionFile,
-        session: completed.session,
-      };
+      const completed = startCompletion({ sessionFile: adopted.sessionFile, target: 1, deadline });
+      handedOff = true;
+      return { ok: true, sessionFile: adopted.sessionFile, completed };
     } finally {
-      unsubscribeActive();
-      busy = false;
+      if (!handedOff) {
+        unsubscribeActive();
+        busy = false;
+      }
     }
+  }
+
+  /**
+   * Add one message to the run in flight. Nothing is opened and no new claim is
+   * taken: pi's own queue owns the ordering from here (steering drains before
+   * follow-ups, both before a new turn), and this runner only has to keep the
+   * run's arithmetic honest — one more reply is owed, so the chat keeps saying
+   * "running" until it lands.
+   */
+  async function queue(
+    sessionFile: string,
+    message: string,
+    kind: TurnQueueKind,
+  ): Promise<PiTurnQueueResult> {
+    if (disposed) return { ok: false, error: DISPOSED_ERROR };
+    const active = run;
+    const state = open;
+    if (
+      active === null ||
+      state === null ||
+      active.sessionFile !== sessionFile ||
+      openSessionFile !== sessionFile
+    ) {
+      return { ok: false, error: NOT_RUNNING_ERROR };
+    }
+    const line = toTurnLine(message);
+    if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
+
+    // Count the reply *before* the write: the current turn's reply can land
+    // between the two awaits, and a target that arrives late would let the poll
+    // settle on a reply this message never got.
+    active.target += 1;
+    active.deadline = now() + turnTimeoutMs;
+    const failure =
+      kind === 'steer'
+        ? await deliverLine(state, line)
+        : await deliverFollowUp(state, line);
+    if (failure !== null) {
+      active.target -= 1;
+      return { ok: false, error: failure };
+    }
+    return { ok: true };
+  }
+
+  /** One-shot turn: deliver, then await the reply (the pre-two-phase contract). */
+  async function send(sessionFile: string, message: string): Promise<PiTurnSendResult> {
+    const begun = await beginSend(sessionFile, message);
+    if (!begun.ok) return begun;
+    return begun.completed;
+  }
+
+  async function startNew(
+    projectPath: string,
+    message: string,
+  ): Promise<PiTurnStartNewResult> {
+    const begun = await beginStartNew(projectPath, message);
+    if (!begun.ok) return begun;
+    const completed = await begun.completed;
+    if (!completed.ok) return completed;
+    return { ok: true, sessionFile: begun.sessionFile, session: completed.session };
   }
 
   function isBusy(): boolean {
@@ -420,6 +615,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     const state = open;
     open = null;
     openSessionFile = null;
+    run = null;
     unsubscribeActive();
     if (state) {
       state.delivery.setTransportState('closed');
@@ -432,5 +628,5 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     wakeCurrentWait?.();
   }
 
-  return { send, startNew, isBusy, dispose };
+  return { send, startNew, beginSend, beginStartNew, queue, isBusy, dispose };
 }

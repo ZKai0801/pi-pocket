@@ -8,26 +8,29 @@ type SendResult = 'sent' | 'busy' | 'error';
 interface Mounted {
   app: App;
   root: HTMLElement;
-  state: { sending: boolean; error: string | null };
+  state: { sending: boolean; error: string | null; running: boolean };
   input(): HTMLTextAreaElement;
   button(): HTMLButtonElement;
+  followUp(): HTMLButtonElement | null;
 }
 
 let mounted: Mounted | null = null;
 
 function mountComposer(
-  send: (text: string) => Promise<SendResult>,
-  options: { sending?: boolean; error?: string | null } = {},
+  send: (text: string, intent?: 'steer' | 'follow-up') => Promise<SendResult>,
+  options: { sending?: boolean; error?: string | null; running?: boolean } = {},
 ): Mounted {
   const state = reactive({
     sending: options.sending ?? false,
     error: options.error ?? null,
+    running: options.running ?? false,
   });
   const Host = defineComponent({
     setup: () => () => h(ChatComposer, {
       send,
       sending: state.sending,
       error: state.error,
+      running: state.running,
     }),
   });
   const root = document.createElement('div');
@@ -40,6 +43,7 @@ function mountComposer(
     state,
     input: () => root.querySelector('[data-testid="chat-composer-input"]') as HTMLTextAreaElement,
     button: () => root.querySelector('[data-testid="chat-composer-send"]') as HTMLButtonElement,
+    followUp: () => root.querySelector('[data-testid="chat-composer-follow-up"]'),
   };
   mounted = harness;
   return harness;
@@ -122,5 +126,48 @@ describe('chat composer', () => {
 
     await type(composer.input(), 'hello');
     expect(composer.button().disabled).toBe(false);
+  });
+
+  it('turns the send button into 插话 and offers 排队 while the chat is running', async () => {
+    const send = vi.fn(async () => 'sent' as const);
+    const composer = mountComposer(send, { running: true });
+    await type(composer.input(), 'stop, use ripgrep');
+
+    expect(composer.button().textContent?.trim()).toBe('插话');
+    expect(composer.button().getAttribute('data-intent')).toBe('steer');
+    expect(composer.followUp()?.textContent?.trim()).toBe('排队');
+
+    composer.button().click();
+    await settle();
+
+    // The primary button steers: it joins the run already under way.
+    expect(send).toHaveBeenCalledWith('stop, use ripgrep', 'steer');
+    expect(composer.input().value).toBe('');
+  });
+
+  it('queues a follow-up from the second button', async () => {
+    const send = vi.fn(async () => 'sent' as const);
+    const composer = mountComposer(send, { running: true });
+    await type(composer.input(), 'then run the tests');
+
+    composer.followUp()?.click();
+    await settle();
+
+    expect(send).toHaveBeenCalledWith('then run the tests', 'follow-up');
+    expect(composer.input().value).toBe('');
+  });
+
+  it('keeps one plain send button when nothing is running', async () => {
+    const send = vi.fn(async () => 'sent' as const);
+    const composer = mountComposer(send);
+
+    expect(composer.followUp()).toBeNull();
+    expect(composer.button().textContent?.trim()).toBe('发送');
+
+    await type(composer.input(), 'hello');
+    composer.button().click();
+    await settle();
+
+    expect(send).toHaveBeenCalledWith('hello', undefined);
   });
 });

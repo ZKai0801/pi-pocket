@@ -124,18 +124,26 @@ export const ZH = {
   'sessions.noPreview': '没有内容',
   'sessions.empty': '还没有会话',
   'sessions.emptyForProject': '「{project}」还没有会话',
+  'sessions.running': '正在运行',
 
   /* ---- 会话 chat --------------------------------------------------- */
   'chat.title': '会话',
   'chat.backAria': '返回列表',
   'chat.openTerminal': '打开终端',
   'chat.opening': '正在打开会话…',
+  'chat.running': '正在运行…',
+  'chat.queued': '已排队，这轮全部做完后发送',
+  'chat.steering': '已插话，下一步生效',
   'chat.retry': '重试',
 
   /* ---- chat composer ----------------------------------------------- */
   'composer.placeholder': '输入消息…',
   'composer.aria': '输入消息',
   'composer.send': '发送',
+  'composer.steer': '插话',
+  'composer.steerAria': '插话：在这轮的工具调用之后改变方向',
+  'composer.followUp': '排队',
+  'composer.followUpAria': '排队：等这轮全部做完后再发送',
 
   /* ---- terminal ---------------------------------------------------- */
   'terminal.connectFirst': '请先连接',
@@ -215,6 +223,7 @@ export const ZH = {
   'store.connectionsLoading': '连接列表还在加载，请稍后再试。',
   'store.sessionSwitched': '会话已切换，请重新发送。',
   'store.turnBusy': '上一条消息仍在处理中，请稍候。',
+  'store.noRunningTurn': '这一轮已经结束了，这条消息没有发出去。',
   'store.sessionDisconnected': '当前会话已断开，请重新打开。',
   'store.sessionAlreadyOpen': '该会话已打开，无法新建会话。',
   'store.sendFailed': '消息未发送成功，请重试。',
@@ -358,16 +367,24 @@ export const EN: Record<MessageKey, string> = {
   'sessions.noPreview': 'No content',
   'sessions.empty': 'No sessions yet',
   'sessions.emptyForProject': '"{project}" has no sessions yet',
+  'sessions.running': 'Running',
 
   'chat.title': 'Session',
   'chat.backAria': 'Back to list',
   'chat.openTerminal': 'Open terminal',
   'chat.opening': 'Opening session…',
+  'chat.running': 'Running…',
+  'chat.queued': 'Queued — sent when this run finishes',
+  'chat.steering': 'Steering — takes effect at the next step',
   'chat.retry': 'Retry',
 
   'composer.placeholder': 'Message…',
   'composer.aria': 'Message',
   'composer.send': 'Send',
+  'composer.steer': 'Steer',
+  'composer.steerAria': 'Steer: change direction after this turn’s tool calls',
+  'composer.followUp': 'Queue',
+  'composer.followUpAria': 'Queue: send after this run finishes',
 
   'terminal.connectFirst': 'Connect first',
   'terminal.openFailed': 'Could not open the terminal',
@@ -444,6 +461,7 @@ export const EN: Record<MessageKey, string> = {
   'store.connectionsLoading': 'The connection list is still loading; try again shortly.',
   'store.sessionSwitched': 'The session switched; please send again.',
   'store.turnBusy': 'The previous message is still being processed; please wait.',
+  'store.noRunningTurn': 'That run has already finished, so this message was not sent.',
   'store.sessionDisconnected': 'This session disconnected; open it again.',
   'store.sessionAlreadyOpen': 'That session is already open; a new one cannot be created.',
   'store.sendFailed': 'The message was not sent; please try again.',

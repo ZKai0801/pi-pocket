@@ -6,7 +6,7 @@
  * Navigation is store-driven: back is `closeChat()`, the chat shows while
  * `open !== null`.
  */
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import { useSessionsStore } from '../../stores/sessions';
 import type { PiTurn } from '../../pi/types';
@@ -19,6 +19,9 @@ const store = useSessionsStore();
 const emit = defineEmits<{ 'open-terminal': [path: string] }>();
 
 const title = computed(() => {
+  // A running conversation says so instead of naming itself: the question the
+  // header answers while waiting is "is it still going?", not "which chat?".
+  if (store.openRunning) return t('chat.running');
   const name = store.open?.name;
   if (name) return name;
   const id = store.open?.id;
@@ -90,6 +93,47 @@ let touchStartY = 0;
 let startedAtTop = false;
 let touching = false;
 
+// A send puts the user's own line on screen at once and the reply lands later,
+// so the transcript has to follow new turns — but only for a reader who is
+// already at the bottom: scrolling up to read history must not be yanked back.
+const stickToBottom = ref(true);
+const STICK_SLACK_PX = 48;
+
+function onScroll(): void {
+  const element = scroller.value;
+  if (!element) return;
+  stickToBottom.value =
+    element.scrollHeight - element.scrollTop - element.clientHeight < STICK_SLACK_PX;
+}
+
+async function scrollToLatest(): Promise<void> {
+  if (!stickToBottom.value) return;
+  await nextTick();
+  const element = scroller.value;
+  if (element) element.scrollTop = element.scrollHeight;
+}
+
+// A different conversation opens at its newest message.
+watch(
+  () => store.openPath,
+  () => {
+    stickToBottom.value = true;
+    void scrollToLatest();
+  },
+);
+
+watch(
+  () => store.open?.turns.length ?? 0,
+  () => void scrollToLatest(),
+);
+
+// A line typed into the running turn shows up as a ghost before the session
+// file has it, so the transcript has to follow that too.
+watch(
+  () => store.pending.length,
+  () => void scrollToLatest(),
+);
+
 const PULL_MAX_PX = 72;
 
 const showPull = computed(() => pullDistance.value > 0 || refreshing.value);
@@ -158,6 +202,7 @@ function goBack(): void {
     <div
       class="chat__scroller"
       ref="scroller"
+      @scroll.passive="onScroll"
       @touchstart.passive="onPullStart"
       @touchmove.passive="onPullMove"
       @touchend="onPullEnd"
@@ -192,12 +237,25 @@ function goBack(): void {
             <p v-if="row.kind === 'separator' && row.time !== undefined" class="chat__time">{{ row.time }}</p>
             <ChatBubble v-else-if="row.kind === 'bubble' && row.turn !== undefined" :role="row.turn.role" :text="row.turn.text" />
           </template>
+          <!-- Lines typed into the running turn: pi writes them to the file only
+               when it delivers them, so they wait here as ghosts until then. -->
+          <div v-for="item in store.pending" :key="item.id" class="chat__pending">
+            <ChatBubble role="user" :text="item.text" />
+            <p v-if="item.kind === 'follow-up'" class="chat__queued" data-testid="chat-queued">
+              {{ t('chat.queued') }}
+            </p>
+          </div>
         </div>
       </template>
     </div>
 
     <footer class="chat__composer">
-      <ChatComposer :send="store.send" :sending="store.sending" :error="store.sendError" />
+      <ChatComposer
+        :send="store.send"
+        :sending="store.sending"
+        :error="store.sendError"
+        :running="store.openRunning"
+      />
     </footer>
   </section>
 </template>
@@ -410,5 +468,21 @@ function goBack(): void {
   color: var(--fg-muted);
   font-size: var(--fs-200);
   text-align: center;
+}
+
+/* Not yet on the server: the bubble is the user's, but dimmed, so a queued
+   follow-up never reads as something pi has already seen. */
+.chat__pending {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: var(--sp-1);
+  opacity: 0.72;
+}
+
+.chat__queued {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-200);
 }
 </style>
