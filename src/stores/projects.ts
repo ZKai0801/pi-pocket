@@ -33,6 +33,7 @@ import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { piLive, type PiDirectoryEntry } from '../session/piLive';
 import { projectsListCache } from '../pi/projectCache';
+import { sessionListsCache } from '../pi/sessionListCache';
 import { useConnectionsStore } from './connections';
 
 export type ProjectsState = 'idle' | 'loading' | 'ready' | 'no-root' | 'error';
@@ -496,7 +497,13 @@ export const useProjectsStore = defineStore('projects', () => {
       );
     },
     listProjects: (root) => new PiRepository(piLive().transport(), root).listProjects(),
-    setPiSessionsDir: (name, dir) => useConnectionsStore().setPiSessionsDir(name, dir),
+    setPiSessionsDir: (name, dir) => {
+      useConnectionsStore().setPiSessionsDir(name, dir);
+      // Re-pointing the root invalidates that host's session rows as well:
+      // their paths name files under the old root, so they are wrong rather
+      // than merely old.
+      void sessionListsCache().clearHost(name);
+    },
     added: {
       load: async () => {
         const connections = useConnectionsStore();

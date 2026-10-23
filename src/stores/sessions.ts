@@ -19,6 +19,16 @@
  *
  * Navigation is store-driven (R11.5): the chat shows while `open !== null`,
  * back calls `closeChat()`. The legacy navigation store is not involved.
+ *
+ * `load()` paints the project's remembered rows (the `loadCachedSessions` dep)
+ * before it lists the server, so entering a project after a reconnect shows
+ * its conversations at once instead of waiting out one `tail` per session
+ * file. `stale` says the rows on screen are that backup, `refreshing` says the
+ * listing behind them is still in flight; a sync that fails keeps the painted
+ * rows and reports its error beside them rather than replacing a usable list
+ * with an empty error screen. Rows that are already on screen are never
+ * repainted from the backup: a refresh must not move the list under the
+ * user's thumb.
  */
 import { computed, reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
@@ -47,6 +57,7 @@ import { turnPtyOpener } from '../session/turnPty';
 import type { SavedHost } from '../platform/android/hostStore';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { sessionBackupCache } from '../pi/sessionCache';
+import { sessionListsCache } from '../pi/sessionListCache';
 import { useConnectionsStore } from './connections';
 import { useProjectsStore } from './projects';
 import { t } from '../i18n';
@@ -77,6 +88,10 @@ export interface SessionsStoreState {
   lastProject: PiProject | null;
   state: SessionsState;
   error: string | null;
+  /** `sessions` is the local backup, not yet confirmed by a server listing. */
+  stale: boolean;
+  /** A server listing is in flight behind the rows already on screen. */
+  refreshing: boolean;
   /** A turn is being written to Pi and awaited in the open chat. */
   sending: boolean;
   /** The last send failure, already in the UI's language. */
@@ -150,6 +165,19 @@ export interface SessionsStoreDeps {
   loadCachedSession?(host: string | null, path: string): Promise<ParsedPiSession | null>;
   /** Remember a fresh parse for the next cold start. Best-effort: failures are swallowed. */
   saveCachedSession?(host: string | null, path: string, session: ParsedPiSession): Promise<void>;
+  /**
+   * The locally backed-up list of `project`'s sessions on `host`, painted
+   * while the server's listing is in flight so the 会话 tab shows its rows at
+   * once. A miss, an empty list or a failure is `null`: the load then starts
+   * from the plain `loading` it replaced.
+   */
+  loadCachedSessions?(host: string | null, projectPath: string): Promise<PiSessionMeta[] | null>;
+  /** Remember a fresh listing for the next cold start. Best-effort: failures are swallowed. */
+  saveCachedSessions?(
+    host: string | null,
+    projectPath: string,
+    sessions: readonly PiSessionMeta[],
+  ): Promise<void>;
   /**
    * The active host's name, read at claim time and again at write time (D8):
    * a run captured on one host must not write under another. Defaults to
@@ -238,6 +266,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     lastProject: null,
     state: 'idle',
     error: null,
+    stale: false,
+    refreshing: false,
     sending: false,
     sendError: null,
     startingNew: false,
@@ -261,6 +291,37 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   let loadInFlight: { token: number; host: string | null; project: PiProject; promise: Promise<void> } | null = null;
   let openInFlight: { token: number; host: string | null; path: string; promise: Promise<void> } | null = null;
 
+  // The list backup is best-effort in every direction: an unreadable,
+  // unwritable or unavailable cache degrades to the plain server listing it
+  // replaced. A failure here must never fail the load.
+  async function paintSessionCache(host: string | null, project: PiProject): Promise<boolean> {
+    if (!deps.loadCachedSessions) return false;
+    let cached: PiSessionMeta[] | null = null;
+    try {
+      cached = await deps.loadCachedSessions(host, project.path);
+    } catch {
+      cached = null;
+    }
+    if (cached === null || cached.length === 0) return false;
+    state.sessions = cached;
+    // The painted rows belong to this project, so the + and the empty text
+    // already answer for it while the listing is still in flight.
+    state.lastProject = project;
+    state.state = 'ready';
+    state.error = null;
+    state.stale = true;
+    return true;
+  }
+
+  function rememberSessions(
+    host: string | null,
+    projectPath: string,
+    sessions: readonly PiSessionMeta[],
+  ): void {
+    if (!deps.saveCachedSessions) return;
+    void deps.saveCachedSessions(host, projectPath, sessions).catch(() => undefined);
+  }
+
   // Claimed synchronously; the in-flight slot holds only the newest claim —
   // `hostChanged` bumps the tokens AND clears the slots, so a run invalidated
   // this way can never be joined (even if its context matches again).
@@ -277,7 +338,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     // belongs to the old project and its terminal path, so close it here.
     // Bumping the open token also stops an in-flight read from the old project
     // from writing its session after this switch (D8, the project-side twin).
-    if (state.lastProject?.path !== project.path) {
+    const switchingProject = state.lastProject?.path !== project.path;
+    if (switchingProject) {
       state.open = null;
       state.openPath = null;
       openToken += 1;
@@ -288,15 +350,37 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.sending = false;
       state.sendError = null;
       state.startingNew = false;
+      // The last project's rows go with it; the backup paints the next
+      // project's rows over the empty list instead of leaving them behind.
+      state.sessions = [];
+      state.stale = false;
     }
+    // The backup is only worth painting when the screen has no rows for this
+    // project: a refresh or a retry of the list the user is looking at must
+    // never repaint older rows under them. Without a cache dep there is no
+    // await at all before the listing — the claim stays synchronous, which is
+    // what the store's re-entrancy contract (D8) is built on.
+    const needsPaint = switchingProject || state.sessions.length === 0;
+    const paint = needsPaint && deps.loadCachedSessions
+      ? paintSessionCache(host, project)
+      : null;
     const token = ++loadToken;
     loadInFlight = {
       token,
       host,
       project,
       promise: (async () => {
-        state.state = 'loading';
         state.error = null;
+        // Rows already on screen are never traded for the spinner: only a
+        // load that has nothing to show falls back to it.
+        const hadRows = state.sessions.length > 0;
+        const painted = paint === null ? false : await paint;
+        // A newer claim or a host switch made this run stale before the
+        // listing even started: drop the paint instead of showing rows the
+        // current claim is about to replace.
+        if (loadToken !== token || hostId() !== host) return;
+        if (!painted && !hadRows) state.state = 'loading';
+        state.refreshing = true;
         try {
           const sessions = await deps.listSessions(project);
           // A newer claim or a host switch made this run stale: drop the
@@ -305,19 +389,31 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
           state.lastProject = project;
           state.sessions = sessions;
           state.state = 'ready';
+          state.stale = false;
+          rememberSessions(host, project.path, sessions);
         } catch (error) {
           if (loadToken !== token || hostId() !== host) return;
           // A failed list is an error, never an empty list masquerading as
           // "no sessions". `lastProject` is written here too, so the list's
           // 重试 button can reload the very project that failed.
           state.lastProject = project;
-          state.sessions = [];
-          state.state = 'error';
-          state.error = errorMessage(error);
+          if (painted) {
+            // Rows are usable, so a failed sync must not trade them for an
+            // error screen: the backup stays and the failure is reported in
+            // the row above it.
+            state.state = 'ready';
+            state.stale = true;
+            state.error = errorMessage(error);
+          } else {
+            state.sessions = [];
+            state.state = 'error';
+            state.error = errorMessage(error);
+          }
         } finally {
-          // Only the newest claim may clear the slot: a stale run settling
-          // after a fresh claim must not wipe the fresh claim's slot.
-          if (loadToken === token) loadInFlight = null;
+          if (loadToken === token) {
+            state.refreshing = false;
+            loadInFlight = null;
+          }
         }
       })(),
     };
@@ -702,6 +798,10 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.startingNew = false;
     state.running = [];
     state.pending = [];
+    // The painted rows belong to the old host's root: they are not this
+    // host's to show, so neither the backup marker nor its sync survives.
+    state.stale = false;
+    state.refreshing = false;
     loadInFlight = null;
     openInFlight = null;
   }
@@ -719,6 +819,10 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     set state(value: SessionsState) { state.state = value; },
     get error() { return state.error; },
     set error(value: string | null) { state.error = value; },
+    get stale() { return state.stale; },
+    set stale(value: boolean) { state.stale = value; },
+    get refreshing() { return state.refreshing; },
+    set refreshing(value: boolean) { state.refreshing = value; },
     get sending() { return state.sending; },
     set sending(value: boolean) { state.sending = value; },
     get sendError() { return state.sendError; },
@@ -1190,6 +1294,11 @@ export const useSessionsStore = defineStore('sessions', () => {
     // replaces it and re-saves. A cache failure is swallowed by the store.
     loadCachedSession: loadCachedSessionOnActiveHost,
     saveCachedSession: saveCachedSessionOnActiveHost,
+    // The list's rows paint from the local backup the same way the chat does
+    // (§8.5): keyed by host + project, replaced by the server's listing.
+    loadCachedSessions: (host, projectPath) => sessionListsCache().load(host, projectPath),
+    saveCachedSessions: (host, projectPath, sessions) =>
+      sessionListsCache().save(host, projectPath, sessions),
     // D8: claims are keyed to the active host and re-checked at write time,
     // so a run captured on one host cannot write under another.
     hostId: () => connections.activeName,
@@ -1210,6 +1319,8 @@ export const useSessionsStore = defineStore('sessions', () => {
       store.lastProject = null;
       store.error = null;
       store.sendError = null;
+      store.stale = false;
+      store.refreshing = false;
       store.state = 'idle';
     },
   );
@@ -1255,6 +1366,8 @@ export const useSessionsStore = defineStore('sessions', () => {
     lastProject: toRef(store, 'lastProject'),
     state: toRef(store, 'state'),
     error: toRef(store, 'error'),
+    stale: toRef(store, 'stale'),
+    refreshing: toRef(store, 'refreshing'),
     sending: toRef(store, 'sending'),
     sendError: toRef(store, 'sendError'),
     startingNew: toRef(store, 'startingNew'),

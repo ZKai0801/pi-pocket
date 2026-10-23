@@ -5,7 +5,8 @@
  * opens it in the read-only chat; the + opens a draft chat for the selected
  * project, whose first message creates the session. The list loads for the
  * projects tab's selection; with nothing selected it is a hint, not an empty
- * list.
+ * list. The project's remembered rows paint first, so entering a project shows
+ * its conversations while the server's listing is still walking the files.
  */
 import { computed, onMounted } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
@@ -78,6 +79,18 @@ function retry(): void {
       </div>
 
       <template v-else>
+        <!-- The backup line appears only once the sync has finished without
+             confirming the rows: while the listing is still in flight the list
+             is about to correct itself, so saying so would only shift the rows
+             under the user's thumb. -->
+        <p
+          v-if="store.state === 'ready' && store.stale && !store.refreshing"
+          class="sessions__stale"
+          data-testid="sessions-stale"
+        >
+          {{ t('sessions.cachedOnly') }}
+        </p>
+
         <ul v-if="store.sessions.length > 0" class="sessions__list">
           <li v-for="session in store.sessions" :key="session.path" class="sessions__row">
             <button type="button" class="sessions__item" @click="openSession(session.path)">
@@ -208,6 +221,15 @@ function retry(): void {
 .sessions__retry:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
+}
+
+/* The backup line: the rows below are usable, the server has not confirmed
+   them yet. Muted, never an alert — nothing has failed while it is silent. */
+.sessions__stale {
+  margin: 0 0 var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--fs-200);
+  line-height: 1.45;
 }
 
 .sessions__list {

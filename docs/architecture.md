@@ -41,6 +41,14 @@ hide behind a spinner:
   (`stale`/`refreshing` on the projects store) instead of showing an empty
   error screen. Re-pointing a host's Pi directory drops its entry, since the
   list belongs to the old root.
+- `src/pi/sessionListCache.ts` — a project's last confirmed 会话 rows on a
+  host, in the same localStorage record shape (keyed by host **and** project
+  path, 14-day TTL, 16 lists, 200 rows per list). `listSessions` is the
+  slowest read in the app — one `tail` per session file — so entering a
+  project paints these rows and lets the listing replace them; a failed sync
+  keeps them (`stale`/`refreshing` on the sessions store). Re-pointing a
+  host's Pi directory drops every list for that host, since their paths name
+  files under the old root.
 - `src/pi/sessionCache.ts` — the parsed conversation, in IndexedDB, for the
   same reason at a larger size (spec §8.6).
 
