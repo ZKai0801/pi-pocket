@@ -408,6 +408,12 @@ the 8-per-connection budget while a turn runs. Rules:
   line re-attaches to the same session instead of being refused.
 - The session is killed only once a turn has actually been answered — never on
   a deadline or a disconnect, where Pi may still be working.
+- The runner is the only watcher that kills that session, and it does not
+  outlive the app: every delivered turn is written down (host, session name,
+  file, the assistant-turn count that means "answered"), and each connection
+  rechecks its host's records. A run that finished while the phone was away is
+  closed then; a run whose count has not been reached is left alone, and a
+  record whose file cannot be read survives for the next connection.
 - One turn at a time per open chat; the composer is disabled while a turn runs.
 
 **Known risks to resolve in the plan:** concurrency with an already-running

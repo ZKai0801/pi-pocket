@@ -90,6 +90,10 @@ function harness(options: {
     nowMs += ms;
   });
   const closeSession = vi.fn(async (_sessionName: string) => undefined);
+  const rememberTurn = vi.fn(
+    (_turn: { sessionName: string; sessionFile: string; target: number }) => undefined,
+  );
+  const forgetTurn = vi.fn((_sessionName: string) => undefined);
   const runner = createPiTurnRunner({
     openPty,
     piCommand: '/opt/bin/pi',
@@ -97,6 +101,8 @@ function harness(options: {
     readSession,
     newestSessionFile,
     closeSession,
+    rememberTurn,
+    forgetTurn,
     sleep,
     now: () => nowMs,
     readyTimeoutMs: 20_000,
@@ -104,7 +110,17 @@ function harness(options: {
     pollIntervalMs: 1_000,
     submitDelayMs: 0,
   });
-  return { handle, openPty, reads, readSession, newestSessionFile, runner, closeSession };
+  return {
+    handle,
+    openPty,
+    reads,
+    readSession,
+    newestSessionFile,
+    runner,
+    closeSession,
+    rememberTurn,
+    forgetTurn,
+  };
 }
 
 describe('createPiTurnRunner', () => {
@@ -611,6 +627,92 @@ describe('createPiTurnRunner', () => {
     expect(h.closeSession).toHaveBeenCalledTimes(1);
     expect(h.closeSession)
       .toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+    // Closed and forgotten together: a record nobody will recheck is noise,
+    // and one kept after a successful close would outlive its session.
+    await flushMicrotasks();
+    expect(h.forgetTurn).toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+  });
+
+  it('writes the turn down so a connection arriving later can close it', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+    expect(begun.ok).toBe(true);
+    // The app is killed: this runner never sees the reply, so the record is
+    // the only thing left that knows a session is owed a teardown.
+    h.runner.dispose();
+    if (begun.ok) await begun.completed;
+
+    expect(h.rememberTurn).toHaveBeenCalledWith({
+      sessionName: turnSessionName('/r/a.jsonl', '/home/kai/project'),
+      sessionFile: '/r/a.jsonl',
+      target: 1,
+    });
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+  });
+
+  it('raises the recorded target when another message joins the run', async () => {
+    const firstReply = deferred<ParsedPiSession>();
+    const secondReply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), firstReply.promise, secondReply.promise],
+    });
+    const name = turnSessionName('/r/a.jsonl', '/home/kai/project');
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+    await h.runner.queue('/r/a.jsonl', 'use ripgrep', 'steer');
+
+    // A sweep that only knew about the first reply would close the session
+    // while the steered instruction was still being worked on.
+    expect(h.rememberTurn).toHaveBeenLastCalledWith({
+      sessionName: name,
+      sessionFile: '/r/a.jsonl',
+      target: 2,
+    });
+
+    firstReply.resolve(sessionWithAssistantTurns(1));
+    await flushMicrotasks();
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+
+    secondReply.resolve(sessionWithAssistantTurns(2));
+    await expect(begun.completed).resolves.toMatchObject({ ok: true });
+    await flushMicrotasks();
+    expect(h.forgetTurn).toHaveBeenCalledWith(name);
+  });
+
+  it('rolls the recorded target back when the extra message never landed', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+    const name = turnSessionName('/r/a.jsonl', '/home/kai/project');
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+
+    h.handle.write.mockImplementation(() => {
+      throw new Error('pty closed');
+    });
+    const queued = await h.runner.queue('/r/a.jsonl', 'use ripgrep', 'steer');
+    expect(queued.ok).toBe(false);
+
+    // Nothing was asked of Pi, so nothing may be owed: a target one too high
+    // would make the sweep wait for a reply that never comes and never clean.
+    expect(h.rememberTurn).toHaveBeenLastCalledWith({
+      sessionName: name,
+      sessionFile: '/r/a.jsonl',
+      target: 1,
+    });
+    h.runner.dispose();
   });
 
   it('leaves the session running when the poll gives up before the reply', async () => {
@@ -681,6 +783,33 @@ describe('createPiTurnRunner', () => {
       { cols: 80, rows: 24 },
     );
     expect(h.handle.writes).toEqual(['one', '\r', 'two', '\r']);
+
+    h.runner.dispose();
+  });
+
+  it('re-attaches a draft to its own session, which its adopted file cannot name', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(1), reply.promise],
+      newest: [null, '/r/new.jsonl'],
+      turnTimeoutMs: 1_000_000,
+    });
+    const begun = await h.runner.beginStartNew('/home/kai/project', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    h.runner.rebind();
+    await expect(h.runner.queue('/r/new.jsonl', 'more', 'steer')).resolves.toEqual({ ok: true });
+
+    // A draft's name is random, and its file derives a different one: deriving
+    // it here would attach to nothing and start a *second* Pi on that file.
+    const first = String(h.openPty.mock.calls[0]?.[0] ?? '');
+    const second = String(h.openPty.mock.calls[1]?.[0] ?? '');
+    const attached = /attach-session -d -t '([^']+)'/.exec(first)?.[1] ?? '';
+    expect(attached).toMatch(/^ps-pi-draft-/);
+    expect(second).toContain(`attach-session -d -t '${attached}'`);
+    expect(second).not.toContain(turnSessionName('/r/new.jsonl', '/home/kai/project'));
 
     h.runner.dispose();
   });

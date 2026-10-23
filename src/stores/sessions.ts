@@ -49,6 +49,7 @@ import {
   type TurnQueueKind,
 } from '../pi/piTurnRunner';
 import { buildPiCloseCommand, toTurnLine } from '../pi/piTurn';
+import { pendingTurns, sweepAnsweredTurns } from '../pi/pendingTurns';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession, PiTurn } from '../pi/types';
@@ -905,15 +906,17 @@ async function newestSessionFileOnActiveHost(projectPath: string): Promise<strin
 
 /**
  * Tear down a conversation's server-side Pi session once its turn has been
- * answered. Best-effort by contract: a host without tmux, or a session that
- * already ended, has nothing to kill, and a failure here must never surface as
- * a turn error.
+ * answered. The kill itself is idempotent — a host without tmux, or a session
+ * that already ended, has nothing to kill and still exits 0 — but a transport
+ * failure is reported rather than swallowed: both callers keep their record
+ * of the turn so the next connection retries the teardown, and neither lets
+ * the rejection reach the chat.
  */
 function closeTurnSessionOnActiveHost(sessionName: string): Promise<void> {
   return piLive()
     .transport()
     .exec(buildPiCloseCommand(sessionName), 5_000)
-    .then(() => undefined, () => undefined);
+    .then(() => undefined);
 }
 
 /**
@@ -1289,6 +1292,15 @@ export const useSessionsStore = defineStore('sessions', () => {
         readSession: readSessionOnActiveHost,
         newestSessionFile: newestSessionFileOnActiveHost,
         closeSession: closeTurnSessionOnActiveHost,
+        // The turn's tmux session is killed by its runner, and the runner dies
+        // with the app: the record is what lets the next connection close a
+        // session that finished while nobody was watching.
+        rememberTurn: (turn) => {
+          void pendingTurns().remember(connections.activeName, turn);
+        },
+        forgetTurn: (sessionName) => {
+          void pendingTurns().forget(connections.activeName, sessionName);
+        },
         pollIntervalMs: clampTurnPollInterval(TURN_POLL_INTERVAL_MS),
       }),
   });
@@ -1304,6 +1316,35 @@ export const useSessionsStore = defineStore('sessions', () => {
    */
   function rebindTurnRunner(): void {
     turnRunners.rebind();
+  }
+
+  /**
+   * Close the conversations whose turn was answered while this phone was not
+   * looking — the case the runner cannot cover, because the runner is gone by
+   * then (the app was killed, or the poll's deadline expired offline). The
+   * record holds the assistant-turn count that means "answered", and the read
+   * is the same one the runner polls, so a run that is still working is left
+   * alone. Returns how many sessions were closed; a failure on one record
+   * leaves it for the next connection.
+   */
+  let sweepingPendingTurns = false;
+  async function sweepPendingTurns(): Promise<number> {
+    const host = connections.activeName;
+    // A sweep can be asked for on every generation bump; the reads are SSH
+    // round trips, so one in flight covers them all.
+    if (host === null || sweepingPendingTurns) return 0;
+    sweepingPendingTurns = true;
+    try {
+      return await sweepAnsweredTurns({
+        host,
+        list: (target) => pendingTurns().onHost(target),
+        readSession: readSessionOnActiveHost,
+        kill: closeTurnSessionOnActiveHost,
+        forget: (target, sessionName) => pendingTurns().forget(target, sessionName),
+      });
+    } finally {
+      sweepingPendingTurns = false;
+    }
   }
 
   // Serializes the build + turn before a runner exists: two taps in the same
@@ -1421,5 +1462,6 @@ export const useSessionsStore = defineStore('sessions', () => {
     send: store.send,
     disposeTurnRunner,
     rebindTurnRunner,
+    sweepPendingTurns,
   };
 });

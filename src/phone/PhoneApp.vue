@@ -192,6 +192,18 @@ watch(
     sessions.rebindTurnRunner();
   },
 );
+
+// A turn whose reply landed while this phone was not looking leaves an idle
+// Pi in its tmux session — the runner that would have closed it is gone. The
+// sweep is gated on the connected phase, not on `generationId`: a generation
+// is minted when the dial starts, and nothing can be read before it lands.
+watch(
+  () => (snapshot.value?.phase === 'connected' ? snapshot.value.generationId : null),
+  (next, previous) => {
+    if (next === null || next === previous) return;
+    void sessions.sweepPendingTurns();
+  },
+);
 const keyboardVisible = ref(false);
 const connectionMessage = ref('');
 const terminalTarget = ref<{ name: string; title: string } | null>(null);

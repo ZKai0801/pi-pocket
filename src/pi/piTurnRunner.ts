@@ -5,6 +5,7 @@ import {
   type PtyWriteAcknowledgement,
 } from '../session/composerDelivery';
 import type { TurnPtyGeometry, TurnPtyHandle } from '../session/turnPty';
+import { countAssistantTurns } from './pendingTurns';
 import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, toTurnLine, turnSessionName } from './piTurn';
 import { createConsoleTracker, isPiReady } from './turnReadiness';
 import type { ParsedPiSession } from './types';
@@ -57,10 +58,6 @@ function decodeUtf8(bytes: Uint8Array): string {
   return createTerminalTextDecoder().decode(bytes);
 }
 
-function assistantTurnCount(session: ParsedPiSession): number {
-  return session.turns.filter((turn) => turn.role === 'assistant').length;
-}
-
 function deliveryError(
   result: Exclude<ComposerDeliveryResult, { status: 'delivered' }>,
 ): string {
@@ -80,6 +77,23 @@ export interface PiTurnRunnerDeps {
    * where Pi may still be working and must be left alone.
    */
   closeSession?(sessionName: string): Promise<void>;
+  /**
+   * Write down that this chat has a turn in flight in `sessionName`, so a
+   * later connection can close the session on its behalf. This runner is the
+   * only watcher that kills the session when the reply lands, and it does not
+   * always survive the turn: a killed app, a reaped process, or a deadline
+   * that expires while the phone is offline leaves Pi finishing in a session
+   * nobody watches. Called again, with the raised target, when a queued
+   * message joins the run.
+   */
+  rememberTurn?(turn: { sessionName: string; sessionFile: string; target: number }): void;
+  /**
+   * The run settled where this runner could see it. Called only once the
+   * session is actually gone (or never existed): a forgotten record is a
+   * cleanup nobody will do, so a turn that timed out or lost its connection
+   * keeps its record for the sweep.
+   */
+  forgetTurn?(sessionName: string): void;
   sleep?(ms: number): Promise<void>;
   now?(): number;
   readyTimeoutMs?: number;
@@ -283,17 +297,23 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
    * Open the runner's one PTY for this conversation. `sessionFile === null`
    * starts a brand-new session: Pi is opened without `--session` and writes a
    * file of its own on the first message.
+   *
+   * `name` pins the tmux session for a re-open. A draft cannot recompute its
+   * own name — it is random, and the file it adopted afterwards would derive a
+   * different one — so re-attaching without it would start a second Pi on the
+   * same session file.
    */
   async function ensureOpen(
     sessionFile: string | null,
     projectPath: string,
+    name?: string,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     if (open) return { ok: true };
 
     let handle: TurnPtyHandle;
     // Resolved once and kept: a draft's name is deliberately not recomputable,
     // so the command and the teardown have to share this one value.
-    const sessionName = turnSessionName(sessionFile, projectPath);
+    const sessionName = name ?? turnSessionName(sessionFile, projectPath);
     try {
       const command =
         sessionFile === null
@@ -361,7 +381,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         const session = await readAbortable(active.sessionFile, active.deadline);
         if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
         if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
-        if (assistantTurnCount(session) >= active.target) return { ok: true, session };
+        if (countAssistantTurns(session) >= active.target) return { ok: true, session };
       } catch {
         // A transient read failure is retried until the deadline.
       }
@@ -444,6 +464,15 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
    */
   function startCompletion(active: ActiveRun): Promise<PiTurnSendResult> {
     run = active;
+    // The record exists before the reply poll can give up: a deadline that
+    // expires while the phone is away is exactly the case the sweep covers.
+    if (active.sessionName !== null) {
+      deps.rememberTurn?.({
+        sessionName: active.sessionName,
+        sessionFile: active.sessionFile,
+        target: active.target,
+      });
+    }
     return (async (): Promise<PiTurnSendResult> => {
       let answered = false;
       try {
@@ -459,7 +488,17 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         // and a disposal means the connection went away mid-turn — in both
         // cases the server-side session has to outlive this runner.
         if (answered && active.sessionName !== null) {
-          void deps.closeSession?.(active.sessionName).catch(() => undefined);
+          const sessionName = active.sessionName;
+          // The record goes only once the session is gone: a failed kill keeps
+          // it, and the next connection's sweep retries.
+          void (async (): Promise<void> => {
+            try {
+              await deps.closeSession?.(sessionName);
+              deps.forgetTurn?.(sessionName);
+            } catch {
+              // The kill never landed; the record is the retry.
+            }
+          })();
         }
       }
     })();
@@ -479,7 +518,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     try {
       const session = await readAbortable(sessionFile, deadline);
       if (session === DISPOSED || session === TURN_DEADLINE) return session;
-      return assistantTurnCount(session);
+      return countAssistantTurns(session);
     } catch {
       return 0;
     }
@@ -621,7 +660,13 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
 
     let state = open;
     if (state === null) {
-      const reopened = await ensureOpen(sessionFile, deps.projectPath);
+      // The run's own name, not one derived from its file: a draft is named
+      // randomly and re-deriving would open a second Pi on the same file.
+      const reopened = await ensureOpen(
+        sessionFile,
+        deps.projectPath,
+        active.sessionName ?? undefined,
+      );
       if (!reopened.ok) return reopened;
       state = open;
       if (state === null) return { ok: false, error: DISPOSED_ERROR };
@@ -643,12 +688,31 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     // settle on a reply this message never got.
     active.target += 1;
     active.deadline = now() + turnTimeoutMs;
+    // The record is raised before the write, for the same reason and in the
+    // safer direction: a sweep that believed the lower target could close this
+    // session on the first of the two answers. A failed write is rolled back
+    // below, so a lost message cannot leave the record waiting for a reply
+    // that was never asked for.
+    if (active.sessionName !== null) {
+      deps.rememberTurn?.({
+        sessionName: active.sessionName,
+        sessionFile: active.sessionFile,
+        target: active.target,
+      });
+    }
     const failure =
       kind === 'steer'
         ? await deliverLine(state, line)
         : await deliverFollowUp(state, line);
     if (failure !== null) {
       active.target -= 1;
+      if (active.sessionName !== null) {
+        deps.rememberTurn?.({
+          sessionName: active.sessionName,
+          sessionFile: active.sessionFile,
+          target: active.target,
+        });
+      }
       return { ok: false, error: failure };
     }
     return { ok: true };
