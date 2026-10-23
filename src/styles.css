@@ -371,6 +371,8 @@ button { color: inherit; }
 .settings-screen { display: flex; flex-direction: column; gap: 12px; }
 .settings-panel { width: 100%; }
 .settings-panel h1 { margin-bottom: 9px; }
+/* A group heading inside the settings panel; the control below it carries the divider. */
+.settings-section { margin: 22px 0 2px; color: var(--fg); font-size: var(--fs-300); font-weight: 600; }
 .settings-copy { margin-bottom: 18px; }
 .settings-row { display: grid; gap: 5px; border-top: 1px solid var(--border-soft); padding: 12px 0; font-size: var(--fs-300); }
 .settings-row span { color: var(--fg-secondary); }

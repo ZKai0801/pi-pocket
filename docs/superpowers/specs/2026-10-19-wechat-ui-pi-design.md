@@ -388,19 +388,32 @@ default) / 120 s native. The PTY has no such per-turn deadline and is the
 machinery already being reused. `pi -p` is noted as a possible simpler path if
 turns turn out short, decided in the plan.
 
-**PTY ownership and lifecycle (my call).** The turn PTY is owned by a
-`PiTurnRunner` in the phone layer, not by `ConnectionController` (the
-controller's session model is attached aplexer terminals, not ad-hoc Pi
-turns). It uses **one** channel of the 8-per-connection budget while a turn
-runs. Rules:
+**PTY ownership and lifecycle (my call, revised 2026-10-23 — see D44 in
+`docs/decisions.md`).** The turn PTY is owned by a `PiTurnRunner` in the phone
+layer, not by `ConnectionController` (the controller's session model is
+attached aplexer terminals, not ad-hoc Pi turns). It uses **one** channel of
+the 8-per-connection budget while a turn runs. Rules:
 
 - The session `.jsonl` on disk is the single source of truth; the chat is a
   reader. No conversation state lives in the runner.
-- Switching host or closing the connection tears the runner's PTY down; an
-  in-flight turn is abandoned (the file keeps whatever Pi already wrote).
-- On reconnect/background the turn is abandoned rather than resumed; the user
-  pulls to refresh and, if needed, resends. Grace/reconnect of the underlying
-  connection is still owned by the controller; the runner just fails.
+- **Pi does not run in that PTY.** The PTY attaches to a tmux session on a
+  private server (`tmux -L pocketshell-pi`) named after the conversation, and
+  Pi is started inside it. The SSH PTY is a viewer/input client, so a dropped
+  connection detaches a client and never signals the agent.
+- Switching host tears the runner down (its PTY belongs to the old
+  connection); the turn keeps running on the old host's tmux server, and the
+  `.jsonl` still holds whatever Pi writes.
+- On reconnect the runner is **rebound, not disposed**: the dead handle is
+  dropped and the run is kept, so the chat still says "running" and the next
+  line re-attaches to the same session instead of being refused.
+- The session is killed only once a turn has actually been answered — never on
+  a deadline or a disconnect, where Pi may still be working.
+- The runner is the only watcher that kills that session, and it does not
+  outlive the app: every delivered turn is written down (host, session name,
+  file, the assistant-turn count that means "answered"), and each connection
+  rechecks its host's records. A run that finished while the phone was away is
+  closed then; a run whose count has not been reached is left alone, and a
+  record whose file cannot be read survives for the next connection.
 - One turn at a time per open chat; the composer is disabled while a turn runs.
 
 **Known risks to resolve in the plan:** concurrency with an already-running
@@ -454,9 +467,12 @@ is added as a **phone-layer** concern, not a core fork:
 - D7 WeChat colours are phone-layer tokens, not a core theme (§10).
 - D8 Single live connection at a time in v1 (§8.2).
 - D9 Chat markdown is sanitized; raw HTML disabled (§8.6).
-- D10 The Pi turn PTY is phone-owned by `PiTurnRunner`, abandoned (not
-  resumed) across reconnect/background/host-switch; the `.jsonl` is the
-  source of truth (§9.4).
+- D10 The Pi turn PTY is phone-owned by `PiTurnRunner` and Pi runs in a
+  server-side tmux session behind it, so a reconnect/background/host-switch
+  detaches a client instead of killing the turn; the `.jsonl` is the source of
+  truth (§9.4). **Revised 2026-10-23** — the original "abandoned, not resumed"
+  rule killed in-flight work on every reconnect; see D44 in
+  `docs/decisions.md`.
 - D11 0.5.x installed-data migration dropped for this fork (§6.3).
 - D12 **Pi parsing lives phone-side** (`src/pi/`) rather than in the shared
   host CLI / core, as a deliberate fork deviation from D42's "shared logic in

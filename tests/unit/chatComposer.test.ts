@@ -11,11 +11,12 @@ type SendResult = 'sent' | 'busy' | 'error';
 interface Mounted {
   app: App;
   root: HTMLElement;
-  state: { sending: boolean; error: string | null; notice: string | null; sheetOpen: boolean };
+  state: { sending: boolean; error: string | null; notice: string | null; sheetOpen: boolean; running: boolean };
   requests: () => number;
   optionRequests: () => number;
   input(): HTMLTextAreaElement;
   button(): HTMLButtonElement;
+  followUp(): HTMLButtonElement | null;
   sheet(): HTMLElement | null;
   rows(): HTMLButtonElement[];
   optionsSheet(): HTMLElement | null;
@@ -33,11 +34,12 @@ function catalogWith(models: PiCommandOption[] = []): ChatCommandOptions {
 }
 
 function mountComposer(
-  send: (text: string) => Promise<SendResult>,
+  send: (text: string, intent?: 'steer' | 'follow-up') => Promise<SendResult>,
   options: {
     sending?: boolean;
     error?: string | null;
     notice?: string | null;
+    running?: boolean;
     commands?: typeof PI_BUILTIN_COMMANDS;
     commandsState?: 'idle' | 'loading' | 'ready' | 'error';
     commandOptions?: ChatCommandOptions | null;
@@ -47,6 +49,7 @@ function mountComposer(
     sending: options.sending ?? false,
     error: options.error ?? null,
     notice: options.notice ?? null,
+    running: options.running ?? false,
     sheetOpen: false,
   });
   let requests = 0;
@@ -57,6 +60,7 @@ function mountComposer(
       sending: state.sending,
       error: state.error,
       notice: state.notice,
+      running: state.running,
       commands: options.commands ?? PI_BUILTIN_COMMANDS,
       commandsState: options.commandsState ?? 'ready',
       commandOptions: options.commandOptions ?? null,
@@ -85,6 +89,7 @@ function mountComposer(
     rows: () => Array.from(document.querySelectorAll('[data-testid="chat-command-option"]')) as HTMLButtonElement[],
     optionsSheet: () => document.querySelector('[data-testid="chat-command-options"]') as HTMLElement | null,
     optionRows: () => Array.from(document.querySelectorAll('[data-testid="chat-command-option-choice"]')) as HTMLButtonElement[],
+    followUp: () => root.querySelector('[data-testid="chat-composer-follow-up"]'),
   };
   mounted = harness;
   return harness;
@@ -436,7 +441,7 @@ describe('chat composer', () => {
     composer.button().click();
     await settle();
 
-    expect(send).toHaveBeenCalledWith('/model openai/gpt-5-codex');
+    expect(send).toHaveBeenCalledWith('/model openai/gpt-5-codex', undefined);
     expect(composer.optionRequests()).toBe(0);
   });
 
@@ -448,7 +453,50 @@ describe('chat composer', () => {
     composer.button().click();
     await settle();
 
-    expect(send).toHaveBeenCalledWith('/model');
+    expect(send).toHaveBeenCalledWith('/model', undefined);
     expect(composer.optionsSheet()).toBeNull();
+  });
+
+  it('turns the send button into 插话 and offers 排队 while the chat is running', async () => {
+    const send = vi.fn(async () => 'sent' as const);
+    const composer = mountComposer(send, { running: true });
+    await type(composer.input(), 'stop, use ripgrep');
+
+    expect(composer.button().textContent?.trim()).toBe('插话');
+    expect(composer.button().getAttribute('data-intent')).toBe('steer');
+    expect(composer.followUp()?.textContent?.trim()).toBe('排队');
+
+    composer.button().click();
+    await settle();
+
+    // The primary button steers: it joins the run already under way.
+    expect(send).toHaveBeenCalledWith('stop, use ripgrep', 'steer');
+    expect(composer.input().value).toBe('');
+  });
+
+  it('queues a follow-up from the second button', async () => {
+    const send = vi.fn(async () => 'sent' as const);
+    const composer = mountComposer(send, { running: true });
+    await type(composer.input(), 'then run the tests');
+
+    composer.followUp()?.click();
+    await settle();
+
+    expect(send).toHaveBeenCalledWith('then run the tests', 'follow-up');
+    expect(composer.input().value).toBe('');
+  });
+
+  it('keeps one plain send button when nothing is running', async () => {
+    const send = vi.fn(async () => 'sent' as const);
+    const composer = mountComposer(send);
+
+    expect(composer.followUp()).toBeNull();
+
+    await type(composer.input(), 'hello');
+    expect(composer.button().textContent?.trim()).toBe('发送');
+    composer.button().click();
+    await settle();
+
+    expect(send).toHaveBeenCalledWith('hello', undefined);
   });
 });

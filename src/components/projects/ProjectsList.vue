@@ -3,9 +3,11 @@
  * Projects (tab 2, spec §8.5): the Pi projects discovered on the live host.
  * A search box filters by name or path, pull-to-refresh re-runs discovery,
  * the + opens the directory browser for a project the agent has not touched
- * yet (spec §9.1), and tapping a row selects it for the 会话 tab. With no
- * live connection the list is a connect-first hint, not an empty list
- * (spec §8.4).
+ * yet (spec §9.1), and tapping a row selects it and hands the shell the
+ * navigation to the 会话 tab, so the project's conversations are one tap away
+ * instead of two. The host's remembered list paints first, so a reconnect
+ * shows the projects while the fresh listing is still in flight. With no live
+ * connection the list is a connect-first hint, not an empty list (spec §8.4).
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
@@ -15,6 +17,9 @@ import { t } from '../../i18n';
 
 const store = useProjectsStore();
 const connections = useConnectionsStore();
+
+/** The shell switches to the 会话 tab; this component owns no tab state. */
+const emit = defineEmits<{ open: [path: string] }>();
 
 const connected = computed(() => connections.status === 'connected');
 
@@ -98,6 +103,9 @@ async function refresh(): Promise<void> {
 
 function selectProject(path: string): void {
   store.select(path);
+  // The selection is what the 会话 tab lists; taking the user there is the
+  // point of tapping a project, so the shell does it in the same gesture.
+  emit('open', path);
 }
 
 function enterDirectory(path: string): void {
@@ -159,6 +167,18 @@ function addCurrentDirectory(): void {
       <p v-else-if="store.state === 'error'" class="projects__error" role="alert">{{ store.error }}</p>
 
       <template v-else>
+        <!-- The backup line appears only once the sync has finished without
+             confirming the list: while the listing is still in flight the list
+             is about to correct itself, so saying so would only shift the
+             rows under the user's thumb. -->
+        <p
+          v-if="store.state === 'ready' && store.stale && !store.refreshing"
+          class="projects__stale"
+          data-testid="projects-stale"
+        >
+          {{ t('projects.cachedOnly') }}
+        </p>
+
         <div v-if="store.state === 'no-root'" class="projects__no-root" data-testid="projects-no-root">
           <p class="projects__status">
             {{ t('projects.noRoot') }}
@@ -406,6 +426,15 @@ function addCurrentDirectory(): void {
   margin: 0;
   color: var(--fg-secondary);
   font-size: var(--fs-300);
+  line-height: 1.45;
+}
+
+/* The backup line: the list below is still usable, the server just has not
+   confirmed it. Muted, never an alert. */
+.projects__stale {
+  margin: 0 0 var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--fs-200);
   line-height: 1.45;
 }
 

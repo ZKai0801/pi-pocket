@@ -20,6 +20,14 @@
  * A command is sent through the store's command channel: it completes when pi
  * has it, not when a reply appears. `notice` is how that channel speaks when a
  * command ran in a screen only the terminal can show.
+ *
+ * While the open chat is running the composer does not close: with a draft the
+ * same button becomes 插话 (steering — pi delivers it at the next turn
+ * boundary, inside the work already under way) and a second 排队 button appears
+ * for a follow-up, which pi only delivers once the run has nothing left to do.
+ * That difference is the whole point of having two buttons, so the copy never
+ * says "send" for either. With an EMPTY draft there is nothing to deliver at
+ * all, so “+” wins over both — the one useful action left is opening a command.
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
@@ -33,11 +41,13 @@ import ChatCommandOptions from './ChatCommandOptions.vue';
 import { t } from '../../i18n';
 
 const props = withDefaults(defineProps<{
-  send: (text: string) => Promise<'sent' | 'busy' | 'error'>;
+  send: (text: string, intent?: 'steer' | 'follow-up') => Promise<'sent' | 'busy' | 'error'>;
   sending: boolean;
   error: string | null;
   /** A note about a send that worked, e.g. a command only the terminal can show. */
   notice?: string | null;
+  /** The open chat's conversation has a turn in flight. */
+  running?: boolean;
   /** Built-ins plus whatever the host installed; empty still renders the sheet. */
   commands?: readonly PiSlashCommand[];
   commandsState?: ChatCommandState;
@@ -49,6 +59,7 @@ const props = withDefaults(defineProps<{
   commands: () => [],
   commandsState: 'idle',
   notice: null,
+  running: false,
   commandOptions: null,
   sheetOpen: false,
 });
@@ -87,7 +98,7 @@ watch(() => props.sheetOpen, (open) => {
   if (!open) pending.value = null;
 });
 
-async function submit(): Promise<void> {
+async function submit(intent?: 'steer' | 'follow-up'): Promise<void> {
   if (!canSend.value) return;
   const slash = parseSlashLine(text.value);
   // The bare form of a picker command would open pi's own picker in the turn
@@ -103,7 +114,7 @@ async function submit(): Promise<void> {
   const draft = text.value;
   let result: 'sent' | 'busy' | 'error';
   try {
-    result = await props.send(draft);
+    result = await props.send(draft, intent);
   } catch {
     result = 'error';
   }
@@ -179,21 +190,33 @@ function retryOptions(): void {
         data-testid="chat-composer-input"
       />
       <button
+        v-if="running"
+        type="button"
+        class="composer__queue"
+        :aria-label="t('composer.followUpAria')"
+        data-testid="chat-composer-follow-up"
+        :disabled="!canSend"
+        @click="submit('follow-up')"
+      >
+        {{ t('composer.followUp') }}
+      </button>
+      <button
         type="button"
         class="composer__send"
         :class="{ 'composer__send--more': mode === 'more' }"
-        :aria-label="mode === 'more' ? t('composer.more') : t('composer.send')"
+        :aria-label="mode === 'more' ? t('composer.more') : running ? t('composer.steerAria') : t('composer.send')"
         :aria-expanded="mode === 'more' ? sheetOpen : undefined"
         :data-mode="mode"
+        :data-intent="running ? 'steer' : 'send'"
         data-testid="chat-composer-send"
         :disabled="mode === 'send' && !canSend"
-        @click="mode === 'more' ? openSheet() : submit()"
+        @click="mode === 'more' ? openSheet() : submit(running ? 'steer' : undefined)"
       >
         <span v-if="sending" class="composer__spinner" data-testid="chat-composer-spinner">
           <AppIcon name="refresh" />
         </span>
         <AppIcon v-else-if="mode === 'more'" name="plus" />
-        <span v-else>{{ t('composer.send') }}</span>
+        <span v-else>{{ running ? t('composer.steer') : t('composer.send') }}</span>
       </button>
     </div>
 
@@ -280,24 +303,49 @@ function retryOptions(): void {
 }
 
 .composer__input:focus-visible,
-.composer__send:focus-visible {
+.composer__send:focus-visible,
+.composer__queue:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
 
 .composer__send {
   display: inline-flex;
-  width: 48px;
-  height: 48px;
+  /* Auto width so the label （发送/插话/Steer/Queue） fits: a fixed 48 px
+     clipped the longer English words. */
   min-width: 48px;
+  height: 48px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--accent);
   border-radius: var(--r-md);
   background: var(--accent);
+  padding: 0 var(--sp-3);
   color: var(--on-accent);
   font: var(--fw-medium) var(--fs-300) var(--font-ui);
+  white-space: nowrap;
+}
+
+/* A follow-up is the quieter of the two: it does nothing until the whole run
+   is done, so it must not compete with 插话 for the thumb. */
+.composer__queue {
+  display: inline-flex;
+  min-width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 0 var(--sp-2);
+  color: var(--fg-secondary);
+  font: var(--fw-medium) var(--fs-300) var(--font-ui);
+}
+
+.composer__queue:active {
+  background: var(--state-hover);
 }
 
 /* “+” is a way in, not a commit: quiet until it is touched, so an empty draft
@@ -308,7 +356,8 @@ function retryOptions(): void {
   color: var(--fg);
 }
 
-.composer__send:disabled {
+.composer__send:disabled,
+.composer__queue:disabled {
   opacity: var(--disabled-opacity);
 }
 

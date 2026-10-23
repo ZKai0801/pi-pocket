@@ -85,3 +85,24 @@ describe('piNodePathPrelude', () => {
     expect(piNodePathPrelude('pi')).toBe(PI_NODE_PATH_PRELUDE.replace("'/opt/bin'", "'pi'"));
   });
 });
+
+describe('piNodePathPrelude', () => {
+  const prelude = piNodePathPrelude('/home/projects/softwares/node-v25.2.1-linux-x64/bin/pi');
+
+  it('does nothing when node is already on PATH', () => {
+    expect(prelude.startsWith('command -v node >/dev/null 2>&1 ||')).toBe(true);
+  });
+
+  it('falls back to the directory pi itself lives in, then the versioned layouts', () => {
+    // node sits next to pi on every npm-style install, so that directory is
+    // the one answer this can derive instead of guess.
+    expect(prelude).toContain("in '/home/projects/softwares/node-v25.2.1-linux-x64/bin'");
+    expect(prelude).toContain('"$HOME"/.nvm/versions/node/*/bin');
+    expect(prelude).toContain('/home/projects/softwares/node-*/bin');
+  });
+
+  it('stays silent and cannot fail, so it is safe ahead of an exec', () => {
+    expect(prelude).not.toContain('echo');
+    expect(prelude.endsWith(';')).toBe(true);
+  });
+});

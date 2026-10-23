@@ -13,6 +13,11 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+/** Let a delivered turn's reply (and its back-up write) run to completion. */
+async function flush(): Promise<void> {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve();
+}
+
 describe('sessions store', () => {
   const meta = (id: string, updatedAtMs: number): PiSessionMeta => ({ path: `/r/${id}.jsonl`, id, name: id, updatedAtMs, preview: 'p', turnCount: 1 });
 
@@ -349,8 +354,14 @@ describe('sessions store session backup', () => {
       turns: [...backup.turns, { role: 'assistant', text: 'ok', timestampMs: 3 }],
     };
     const runner = {
-      send: vi.fn(async () => ({ ok: true as const, session: replied })),
+      send: vi.fn(),
       startNew: vi.fn(),
+      beginSend: vi.fn(async (path: string) => ({
+        ok: true as const,
+        sessionFile: path,
+        completed: Promise.resolve({ ok: true as const, session: replied }),
+      })),
+      beginStartNew: vi.fn(),
       isBusy: vi.fn(() => false),
       dispose: vi.fn(),
     };
@@ -365,6 +376,7 @@ describe('sessions store session backup', () => {
 
     await store.openSession('/r/a.jsonl');
     expect(await store.send('hi')).toBe('sent');
+    await flush();
     expect(saveCachedSession).toHaveBeenLastCalledWith('alexey', '/r/a.jsonl', replied);
   });
 
@@ -375,7 +387,13 @@ describe('sessions store session backup', () => {
     };
     const runner = {
       send: vi.fn(),
-      startNew: vi.fn(async () => ({ ok: true as const, sessionFile: '/r/new.jsonl', session: replied })),
+      startNew: vi.fn(),
+      beginSend: vi.fn(),
+      beginStartNew: vi.fn(async () => ({
+        ok: true as const,
+        sessionFile: '/r/new.jsonl',
+        completed: Promise.resolve({ ok: true as const, session: replied }),
+      })),
       isBusy: vi.fn(() => false),
       dispose: vi.fn(),
     };
@@ -390,14 +408,24 @@ describe('sessions store session backup', () => {
 
     store.newConversation({ path: '/home/kai', name: 'kai' });
     expect(await store.send('hi')).toBe('sent');
+    await flush();
     expect(saveCachedSession).toHaveBeenCalledTimes(1);
     expect(saveCachedSession).toHaveBeenCalledWith('alexey', '/r/new.jsonl', replied);
   });
 
   it('does not remember anything when the turn fails', async () => {
     const runner = {
-      send: vi.fn(async () => ({ ok: false as const, error: 'The turn timed out before Pi wrote a new assistant reply.' })),
+      send: vi.fn(),
       startNew: vi.fn(),
+      beginSend: vi.fn(async (path: string) => ({
+        ok: true as const,
+        sessionFile: path,
+        completed: Promise.resolve({
+          ok: false as const,
+          error: 'The turn timed out before Pi wrote a new assistant reply.',
+        }),
+      })),
+      beginStartNew: vi.fn(),
       isBusy: vi.fn(() => false),
       dispose: vi.fn(),
     };
@@ -411,7 +439,8 @@ describe('sessions store session backup', () => {
     } as never);
 
     await store.openSession('/r/a.jsonl');
-    expect(await store.send('hi')).toBe('error');
+    expect(await store.send('hi')).toBe('sent');
+    await flush();
     // Only the open's save; the failed turn wrote nothing.
     expect(saveCachedSession).toHaveBeenCalledTimes(1);
   });

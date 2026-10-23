@@ -51,7 +51,8 @@ const NODE_BIN_GLOBS = '"$HOME"/.nvm/versions/node/*/bin /home/projects/software
  * therefore answers `/usr/bin/env: 'node': No such file or directory` for the
  * very pi that works the moment a person types it into an interactive
  * terminal — pi's first line is `#!/usr/bin/env node`, so it needs `node` on
- * PATH and finds none.
+ * PATH and finds none. The turn PTY then exits before it can draw its editor,
+ * and the app reports "pi is not ready yet".
  *
  * This prefix is the fix: do nothing when `node` is already reachable,
  * otherwise put pi's own directory (then the usual per-version layouts) on

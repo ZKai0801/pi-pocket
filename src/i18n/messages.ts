@@ -30,6 +30,9 @@ export const ZH = {
   'settings.languageNote': '选择「跟随系统」时，语言跟随系统的首选语言；其余选项立即生效并保存。',
   'settings.language.zh-CN': '简体中文',
   'settings.language.en': 'English',
+  'settings.connectionsSection': '连接',
+  'settings.autoReconnectNote': '息屏或切到后台后连接保留 90 秒：期间回来直接复用，超过则自动重新连接。',
+  'settings.launchReconnectNote': '打开 app 时会自动连接上次使用的主机；每次启动只尝试一次，失败后停在主机列表等你操作。',
 
   /* ---- 连接 list --------------------------------------------------- */
   'connections.title': '连接',
@@ -98,6 +101,7 @@ export const ZH = {
   'projects.add': '新增项目',
   'projects.search': '搜索项目',
   'projects.discovering': '正在发现项目…',
+  'projects.cachedOnly': '暂时无法同步，显示的是上次缓存的项目。',
   'projects.needConnection': '先连接一台主机，项目列表才会出现。',
   'projects.noRoot': '这台主机上还没有 Pi 会话目录，先把一个 agent 跑起来，或在这里指定它的位置。',
   'projects.rootLabel': 'Pi 会话目录',
@@ -121,12 +125,17 @@ export const ZH = {
   'sessions.noPreview': '没有内容',
   'sessions.empty': '还没有会话',
   'sessions.emptyForProject': '「{project}」还没有会话',
+  'sessions.running': '正在运行',
+  'sessions.cachedOnly': '暂时无法同步，显示的是上次缓存的会话。',
 
   /* ---- 会话 chat --------------------------------------------------- */
   'chat.title': '会话',
   'chat.backAria': '返回列表',
   'chat.openTerminal': '打开终端',
   'chat.opening': '正在打开会话…',
+  'chat.running': '正在运行…',
+  'chat.queued': '已排队，这轮全部做完后发送',
+  'chat.steering': '已插话，下一步生效',
   'chat.retry': '重试',
 
   /* ---- chat composer ----------------------------------------------- */
@@ -134,6 +143,10 @@ export const ZH = {
   'composer.aria': '输入消息',
   'composer.send': '发送',
   'composer.more': '更多功能',
+  'composer.steer': '插话',
+  'composer.steerAria': '插话：在这轮的工具调用之后改变方向',
+  'composer.followUp': '排队',
+  'composer.followUpAria': '排队：等这轮全部做完后再发送',
 
   /* ---- chat command sheet（+ 面板）--------------------------------- */
   'commands.title': 'Pi 功能',
@@ -268,6 +281,7 @@ export const ZH = {
   'store.connectionsLoading': '连接列表还在加载，请稍后再试。',
   'store.sessionSwitched': '会话已切换，请重新发送。',
   'store.turnBusy': '上一条消息仍在处理中，请稍候。',
+  'store.noRunningTurn': '这一轮已经结束了，这条消息没有发出去。',
   'store.sessionDisconnected': '当前会话已断开，请重新打开。',
   'store.sessionAlreadyOpen': '该会话已打开，无法新建会话。',
   'store.sendFailed': '消息未发送成功，请重试。',
@@ -322,6 +336,9 @@ export const EN: Record<MessageKey, string> = {
   'settings.languageNote': '"Follow device" uses your system\'s preferred language; the others apply and are saved immediately.',
   'settings.language.zh-CN': '简体中文',
   'settings.language.en': 'English',
+  'settings.connectionsSection': 'Connections',
+  'settings.autoReconnectNote': 'After the screen goes dark the connection is held for 90 seconds: come back inside that and it is reused, come back later and it reconnects by itself.',
+  'settings.launchReconnectNote': 'Opening the app also dials the host you last used by itself: one attempt per launch, and a failure leaves you on the host list to choose.',
 
   'connections.title': 'Connections',
   'connections.add': 'Add connection',
@@ -387,6 +404,7 @@ export const EN: Record<MessageKey, string> = {
   'projects.add': 'Add project',
   'projects.search': 'Search projects',
   'projects.discovering': 'Discovering projects…',
+  'projects.cachedOnly': 'Could not sync; showing the last cached projects.',
   'projects.needConnection': 'Connect to a host first; the project list appears then.',
   'projects.noRoot': 'This host has no Pi session directory yet — run an agent first, or set its location here.',
   'projects.rootLabel': 'Pi session directory',
@@ -409,17 +427,26 @@ export const EN: Record<MessageKey, string> = {
   'sessions.noPreview': 'No content',
   'sessions.empty': 'No sessions yet',
   'sessions.emptyForProject': '"{project}" has no sessions yet',
+  'sessions.running': 'Running',
+  'sessions.cachedOnly': 'Showing the sessions from last time — syncing is unavailable right now.',
 
   'chat.title': 'Session',
   'chat.backAria': 'Back to list',
   'chat.openTerminal': 'Open terminal',
   'chat.opening': 'Opening session…',
+  'chat.running': 'Running…',
+  'chat.queued': 'Queued — sent when this run finishes',
+  'chat.steering': 'Steering — takes effect at the next step',
   'chat.retry': 'Retry',
 
   'composer.placeholder': 'Message…',
   'composer.aria': 'Message',
   'composer.send': 'Send',
   'composer.more': 'More actions',
+  'composer.steer': 'Steer',
+  'composer.steerAria': 'Steer: change direction after this turn’s tool calls',
+  'composer.followUp': 'Queue',
+  'composer.followUpAria': 'Queue: send after this run finishes',
 
   'commands.title': 'Pi actions',
   'commands.hint': 'A pick is inserted into the message box; review it, then send.',
@@ -550,6 +577,7 @@ export const EN: Record<MessageKey, string> = {
   'store.connectionsLoading': 'The connection list is still loading; try again shortly.',
   'store.sessionSwitched': 'The session switched; please send again.',
   'store.turnBusy': 'The previous message is still being processed; please wait.',
+  'store.noRunningTurn': 'That run has already finished, so this message was not sent.',
   'store.sessionDisconnected': 'This session disconnected; open it again.',
   'store.sessionAlreadyOpen': 'That session is already open; a new one cannot be created.',
   'store.sendFailed': 'The message was not sent; please try again.',

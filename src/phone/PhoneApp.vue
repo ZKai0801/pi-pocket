@@ -30,7 +30,11 @@ import SettingsTab from '../components/settings/SettingsTab.vue';
 import TerminalScreen from '../components/terminal/TerminalScreen.vue';
 import { installThemeSync } from './themeSync';
 import { installLocaleSync } from './localeSync';
-import { ConnectionController } from '../session/connectionController';
+import {
+  ConnectionController,
+  MOBILE_BACKGROUND_GRACE_MS,
+  MOBILE_RECONNECT_ON_RETURN,
+} from '../session/connectionController';
 import { hostKeyAnswer, hostKeyCard, hostKeyRefusalMessage } from '../session/hostKeyCard';
 import { type HomeSurface } from '../session/homeSurface';
 import {
@@ -42,6 +46,11 @@ import {
   runHomeBack,
 } from './backNavigation';
 import { installAppStateLifecycle } from './appStateLifecycle';
+import {
+  decideLaunchReconnect,
+  launchReconnectAttempted,
+  markLaunchReconnectAttempted,
+} from './launchReconnect';
 import { createConnectionSnapshotSync } from './connectionSnapshot';
 import { installConnectionPort, type ConnectionPort } from '../session/connectionPort';
 import {
@@ -145,6 +154,16 @@ const backNavigationOwner = createShellBackNavigation({
 /** The pushed view of the 连接 tab: `'editor'`, or `'keys'` stacked above it. */
 const connectionView = computed(() => backStack.current('connections'));
 
+/**
+ * Tapping a project in the 项目 tab selects it and lands on the 会话 tab: the
+ * shell owns the active tab, so the list asks for the move instead of owning
+ * tab state (spec §8.5). The sessions store's own selection watch loads the
+ * project's conversations, so the list is already filling in on arrival.
+ */
+function openProjectSessions(): void {
+  activeTab.value = 'sessions';
+}
+
 function setEditorOpen(open: boolean): void {
   if (open) backStack.push('connections', 'editor');
   // Closing the editor drops a key sheet stacked above it as well (R34).
@@ -186,13 +205,28 @@ watch(
   },
 );
 
-// A new generation means a reconnect: the turn PTY belonged to the old
-// transport, so abandon it rather than replay the turn (D10).
+// A new generation means a reconnect: the PTY that was watching a turn
+// belonged to the old transport, but the turn did not — Pi runs in a tmux
+// session on the host (see piTurn.ts), so the runner only re-attaches. This
+// used to dispose the runner, which killed in-flight work server-side on
+// every reconnect instead of letting it finish.
 watch(
   () => snapshot.value?.generationId,
   (next, previous) => {
     if (next === previous) return;
-    sessions.disposeTurnRunner();
+    sessions.rebindTurnRunner();
+  },
+);
+
+// A turn whose reply landed while this phone was not looking leaves an idle
+// Pi in its tmux session — the runner that would have closed it is gone. The
+// sweep is gated on the connected phase, not on `generationId`: a generation
+// is minted when the dial starts, and nothing can be read before it lands.
+watch(
+  () => (snapshot.value?.phase === 'connected' ? snapshot.value.generationId : null),
+  (next, previous) => {
+    if (next === null || next === previous) return;
+    void sessions.sweepPendingTurns();
   },
 );
 const keyboardVisible = ref(false);
@@ -204,6 +238,7 @@ let dialedTarget: SshHostTarget | null = null;
 let removeControllerSnapshot: (() => void) | undefined;
 let removeTerminalOutput: (() => void) | undefined;
 let removeBackButton: (() => void) | undefined;
+let stopLaunchReconnectWatch: (() => void) | undefined;
 let disposeAppStateLifecycle: (() => void) | undefined;
 let stopThemeSync: (() => void) | undefined;
 let stopLocaleSync: (() => void) | undefined;
@@ -295,6 +330,29 @@ async function closeController(): Promise<void> {
 
 const USABLE_PHASES = new Set(['connected', 'listing', 'attaching', 'live']);
 
+/**
+ * Remember the host as this phone's launch host, so the next cold start dials
+ * it by itself instead of waiting for a tap. It is written to the shared
+ * settings store's `defaultHost` — the same field the shared host picker
+ * reads — so phone and web agree on "the host to open", and a phone that has
+ * never connected simply has nothing to restore.
+ */
+function rememberLaunchHost(target: SshHostTarget): void {
+  // The alias, not `target.hostId`: a dial target names a host by its endpoint
+  // (`user@host:port`, from `AndroidHostStore.resolve`), while the saved list —
+  // and so the next launch's decision — is keyed by the name the user sees.
+  // Remembering the endpoint made every cold start look like a host that had
+  // since been deleted, and the launch dial was skipped silently.
+  const name = connections.hosts.find((host) => host.hostname === target.hostname
+    && host.port === target.port
+    && host.user === target.username)?.name;
+  if (name === undefined || name.trim() === '') {
+    console.error('Could not remember the launch host: no saved host matches', target.hostname);
+    return;
+  }
+  sharedSettings.defaultHost = name;
+}
+
 const connectionPort: ConnectionPort = {
   async connect(target) {
     // A re-request for the host this shell already holds (the connections
@@ -305,6 +363,7 @@ const connectionPort: ConnectionPort = {
       && USABLE_PHASES.has(controller.getSnapshot().phase)
     ) {
       connectionMessage.value = '';
+      rememberLaunchHost(target);
       installSeams();
       return { ok: true };
     }
@@ -324,6 +383,7 @@ const connectionPort: ConnectionPort = {
     activePassphrase = undefined;
     // A successful dial retires any message left by an earlier host's refusal.
     connectionMessage.value = '';
+    rememberLaunchHost(target);
     installSeams();
     return { ok: true };
   },
@@ -699,9 +759,56 @@ function applyKeyboardInsets(state: KeyboardInsetsState): void {
   );
 }
 
+/**
+ * The cold-start twin of the return-to-foreground reconnect: Android recycles
+ * a backgrounded process long before the user notices, and a recycled process
+ * comes back with no controller, no grace deadline and no memory of the host
+ * it was on — `returnToForeground` has nothing to resume, which is why the
+ * phone used to land on the host list and wait for a tap. This dials the
+ * remembered host once per launch, and only ever once: a dial that fails,
+ * hangs at a host-key prompt or is cancelled stays cancelled until the next
+ * launch, so a host that cannot be reached cannot trap the user in a loop.
+ */
+async function attemptLaunchReconnect(): Promise<void> {
+  const decision = decideLaunchReconnect({
+    lastHost: sharedSettings.defaultHost,
+    hostNames: connections.hosts.map((host) => host.name),
+    attempted: launchReconnectAttempted(),
+    connected: connections.activeName !== null,
+  });
+  if (decision.action !== 'connect') {
+    console.error('[launch-reconnect] skip', decision.reason);
+    return;
+  }
+  console.error('[launch-reconnect] dial', decision.name);
+  markLaunchReconnectAttempted();
+  await connections.connect(decision.name);
+}
+
+/**
+ * Wait for the saved hosts before deciding: they arrive from a dynamic import
+ * (`useConnectionsStore`), so a mount that beats the import must decide again
+ * when the list lands rather than latch on an empty list.
+ */
+function watchLaunchReconnect(): () => void {
+  const stop = watch(
+    () => connections.hosts.length,
+    (count) => {
+      if (count === 0) return;
+      stop();
+      void attemptLaunchReconnect().catch((error: unknown) => {
+        console.error('Could not restore the last SSH connection.', error);
+      });
+    },
+    { immediate: true },
+  );
+  return () => stop();
+}
+
 onMounted(() => {
   installConnectionPort(connectionPort);
   installBackNavigation(backNavigationOwner);
+  stopLaunchReconnectWatch = watchLaunchReconnect();
   // The live theme (设置 tab): the boot in main.ts painted the saved choice;
   // this keeps re-picks and OS dark-mode flips applied without a restart.
   stopThemeSync = installThemeSync(document.documentElement);
@@ -715,9 +822,10 @@ onMounted(() => {
   disposeAppStateLifecycle = installAppStateLifecycle({
     app: CapacitorApp,
     getController: () => controller,
-    // Grace and reconnect-on-return are owned by the shared settings store (D42, #2861).
-    getBackgroundGraceMs: () => sharedSettings.backgroundGraceMs,
-    getReconnectOnReturn: () => sharedSettings.reconnectOnReturn,
+    // Phone constants, not the shared settings store: without background
+    // keep-alive the window is best-effort, and both recover paths are on.
+    getBackgroundGraceMs: () => MOBILE_BACKGROUND_GRACE_MS,
+    getReconnectOnReturn: () => MOBILE_RECONNECT_ON_RETURN,
     onError: (error) => {
       connectionMessage.value = error instanceof Error ? error.message : String(error);
     },
@@ -749,6 +857,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopLaunchReconnectWatch?.();
   stopThemeSync?.();
   stopLocaleSync?.();
   removeKeyboardViewportListeners?.();
@@ -784,7 +893,7 @@ onBeforeUnmount(() => {
         @update:editor-open="setEditorOpen"
         @update:keys-open="setKeysOpen"
       />
-      <ProjectsList v-show="activeTab === 'projects'" />
+      <ProjectsList v-show="activeTab === 'projects'" @open="openProjectSessions" />
       <SettingsTab v-show="activeTab === 'settings'" />
       <ChatScreen
         v-show="activeTab === 'sessions' && sessions.open !== null"

@@ -3,7 +3,8 @@ import {
   createPiTurnRunner,
   SESSION_ALREADY_OPEN_ERROR,
 } from '../../src/pi/piTurnRunner';
-import { buildPiOpenCommand } from '../../src/pi/piTurn';
+import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, turnSessionName } from '../../src/pi/piTurn';
+import { PI_INPUT_READY_MARKER } from '../../src/pi/turnReadiness';
 import type { ParsedPiSession } from '../../src/pi/types';
 import type { TurnPtyHandle } from '../../src/session/turnPty';
 
@@ -38,7 +39,7 @@ function fakeHandle(options: { autoReady?: boolean; writeError?: Error } = {}): 
     }),
     onData: vi.fn((callback: (chunk: string) => void) => {
       listeners.add(callback);
-      if (options.autoReady) callback('\u203a ');
+      if (options.autoReady) callback(PI_INPUT_READY_MARKER);
       return () => unsubscribe(callback);
     }),
     close,
@@ -53,10 +54,18 @@ async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 20; index += 1) await Promise.resolve();
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function harness(options: {
   autoReady?: boolean;
   writeError?: Error;
-  reads: Array<ParsedPiSession | Error>;
+  reads: Array<ParsedPiSession | Error | Promise<ParsedPiSession>>;
   neverSettles?: boolean;
   newest?: Array<string | null | Error>;
   turnTimeoutMs?: number;
@@ -90,12 +99,20 @@ function harness(options: {
   const sleep = vi.fn(async (ms: number) => {
     nowMs += ms;
   });
+  const closeSession = vi.fn(async (_sessionName: string) => undefined);
+  const rememberTurn = vi.fn(
+    (_turn: { sessionName: string; sessionFile: string; target: number }) => undefined,
+  );
+  const forgetTurn = vi.fn((_sessionName: string) => undefined);
   const runner = createPiTurnRunner({
     openPty,
     piCommand: '/opt/bin/pi',
     projectPath: '/home/kai/project',
     readSession,
     newestSessionFile,
+    closeSession,
+    rememberTurn,
+    forgetTurn,
     sleep,
     now: () => nowMs,
     readyTimeoutMs: 20_000,
@@ -103,7 +120,20 @@ function harness(options: {
     pollIntervalMs: 1_000,
     submitDelayMs: 0,
   });
-  return { handle, handles, openPty, reads, readSession, newestSessionFile, runner };
+  return {
+    handle,
+    // Every PTY this runner opened, in order: a restart is only visible by
+    // looking at the handle the second open produced.
+    handles,
+    openPty,
+    reads,
+    readSession,
+    newestSessionFile,
+    runner,
+    closeSession,
+    rememberTurn,
+    forgetTurn,
+  };
 }
 
 describe('createPiTurnRunner', () => {
@@ -136,7 +166,7 @@ describe('createPiTurnRunner', () => {
 
     expect(second).toEqual({ ok: false, error: expect.stringMatching(/running/i) });
     await flushMicrotasks();
-    h.handle.emit('\u203a ');
+    h.handle.emit(PI_INPUT_READY_MARKER);
     await expect(first).resolves.toMatchObject({ ok: true });
     expect(h.runner.isBusy()).toBe(false);
   });
@@ -166,6 +196,36 @@ describe('createPiTurnRunner', () => {
     expect(result.ok === false && result.error).toMatch(/ready/i);
     expect(h.readSession).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('waits for Pi itself when the session had to be created', async () => {
+    const h = harness({ autoReady: false, reads: [sessionWithAssistantTurns(0)] });
+
+    const pending = h.runner.send('/r/a.jsonl', 'hi');
+    await flushMicrotasks();
+    // A new session announces itself, then Pi has to mount its editor before
+    // a line can be taken.
+    h.handle.emit(`\n${PI_TURN_CREATED_MARKER}\n`);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/ready/i);
+  });
+
+  it('treats a re-attached session as ready on its repaint alone', async () => {
+    const h = harness({
+      autoReady: false,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    const pending = h.runner.send('/r/a.jsonl', 'hi');
+    await flushMicrotasks();
+    // tmux repainting a live pane: the editor is already mounted, so the
+    // bracketed-paste handshake never comes back and must not be waited for.
+    h.handle.emit('\u001b[2J\u001b[Hpi editor\r\n');
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(h.handle.writes).toEqual(['hi', '\r']);
   });
 
   it('times out when a poll never sees a new assistant turn', async () => {
@@ -264,10 +324,16 @@ describe('createPiTurnRunner', () => {
     const result = await h.runner.startNew('/home/kai/other', 'hi');
 
     expect(h.openPty).toHaveBeenCalledTimes(1);
+    // A draft's tmux name is unique per attempt, so match the shape rather
+    // than one recomputable string.
     expect(h.openPty).toHaveBeenCalledWith(
-      buildPiOpenCommand('/opt/bin/pi', '/home/kai/other'),
+      expect.stringMatching(
+        /^if command -v tmux [^\n]*new-session -d -s 'ps-pi-draft-[a-z0-9]+-[a-z0-9]+' /,
+      ),
       { cols: 80, rows: 24 },
     );
+    expect(h.openPty.mock.calls[0]?.[0]).toContain(`exec '/opt/bin/pi'`);
+    expect(h.openPty.mock.calls[0]?.[0]).not.toContain('--session');
     expect(h.newestSessionFile).toHaveBeenCalledWith('/home/kai/other');
     expect(h.handle.writes).toEqual(['hi', '\r']);
     // The baseline list is read before the first byte is delivered.
@@ -394,7 +460,7 @@ describe('createPiTurnRunner', () => {
 
     expect(second).toEqual({ ok: false, error: expect.stringMatching(/running/i) });
     await flushMicrotasks();
-    h.handle.emit('\u203a ');
+    h.handle.emit(PI_INPUT_READY_MARKER);
     await expect(first).resolves.toMatchObject({ ok: true, sessionFile: '/r/new.jsonl' });
     expect(h.openPty).toHaveBeenCalledTimes(1);
     expect(h.runner.isBusy()).toBe(false);
@@ -477,10 +543,11 @@ describe('createPiTurnRunner', () => {
     const result = await h.runner.runCommand(null, '/model openai/gpt-5-codex');
 
     expect(result).toEqual({ ok: true, hiddenUi: false });
-    expect(h.openPty).toHaveBeenCalledWith(
-      buildPiOpenCommand('/opt/bin/pi', '/home/kai/project'),
-      { cols: 80, rows: 24 },
-    );
+    // A draft's tmux name is random, so the open is read by what it runs:
+    // pi on the project, with no session file to attach to.
+    const opened = h.openPty.mock.calls[0]?.[0] ?? '';
+    expect(opened).toContain("cd '/home/kai/project' && exec '/opt/bin/pi'");
+    expect(opened).not.toContain('--session');
     expect(h.newestSessionFile).not.toHaveBeenCalled();
     expect(h.handle.writes).toEqual(['/model openai/gpt-5-codex', '\r']);
   });
@@ -524,5 +591,346 @@ describe('createPiTurnRunner', () => {
     expect(h.handle.writes).toEqual([]);
     expect(h.readSession).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginSend resolves once the line is delivered and keeps the reply pending in completed', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+
+    expect(begun).toMatchObject({ ok: true, sessionFile: '/r/a.jsonl' });
+    if (!begun.ok) return;
+    expect(h.handle.writes).toEqual(['hi', '\r']);
+    expect(h.runner.isBusy()).toBe(true);
+
+    reply.resolve(sessionWithAssistantTurns(1));
+    await expect(begun.completed).resolves.toEqual({
+      ok: true,
+      session: sessionWithAssistantTurns(1),
+    });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginSend reports a delivery failure without leaving the runner busy', async () => {
+    const h = harness({
+      autoReady: true,
+      writeError: new Error('pty closed'),
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+
+    expect(begun.ok).toBe(false);
+    expect(begun.ok === false && begun.error).toContain('pty closed');
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginStartNew returns the adopted file before the reply and completes later', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl', '/r/new.jsonl'],
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+    });
+
+    const begun = await h.runner.beginStartNew('/home/kai/project', 'hi');
+
+    expect(begun).toMatchObject({ ok: true, sessionFile: '/r/new.jsonl' });
+    if (!begun.ok) return;
+    expect(h.handle.writes).toEqual(['hi', '\r']);
+    expect(h.runner.isBusy()).toBe(true);
+
+    reply.resolve(sessionWithAssistantTurns(1));
+    await expect(begun.completed).resolves.toEqual({
+      ok: true,
+      session: sessionWithAssistantTurns(1),
+    });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('beginStartNew times out waiting for the adopted file and leaves the runner idle', async () => {
+    const h = harness({
+      autoReady: true,
+      newest: ['/r/old.jsonl'],
+      reads: [sessionWithAssistantTurns(0)],
+      turnTimeoutMs: 3_000,
+    });
+
+    const begun = await h.runner.beginStartNew('/home/kai/project', 'hi');
+
+    expect(begun.ok).toBe(false);
+    expect(begun.ok === false && begun.error).toMatch(/new session file/i);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('steers the run in flight with Enter and waits for the extra reply', async () => {
+    const firstReply = deferred<ParsedPiSession>();
+    const secondReply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      // baseline, then the first reply, then the steered one.
+      reads: [sessionWithAssistantTurns(0), firstReply.promise, secondReply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(h.runner.queue('/r/a.jsonl', 'use ripgrep', 'steer')).resolves.toEqual({ ok: true });
+    // Same PTY, same shell: Enter is pi's steering key while a turn runs.
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+    expect(h.handle.writes).toEqual(['one', '\r', 'use ripgrep', '\r']);
+
+    // The first reply alone no longer settles the run: one more is owed.
+    firstReply.resolve(sessionWithAssistantTurns(1));
+    await flushMicrotasks();
+    expect(h.runner.isBusy()).toBe(true);
+
+    secondReply.resolve(sessionWithAssistantTurns(2));
+    await expect(begun.completed).resolves.toEqual({
+      ok: true,
+      session: sessionWithAssistantTurns(2),
+    });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('queues a follow-up with Alt+Enter and waits for its reply too', async () => {
+    const firstReply = deferred<ParsedPiSession>();
+    const secondReply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), firstReply.promise, secondReply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(h.runner.queue('/r/a.jsonl', 'then the tests', 'follow-up')).resolves.toEqual({
+      ok: true,
+    });
+    // No Enter: the body goes in as an insert, and ESC CR is pi's
+    // app.message.followUp — delivered only when the run has nothing left.
+    expect(h.handle.writes).toEqual(['one', '\r', 'then the tests', '\u001b\r']);
+
+    firstReply.resolve(sessionWithAssistantTurns(1));
+    await flushMicrotasks();
+    expect(h.runner.isBusy()).toBe(true);
+
+    secondReply.resolve(sessionWithAssistantTurns(2));
+    await expect(begun.completed).resolves.toMatchObject({ ok: true });
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('refuses to queue when no turn is running', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    await expect(h.runner.queue('/r/a.jsonl', 'hi', 'steer')).resolves.toEqual({
+      ok: false,
+      error: expect.stringMatching(/no running turn/i),
+    });
+    expect(h.openPty).not.toHaveBeenCalled();
+  });
+
+  it('tears the conversation session down once the reply has landed', async () => {
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+    expect(h.closeSession)
+      .toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+    // Closed and forgotten together: a record nobody will recheck is noise,
+    // and one kept after a successful close would outlive its session.
+    await flushMicrotasks();
+    expect(h.forgetTurn).toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+  });
+
+  it('writes the turn down so a connection arriving later can close it', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+    expect(begun.ok).toBe(true);
+    // The app is killed: this runner never sees the reply, so the record is
+    // the only thing left that knows a session is owed a teardown.
+    h.runner.dispose();
+    if (begun.ok) await begun.completed;
+
+    expect(h.rememberTurn).toHaveBeenCalledWith({
+      sessionName: turnSessionName('/r/a.jsonl', '/home/kai/project'),
+      sessionFile: '/r/a.jsonl',
+      target: 1,
+    });
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+  });
+
+  it('raises the recorded target when another message joins the run', async () => {
+    const firstReply = deferred<ParsedPiSession>();
+    const secondReply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), firstReply.promise, secondReply.promise],
+    });
+    const name = turnSessionName('/r/a.jsonl', '/home/kai/project');
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+    await h.runner.queue('/r/a.jsonl', 'use ripgrep', 'steer');
+
+    // A sweep that only knew about the first reply would close the session
+    // while the steered instruction was still being worked on.
+    expect(h.rememberTurn).toHaveBeenLastCalledWith({
+      sessionName: name,
+      sessionFile: '/r/a.jsonl',
+      target: 2,
+    });
+
+    firstReply.resolve(sessionWithAssistantTurns(1));
+    await flushMicrotasks();
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+
+    secondReply.resolve(sessionWithAssistantTurns(2));
+    await expect(begun.completed).resolves.toMatchObject({ ok: true });
+    await flushMicrotasks();
+    expect(h.forgetTurn).toHaveBeenCalledWith(name);
+  });
+
+  it('rolls the recorded target back when the extra message never landed', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+    const name = turnSessionName('/r/a.jsonl', '/home/kai/project');
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+
+    h.handle.write.mockImplementation(() => {
+      throw new Error('pty closed');
+    });
+    const queued = await h.runner.queue('/r/a.jsonl', 'use ripgrep', 'steer');
+    expect(queued.ok).toBe(false);
+
+    // Nothing was asked of Pi, so nothing may be owed: a target one too high
+    // would make the sweep wait for a reply that never comes and never clean.
+    expect(h.rememberTurn).toHaveBeenLastCalledWith({
+      sessionName: name,
+      sessionFile: '/r/a.jsonl',
+      target: 1,
+    });
+    h.runner.dispose();
+  });
+
+  it('leaves the session running when the poll gives up before the reply', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(result.ok).toBe(false);
+    // The deadline bounded the poll, not the agent: it may still be working.
+    expect(h.closeSession).not.toHaveBeenCalled();
+  });
+
+  it('never tears the session down when the connection goes away mid-turn', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+    expect(begun.ok).toBe(true);
+    h.runner.dispose();
+
+    if (begun.ok) await expect(begun.completed).resolves.toMatchObject({ ok: false });
+    expect(h.closeSession).not.toHaveBeenCalled();
+  });
+
+  it('drops the dead PTY on a reconnect and keeps the run', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+
+    h.runner.rebind();
+
+    // The turn belongs to the host now, not to the channel watching it.
+    expect(h.runner.isBusy()).toBe(true);
+    expect(h.handle.close).toHaveBeenCalled();
+    expect(h.handle.unsubscribe).toHaveBeenCalled();
+    expect(h.closeSession).not.toHaveBeenCalled();
+
+    h.runner.dispose();
+  });
+
+  it('re-attaches to the same session and delivers the line after a reconnect', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+
+    h.runner.rebind();
+    await expect(h.runner.queue('/r/a.jsonl', 'two', 'steer')).resolves.toEqual({ ok: true });
+
+    // A fresh PTY onto the transport that can carry it again — the same
+    // command, so tmux attaches to the session Pi is still working in.
+    expect(h.openPty).toHaveBeenCalledTimes(2);
+    expect(h.openPty).toHaveBeenLastCalledWith(
+      buildPiOpenCommand('/opt/bin/pi', '/home/kai/project', '/r/a.jsonl'),
+      { cols: 80, rows: 24 },
+    );
+    expect(h.handle.writes).toEqual(['one', '\r', 'two', '\r']);
+
+    h.runner.dispose();
+  });
+
+  it('re-attaches a draft to its own session, which its adopted file cannot name', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(1), reply.promise],
+      newest: [null, '/r/new.jsonl'],
+      turnTimeoutMs: 1_000_000,
+    });
+    const begun = await h.runner.beginStartNew('/home/kai/project', 'one');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    h.runner.rebind();
+    await expect(h.runner.queue('/r/new.jsonl', 'more', 'steer')).resolves.toEqual({ ok: true });
+
+    // A draft's name is random, and its file derives a different one: deriving
+    // it here would attach to nothing and start a *second* Pi on that file.
+    const first = String(h.openPty.mock.calls[0]?.[0] ?? '');
+    const second = String(h.openPty.mock.calls[1]?.[0] ?? '');
+    const attached = /attach-session -d -t '([^']+)'/.exec(first)?.[1] ?? '';
+    expect(attached).toMatch(/^ps-pi-draft-/);
+    expect(second).toContain(`attach-session -d -t '${attached}'`);
+    expect(second).not.toContain(turnSessionName('/r/new.jsonl', '/home/kai/project'));
+
+    h.runner.dispose();
   });
 });
