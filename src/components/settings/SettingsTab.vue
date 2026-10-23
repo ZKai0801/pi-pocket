@@ -50,6 +50,10 @@ function setUiLanguage(event: Event) {
         </select>
       </label>
       <p class="settings-note">{{ t('settings.languageNote') }}</p>
+
+      <h2 class="settings-section">{{ t('settings.connectionsSection') }}</h2>
+      <p class="settings-note">{{ t('settings.autoReconnectNote') }}</p>
+      <p class="settings-note">{{ t('settings.launchReconnectNote') }}</p>
     </section>
   </main>
 </template>

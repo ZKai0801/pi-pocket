@@ -30,6 +30,9 @@ export const ZH = {
   'settings.languageNote': '选择「跟随系统」时，语言跟随系统的首选语言；其余选项立即生效并保存。',
   'settings.language.zh-CN': '简体中文',
   'settings.language.en': 'English',
+  'settings.connectionsSection': '连接',
+  'settings.autoReconnectNote': '息屏或切到后台后连接保留 90 秒：期间回来直接复用，超过则自动重新连接。',
+  'settings.launchReconnectNote': '打开 app 时会自动连接上次使用的主机；每次启动只尝试一次，失败后停在主机列表等你操作。',
 
   /* ---- 连接 list --------------------------------------------------- */
   'connections.title': '连接',
@@ -265,6 +268,9 @@ export const EN: Record<MessageKey, string> = {
   'settings.languageNote': '"Follow device" uses your system\'s preferred language; the others apply and are saved immediately.',
   'settings.language.zh-CN': '简体中文',
   'settings.language.en': 'English',
+  'settings.connectionsSection': 'Connections',
+  'settings.autoReconnectNote': 'After the screen goes dark the connection is held for 90 seconds: come back inside that and it is reused, come back later and it reconnects by itself.',
+  'settings.launchReconnectNote': 'Opening the app also dials the host you last used by itself: one attempt per launch, and a failure leaves you on the host list to choose.',
 
   'connections.title': 'Connections',
   'connections.add': 'Add connection',
