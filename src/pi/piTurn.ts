@@ -1,4 +1,4 @@
-import { quoteShell } from './piCommands';
+import { piNodePathPrelude, quoteShell } from './piCommands';
 
 export function buildPiOpenCommand(
   piCommand: string,
@@ -9,7 +9,10 @@ export function buildPiOpenCommand(
     throw new Error('A newline is not allowed in the pi command');
   }
   const session = sessionFile === undefined ? '' : ` --session ${quoteShell(sessionFile)}`;
-  return `cd ${quoteShell(projectPath)} && exec ${quoteShell(piCommand)}${session}`;
+  // Same non-login shell as the exec channel, so pi needs the same PATH
+  // bootstrap here; see piNodePathPrelude. It prints nothing, and `exec`
+  // replaces the shell after it.
+  return `${piNodePathPrelude(piCommand)} cd ${quoteShell(projectPath)} && exec ${quoteShell(piCommand)}${session}`;
 }
 
 /** A multi-line message is delivered as one line of terminal input. */

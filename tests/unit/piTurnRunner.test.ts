@@ -4,6 +4,7 @@ import {
   SESSION_ALREADY_OPEN_ERROR,
 } from '../../src/pi/piTurnRunner';
 import { buildPiOpenCommand } from '../../src/pi/piTurn';
+import { PI_INPUT_READY_MARKER } from '../../src/pi/turnReadiness';
 import type { ParsedPiSession } from '../../src/pi/types';
 import type { TurnPtyHandle } from '../../src/session/turnPty';
 
@@ -38,7 +39,7 @@ function fakeHandle(options: { autoReady?: boolean; writeError?: Error } = {}): 
     }),
     onData: vi.fn((callback: (chunk: string) => void) => {
       listeners.add(callback);
-      if (options.autoReady) callback('\u203a ');
+      if (options.autoReady) callback(PI_INPUT_READY_MARKER);
       return () => unsubscribe(callback);
     }),
     close,
@@ -126,7 +127,7 @@ describe('createPiTurnRunner', () => {
 
     expect(second).toEqual({ ok: false, error: expect.stringMatching(/running/i) });
     await flushMicrotasks();
-    h.handle.emit('\u203a ');
+    h.handle.emit(PI_INPUT_READY_MARKER);
     await expect(first).resolves.toMatchObject({ ok: true });
     expect(h.runner.isBusy()).toBe(false);
   });
@@ -384,7 +385,7 @@ describe('createPiTurnRunner', () => {
 
     expect(second).toEqual({ ok: false, error: expect.stringMatching(/running/i) });
     await flushMicrotasks();
-    h.handle.emit('\u203a ');
+    h.handle.emit(PI_INPUT_READY_MARKER);
     await expect(first).resolves.toMatchObject({ ok: true, sessionFile: '/r/new.jsonl' });
     expect(h.openPty).toHaveBeenCalledTimes(1);
     expect(h.runner.isBusy()).toBe(false);
