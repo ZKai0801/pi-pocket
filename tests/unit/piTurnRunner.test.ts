@@ -3,7 +3,7 @@ import {
   createPiTurnRunner,
   SESSION_ALREADY_OPEN_ERROR,
 } from '../../src/pi/piTurnRunner';
-import { buildPiOpenCommand } from '../../src/pi/piTurn';
+import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, turnSessionName } from '../../src/pi/piTurn';
 import { PI_INPUT_READY_MARKER } from '../../src/pi/turnReadiness';
 import type { ParsedPiSession } from '../../src/pi/types';
 import type { TurnPtyHandle } from '../../src/session/turnPty';
@@ -89,12 +89,14 @@ function harness(options: {
   const sleep = vi.fn(async (ms: number) => {
     nowMs += ms;
   });
+  const closeSession = vi.fn(async (_sessionName: string) => undefined);
   const runner = createPiTurnRunner({
     openPty,
     piCommand: '/opt/bin/pi',
     projectPath: '/home/kai/project',
     readSession,
     newestSessionFile,
+    closeSession,
     sleep,
     now: () => nowMs,
     readyTimeoutMs: 20_000,
@@ -102,7 +104,7 @@ function harness(options: {
     pollIntervalMs: 1_000,
     submitDelayMs: 0,
   });
-  return { handle, openPty, reads, readSession, newestSessionFile, runner };
+  return { handle, openPty, reads, readSession, newestSessionFile, runner, closeSession };
 }
 
 describe('createPiTurnRunner', () => {
@@ -165,6 +167,36 @@ describe('createPiTurnRunner', () => {
     expect(result.ok === false && result.error).toMatch(/ready/i);
     expect(h.readSession).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('waits for Pi itself when the session had to be created', async () => {
+    const h = harness({ autoReady: false, reads: [sessionWithAssistantTurns(0)] });
+
+    const pending = h.runner.send('/r/a.jsonl', 'hi');
+    await flushMicrotasks();
+    // A new session announces itself, then Pi has to mount its editor before
+    // a line can be taken.
+    h.handle.emit(`\n${PI_TURN_CREATED_MARKER}\n`);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/ready/i);
+  });
+
+  it('treats a re-attached session as ready on its repaint alone', async () => {
+    const h = harness({
+      autoReady: false,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    const pending = h.runner.send('/r/a.jsonl', 'hi');
+    await flushMicrotasks();
+    // tmux repainting a live pane: the editor is already mounted, so the
+    // bracketed-paste handshake never comes back and must not be waited for.
+    h.handle.emit('\u001b[2J\u001b[Hpi editor\r\n');
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(h.handle.writes).toEqual(['hi', '\r']);
   });
 
   it('times out when a poll never sees a new assistant turn', async () => {
@@ -263,10 +295,16 @@ describe('createPiTurnRunner', () => {
     const result = await h.runner.startNew('/home/kai/other', 'hi');
 
     expect(h.openPty).toHaveBeenCalledTimes(1);
+    // A draft's tmux name is unique per attempt, so match the shape rather
+    // than one recomputable string.
     expect(h.openPty).toHaveBeenCalledWith(
-      buildPiOpenCommand('/opt/bin/pi', '/home/kai/other'),
+      expect.stringMatching(
+        /^if command -v tmux [^\n]*new-session -d -s 'ps-pi-draft-[a-z0-9]+-[a-z0-9]+' /,
+      ),
       { cols: 80, rows: 24 },
     );
+    expect(h.openPty.mock.calls[0]?.[0]).toContain(`exec '/opt/bin/pi'`);
+    expect(h.openPty.mock.calls[0]?.[0]).not.toContain('--session');
     expect(h.newestSessionFile).toHaveBeenCalledWith('/home/kai/other');
     expect(h.handle.writes).toEqual(['hi', '\r']);
     // The baseline list is read before the first byte is delivered.
@@ -560,5 +598,90 @@ describe('createPiTurnRunner', () => {
       error: expect.stringMatching(/no running turn/i),
     });
     expect(h.openPty).not.toHaveBeenCalled();
+  });
+
+  it('tears the conversation session down once the reply has landed', async () => {
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+    expect(h.closeSession)
+      .toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+  });
+
+  it('leaves the session running when the poll gives up before the reply', async () => {
+    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0)] });
+
+    const result = await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(result.ok).toBe(false);
+    // The deadline bounded the poll, not the agent: it may still be working.
+    expect(h.closeSession).not.toHaveBeenCalled();
+  });
+
+  it('never tears the session down when the connection goes away mid-turn', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+    expect(begun.ok).toBe(true);
+    h.runner.dispose();
+
+    if (begun.ok) await expect(begun.completed).resolves.toMatchObject({ ok: false });
+    expect(h.closeSession).not.toHaveBeenCalled();
+  });
+
+  it('drops the dead PTY on a reconnect and keeps the run', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+
+    h.runner.rebind();
+
+    // The turn belongs to the host now, not to the channel watching it.
+    expect(h.runner.isBusy()).toBe(true);
+    expect(h.handle.close).toHaveBeenCalled();
+    expect(h.handle.unsubscribe).toHaveBeenCalled();
+    expect(h.closeSession).not.toHaveBeenCalled();
+
+    h.runner.dispose();
+  });
+
+  it('re-attaches to the same session and delivers the line after a reconnect', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+
+    h.runner.rebind();
+    await expect(h.runner.queue('/r/a.jsonl', 'two', 'steer')).resolves.toEqual({ ok: true });
+
+    // A fresh PTY onto the transport that can carry it again — the same
+    // command, so tmux attaches to the session Pi is still working in.
+    expect(h.openPty).toHaveBeenCalledTimes(2);
+    expect(h.openPty).toHaveBeenLastCalledWith(
+      buildPiOpenCommand('/opt/bin/pi', '/home/kai/project', '/r/a.jsonl'),
+      { cols: 80, rows: 24 },
+    );
+    expect(h.handle.writes).toEqual(['one', '\r', 'two', '\r']);
+
+    h.runner.dispose();
   });
 });

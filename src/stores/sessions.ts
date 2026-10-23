@@ -48,7 +48,7 @@ import {
   type PiTurnStartNewResult,
   type TurnQueueKind,
 } from '../pi/piTurnRunner';
-import { toTurnLine } from '../pi/piTurn';
+import { buildPiCloseCommand, toTurnLine } from '../pi/piTurn';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession, PiTurn } from '../pi/types';
@@ -904,6 +904,19 @@ async function newestSessionFileOnActiveHost(projectPath: string): Promise<strin
 }
 
 /**
+ * Tear down a conversation's server-side Pi session once its turn has been
+ * answered. Best-effort by contract: a host without tmux, or a session that
+ * already ended, has nothing to kill, and a failure here must never surface as
+ * a turn error.
+ */
+function closeTurnSessionOnActiveHost(sessionName: string): Promise<void> {
+  return piLive()
+    .transport()
+    .exec(buildPiCloseCommand(sessionName), 5_000)
+    .then(() => undefined, () => undefined);
+}
+
+/**
  * The local backup of an opened conversation (spec §8.6): the chat paints it
  * instantly on a cold open while the server's fresh read is in flight, and
  * every fresh read or turn re-saves it. Keyed by the claim's host — a session
@@ -947,6 +960,13 @@ export interface TurnRunnerCache {
   release(sessionFile: string): void;
   /** Dispose every cached runner; the resolved command outlives them. */
   releaseAll(): void;
+  /**
+   * The connection's transport is gone but its runs are not (a reconnect).
+   * Each runner drops its dead PTY handle and keeps its run, so a chat still
+   * reports "running" and re-attaches on the next line instead of being
+   * disposed — which used to kill the agent on the server (see piTurn.ts).
+   */
+  rebind(): void;
   /** Forget everything and invalidate every build in flight. */
   dispose(): void;
 }
@@ -995,6 +1015,10 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     const entries = [...runners.values()];
     runners.clear();
     for (const entry of entries) entry.runner.dispose();
+  }
+
+  function rebind(): void {
+    for (const entry of runners.values()) entry.runner.rebind();
   }
 
   function dispose(): void {
@@ -1063,13 +1087,15 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     return runner;
   }
 
-  return { runnerFor, release, releaseAll, dispose };
+  return { runnerFor, release, releaseAll, rebind, dispose };
 }
 
 export interface TurnRunnerFacadeDeps {
   runnerFor(sessionFile: string): Promise<PiTurnRunner>;
   /** Dispose one conversation's runner once its turn has settled. */
   release(sessionFile: string): void;
+  /** Hand a transport change to every cached runner (see `TurnRunnerCache.rebind`). */
+  rebind(): void;
   dispose(): void;
   openPath(): string | null;
   startingNew(): boolean;
@@ -1228,6 +1254,7 @@ export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner
     beginSend,
     beginStartNew,
     queue,
+    rebind: () => deps.rebind(),
     isBusy: () => pending.size > 0,
     dispose: () => deps.dispose(),
   };
@@ -1261,12 +1288,22 @@ export const useSessionsStore = defineStore('sessions', () => {
         // is the runner's, not a single read's.
         readSession: readSessionOnActiveHost,
         newestSessionFile: newestSessionFileOnActiveHost,
+        closeSession: closeTurnSessionOnActiveHost,
         pollIntervalMs: clampTurnPollInterval(TURN_POLL_INTERVAL_MS),
       }),
   });
 
   function disposeTurnRunner(): void {
     turnRunners.dispose();
+  }
+
+  /**
+   * A reconnect replaced the transport, not the turn. Keep the runners and let
+   * each re-attach to the tmux session its agent is still running in — the
+   * alternative (disposing them) is what used to kill in-flight work.
+   */
+  function rebindTurnRunner(): void {
+    turnRunners.rebind();
   }
 
   // Serializes the build + turn before a runner exists: two taps in the same
@@ -1277,6 +1314,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     // The cache leaves a runner that is still running its turn alone, so a
     // chat switch never kills a background turn.
     release: (sessionFile) => turnRunners.release(sessionFile),
+    rebind: () => turnRunners.rebind(),
     dispose: () => disposeTurnRunner(),
     openPath: () => store.openPath,
     startingNew: () => store.startingNew,
@@ -1307,7 +1345,8 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   // Host switch (D8): the previous host's list and chat are stale the moment
   // the connection changes. The runner's PTY belongs to that connection too,
-  // so abandon it (D10) before clearing the state.
+  // so abandon it before clearing the state — the turn itself keeps running on
+  // the old host's tmux server (D44); only this side stops watching it.
   watch(
     () => connections.activeName,
     () => {
@@ -1381,5 +1420,6 @@ export const useSessionsStore = defineStore('sessions', () => {
     closeChat,
     send: store.send,
     disposeTurnRunner,
+    rebindTurnRunner,
   };
 });

@@ -180,13 +180,16 @@ watch(
   },
 );
 
-// A new generation means a reconnect: the turn PTY belonged to the old
-// transport, so abandon it rather than replay the turn (D10).
+// A new generation means a reconnect: the PTY that was watching a turn
+// belonged to the old transport, but the turn did not — Pi runs in a tmux
+// session on the host (see piTurn.ts), so the runner only re-attaches. This
+// used to dispose the runner, which killed in-flight work server-side on
+// every reconnect instead of letting it finish.
 watch(
   () => snapshot.value?.generationId,
   (next, previous) => {
     if (next === previous) return;
-    sessions.disposeTurnRunner();
+    sessions.rebindTurnRunner();
   },
 );
 const keyboardVisible = ref(false);

@@ -55,6 +55,7 @@ function runnerWith(
     beginSend: vi.fn(async (path: string) => begun(path, Promise.resolve({ ok: true as const, session }))),
     beginStartNew: vi.fn(async () => begun('/r/new.jsonl', Promise.resolve({ ok: true as const, session }))),
     queue: vi.fn(async () => ({ ok: true as const })),
+    rebind: vi.fn(),
     isBusy: vi.fn(() => busy),
     dispose: vi.fn(),
     ...rest,
@@ -585,6 +586,7 @@ describe('sessions store send', () => {
     const facade = createTurnRunnerFacade({
       runnerFor,
       release,
+      rebind: vi.fn(),
       dispose: vi.fn(),
       openPath: () => store.openPath,
       startingNew: () => store.startingNew,

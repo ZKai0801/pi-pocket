@@ -10,7 +10,11 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
-type StubRunner = PiTurnRunner & { dispose: ReturnType<typeof vi.fn>; isBusy: ReturnType<typeof vi.fn> };
+type StubRunner = PiTurnRunner & {
+  dispose: ReturnType<typeof vi.fn>;
+  isBusy: ReturnType<typeof vi.fn>;
+  rebind: ReturnType<typeof vi.fn>;
+};
 
 function stubRunner(): StubRunner {
   return {
@@ -19,6 +23,7 @@ function stubRunner(): StubRunner {
     beginSend: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     beginStartNew: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     queue: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
+    rebind: vi.fn(),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),
   };
@@ -73,6 +78,21 @@ describe('turn runner cache', () => {
     // A turn still running in the first chat must not lose its PTY.
     expect(built[0]?.dispose).not.toHaveBeenCalled();
     await expect(cache.runnerFor('/r/a.jsonl')).resolves.toBe(first);
+  });
+
+  it('rebinds every cached runner on a reconnect instead of disposing it', async () => {
+    const { cache, built } = cacheWith();
+
+    await cache.runnerFor('/r/a.jsonl');
+    await cache.runnerFor('/r/b.jsonl');
+    cache.rebind();
+
+    // A transport change is not a turn's end: each runner drops its dead
+    // handle and keeps its run (which is what makes a live turn survive).
+    for (const runner of built) {
+      expect(runner.rebind).toHaveBeenCalledTimes(1);
+      expect(runner.dispose).not.toHaveBeenCalled();
+    }
   });
 
   it('captures the claim before the command probe so a stale build cannot open another directory', async () => {

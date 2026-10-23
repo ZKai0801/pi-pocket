@@ -37,6 +37,7 @@ function fakeRunner(overrides: Partial<PiTurnRunner> = {}): PiTurnRunner {
     beginSend: vi.fn(async () => begunLater(Promise.resolve({ ok: true as const, session }), '/r/a.jsonl')),
     beginStartNew: vi.fn(async () => begunLater(Promise.resolve({ ok: true as const, session }))),
     queue: vi.fn(async () => ({ ok: true as const })),
+    rebind: vi.fn(),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),
     ...overrides,
@@ -58,6 +59,7 @@ function harness(
   const facade = createTurnRunnerFacade({
     runnerFor,
     release,
+    rebind: vi.fn(),
     dispose,
     openPath: () => openPath,
     startingNew: () => startingNew,
@@ -155,6 +157,7 @@ describe('turn runner facade', () => {
     const facade = createTurnRunnerFacade({
       runnerFor,
       release,
+      rebind: vi.fn(),
       dispose: vi.fn(),
       openPath: () => openPath,
       startingNew: () => false,
@@ -201,6 +204,7 @@ describe('turn runner facade', () => {
     const facade = createTurnRunnerFacade({
       runnerFor,
       release: vi.fn(),
+      rebind: vi.fn(),
       dispose: vi.fn(),
       openPath: () => '/r/a.jsonl',
       startingNew: () => false,

@@ -5,7 +5,7 @@ import {
   type PtyWriteAcknowledgement,
 } from '../session/composerDelivery';
 import type { TurnPtyGeometry, TurnPtyHandle } from '../session/turnPty';
-import { buildPiOpenCommand, toTurnLine } from './piTurn';
+import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, toTurnLine, turnSessionName } from './piTurn';
 import { createConsoleTracker, isPiReady } from './turnReadiness';
 import type { ParsedPiSession } from './types';
 
@@ -74,6 +74,12 @@ export interface PiTurnRunnerDeps {
   projectPath: string;
   readSession(path: string): Promise<ParsedPiSession>;
   newestSessionFile(projectPath: string): Promise<string | null>;
+  /**
+   * Destroy the conversation's server-side tmux session. Called only once a
+   * turn has actually been answered — never on disposal or on a deadline,
+   * where Pi may still be working and must be left alone.
+   */
+  closeSession?(sessionName: string): Promise<void>;
   sleep?(ms: number): Promise<void>;
   now?(): number;
   readyTimeoutMs?: number;
@@ -131,6 +137,13 @@ export interface PiTurnRunner {
    * `beginSend`, so the caller can never confuse the two.
    */
   queue(sessionFile: string, message: string, kind: TurnQueueKind): Promise<PiTurnQueueResult>;
+  /**
+   * The transport this runner's PTY was opened on is gone (a reconnect), but
+   * the turn is not: drop the dead handle and keep the run's state, so the
+   * chat still reports `running` and the next `queue` re-attaches to the
+   * server-side session Pi is still working in instead of refusing.
+   */
+  rebind(): void;
   isBusy(): boolean;
   dispose(): void;
 }
@@ -154,6 +167,12 @@ interface ActiveRun {
   sessionFile: string;
   target: number;
   deadline: number;
+  /**
+   * The tmux session this run started in. Read from the open, not recomputed:
+   * a draft is named by its project but adopts a real session file as soon as
+   * Pi writes one, so the two would disagree.
+   */
+  sessionName: string | null;
 }
 
 export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
@@ -172,6 +191,8 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   // `null` means the open PTY is the sessionless draft process; a string is
   // the session it was opened with. `startNew` may only reuse a draft.
   let openSessionFile: string | null = null;
+  // The tmux session behind the open PTY, as created/attached at open time.
+  let openName: string | null = null;
   let activeUnsubscribe: (() => void) | null = null;
   let wakeCurrentWait: (() => void) | null = null;
   let nextOperationId = 0;
@@ -270,11 +291,14 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     if (open) return { ok: true };
 
     let handle: TurnPtyHandle;
+    // Resolved once and kept: a draft's name is deliberately not recomputable,
+    // so the command and the teardown have to share this one value.
+    const sessionName = turnSessionName(sessionFile, projectPath);
     try {
       const command =
         sessionFile === null
-          ? buildPiOpenCommand(deps.piCommand, projectPath)
-          : buildPiOpenCommand(deps.piCommand, projectPath, sessionFile);
+          ? buildPiOpenCommand(deps.piCommand, projectPath, undefined, sessionName)
+          : buildPiOpenCommand(deps.piCommand, projectPath, sessionFile, sessionName);
       handle = await deps.openPty(command, { ...PTY_GEOMETRY });
     } catch (error) {
       return { ok: false, error: messageOf(error) };
@@ -305,6 +329,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     delivery.setTransportState('connected');
     open = { handle, tracker, delivery, ready: false };
     openSessionFile = sessionFile;
+    openName = sessionName;
     return { ok: true };
   }
 
@@ -315,6 +340,12 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     const deadline = now() + readyTimeoutMs;
     while (!state.ready) {
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
+      // A fresh Pi has to show its bracketed-paste handshake. A session this
+      // runner only re-attached to already has a mounted editor: tmux repaints
+      // the screen and never re-sends that handshake, so any output at all
+      // means the client is on the pane and the editor can take the line.
+      const text = state.tracker.text();
+      if (text.length > 0 && !text.includes(PI_TURN_CREATED_MARKER)) return { ok: true };
       const remaining = deadline - now();
       if (remaining <= 0) return { ok: false, error: READINESS_ERROR };
       await wait(Math.min(pollIntervalMs, remaining));
@@ -414,12 +445,22 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   function startCompletion(active: ActiveRun): Promise<PiTurnSendResult> {
     run = active;
     return (async (): Promise<PiTurnSendResult> => {
+      let answered = false;
       try {
-        return await pollForReplies(active);
+        const result = await pollForReplies(active);
+        answered = result.ok;
+        return result;
       } finally {
         unsubscribeActive();
         busy = false;
         if (run === active) run = null;
+        // Only a turn that was actually answered may be torn down. A deadline
+        // means Pi may still be working (the poll gave up, the agent did not),
+        // and a disposal means the connection went away mid-turn — in both
+        // cases the server-side session has to outlive this runner.
+        if (answered && active.sessionName !== null) {
+          void deps.closeSession?.(active.sessionName).catch(() => undefined);
+        }
       }
     })();
   }
@@ -472,7 +513,12 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       const deliveryFailure = await deliverLine(state, line);
       if (deliveryFailure !== null) return { ok: false, error: deliveryFailure };
 
-      const completed = startCompletion({ sessionFile, target: baseline + 1, deadline });
+      const completed = startCompletion({
+        sessionFile,
+        target: baseline + 1,
+        deadline,
+        sessionName: openName,
+      });
       handedOff = true;
       return { ok: true, sessionFile, completed };
     } finally {
@@ -534,7 +580,12 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
 
       // The new file exists; its first assistant turn is awaited on the same
       // deadline (a brand-new session has no assistant turns to beat).
-      const completed = startCompletion({ sessionFile: adopted.sessionFile, target: 1, deadline });
+      const completed = startCompletion({
+        sessionFile: adopted.sessionFile,
+        target: 1,
+        deadline,
+        sessionName: openName,
+      });
       handedOff = true;
       return { ok: true, sessionFile: adopted.sessionFile, completed };
     } finally {
@@ -559,17 +610,33 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   ): Promise<PiTurnQueueResult> {
     if (disposed) return { ok: false, error: DISPOSED_ERROR };
     const active = run;
-    const state = open;
-    if (
-      active === null ||
-      state === null ||
-      active.sessionFile !== sessionFile ||
-      openSessionFile !== sessionFile
-    ) {
+    // The run — not the PTY — is what makes a chat joinable. A reconnect drops
+    // the handle and keeps the run, so the line below re-attaches to the tmux
+    // session Pi is still working in instead of refusing.
+    if (active === null || active.sessionFile !== sessionFile) {
       return { ok: false, error: NOT_RUNNING_ERROR };
     }
     const line = toTurnLine(message);
     if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
+
+    let state = open;
+    if (state === null) {
+      const reopened = await ensureOpen(sessionFile, deps.projectPath);
+      if (!reopened.ok) return reopened;
+      state = open;
+      if (state === null) return { ok: false, error: DISPOSED_ERROR };
+      subscribe(state);
+      const ready = await waitForReady(state);
+      if (!ready.ok) return ready;
+      state = open;
+      if (state === null) return { ok: false, error: DISPOSED_ERROR };
+    }
+    // A draft is opened sessionless and only learns its file afterwards, so
+    // the open may legitimately have no session file; anything else has to be
+    // the same conversation the run belongs to.
+    if (openSessionFile !== null && openSessionFile !== sessionFile) {
+      return { ok: false, error: NOT_RUNNING_ERROR };
+    }
 
     // Count the reply *before* the write: the current turn's reply can land
     // between the two awaits, and a target that arrives late would let the poll
@@ -609,12 +676,38 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     return busy;
   }
 
+  /**
+   * The channel this runner was watching its turn through is dead (the phone
+   * reconnected); the turn itself is not. Drop the handle, keep the run: the
+   * chat keeps saying "running", `queue` re-attaches on demand, and the reply
+   * poll keeps reading the session file through the new transport (its reads
+   * go through the live seam, not through this handle).
+   */
+  function rebind(): void {
+    if (disposed) return;
+    const state = open;
+    open = null;
+    openSessionFile = null;
+    unsubscribeActive();
+    if (state) {
+      state.delivery.setTransportState('closed');
+      try {
+        state.handle.close();
+      } catch {
+        // The transport is already gone; the close is best-effort.
+      }
+    }
+    // `run`, `busy` and `openName` survive on purpose: they describe the turn
+    // on the server, not the channel that was watching it.
+  }
+
   function dispose(): void {
     if (disposed) return;
     disposed = true;
     const state = open;
     open = null;
     openSessionFile = null;
+    openName = null;
     run = null;
     unsubscribeActive();
     if (state) {
@@ -628,5 +721,5 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     wakeCurrentWait?.();
   }
 
-  return { send, startNew, beginSend, beginStartNew, queue, isBusy, dispose };
+  return { send, startNew, beginSend, beginStartNew, queue, rebind, isBusy, dispose };
 }
