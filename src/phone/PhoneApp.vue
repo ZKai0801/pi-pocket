@@ -139,6 +139,16 @@ const backNavigationOwner = createShellBackNavigation({
 /** The pushed view of the 连接 tab: `'editor'`, or `'keys'` stacked above it. */
 const connectionView = computed(() => backStack.current('connections'));
 
+/**
+ * Tapping a project in the 项目 tab selects it and lands on the 会话 tab: the
+ * shell owns the active tab, so the list asks for the move instead of owning
+ * tab state (spec §8.5). The sessions store's own selection watch loads the
+ * project's conversations, so the list is already filling in on arrival.
+ */
+function openProjectSessions(): void {
+  activeTab.value = 'sessions';
+}
+
 function setEditorOpen(open: boolean): void {
   if (open) backStack.push('connections', 'editor');
   // Closing the editor drops a key sheet stacked above it as well (R34).
@@ -843,7 +853,7 @@ onBeforeUnmount(() => {
         @update:editor-open="setEditorOpen"
         @update:keys-open="setKeysOpen"
       />
-      <ProjectsList v-show="activeTab === 'projects'" />
+      <ProjectsList v-show="activeTab === 'projects'" @open="openProjectSessions" />
       <SettingsTab v-show="activeTab === 'settings'" />
       <ChatScreen
         v-show="activeTab === 'sessions' && sessions.open !== null"

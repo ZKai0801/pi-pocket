@@ -30,6 +30,16 @@ describe('phone shell wiring', () => {
     expect(projectsListSource).toContain("connections.status === 'connected'");
   });
 
+  it('lands on the 会话 tab when a project is tapped', () => {
+    // The list owns no tab state: it selects the project and asks the shell
+    // to move, and the shell is the one holding `activeTab` (spec §8.5).
+    expect(projectsListSource).toContain("defineEmits<{ open: [path: string] }>()");
+    expect(projectsListSource).toContain('store.select(path);');
+    expect(projectsListSource).toContain("emit('open', path);");
+    expect(phoneAppSource).toContain('@open="openProjectSessions"');
+    expect(phoneAppSource).toContain("activeTab.value = 'sessions'");
+  });
+
   it('remembers the probed root and preloads the editor from it', () => {
     expect(projectsStoreSource).toContain('resolveAndRememberRoot(');
     expect(sessionsStoreSource).toContain('resolveAndRememberRoot(');

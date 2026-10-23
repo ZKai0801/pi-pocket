@@ -28,6 +28,25 @@ state. See [js-first-rewrite-foundation.md](js-first-rewrite-foundation.md),
 [js-first-rewrite-inventory.md](js-first-rewrite-inventory.md) and
 [design-system.md](design-system.md).
 
+### Local backups (0.6.0)
+
+Both 项目 and 会话 paint a local backup first and let the server's answer
+replace it, because both reads are chains of SSH round trips a phone cannot
+hide behind a spinner:
+
+- `src/pi/projectCache.ts` — the host's last confirmed project list, in the
+  WebView's localStorage (one small JSON record, keyed by host, 30-day TTL,
+  8-host cap). A discovery paints it, then walks the session root; a listing
+  that fails keeps the painted list and reports its error beside it
+  (`stale`/`refreshing` on the projects store) instead of showing an empty
+  error screen. Re-pointing a host's Pi directory drops its entry, since the
+  list belongs to the old root.
+- `src/pi/sessionCache.ts` — the parsed conversation, in IndexedDB, for the
+  same reason at a larger size (spec §8.6).
+
+Neither backup is ever a source of truth: every open and every discovery
+re-reads the host.
+
 ## 0.5.x history (`release/0.5.x`)
 
 **Everything below is 0.5.x history.** It describes the Kotlin `app2`

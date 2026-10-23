@@ -18,6 +18,13 @@
  * suppressed promise resolves only after that in-flight run completes, so a
  * caller (e.g. the host-switch watch) can re-discover instead of being
  * dropped.
+ *
+ * A discovery paints the host's last known list (the `cache` dep) before it
+ * touches the network, so a reconnect shows the projects at once and the
+ * fresh listing only has to correct them. `stale` says the list on screen is
+ * that backup, `refreshing` says the listing behind it is still in flight; a
+ * refresh that fails keeps the painted list and reports its error beside it
+ * rather than replacing a usable list with an empty error state.
  */
 import { computed, reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
@@ -25,6 +32,7 @@ import { PiRepository, type PiProject } from '../pi/piRepository';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { piLive, type PiDirectoryEntry } from '../session/piLive';
+import { projectsListCache } from '../pi/projectCache';
 import { useConnectionsStore } from './connections';
 
 export type ProjectsState = 'idle' | 'loading' | 'ready' | 'no-root' | 'error';
@@ -51,6 +59,18 @@ export interface ProjectsBrowseState {
   busy: boolean;
 }
 
+/**
+ * The host's remembered project list (see `projectCache`). Host resolution
+ * lives in the wrapper, like `added`: the store itself never learns a host.
+ */
+export interface ProjectsCacheDep {
+  /** The last confirmed list for the active host, or null. Never throws. */
+  load(): Promise<PiProject[] | null>;
+  save(projects: readonly PiProject[]): Promise<void>;
+  /** Drop the backup, e.g. after the session root was re-pointed. */
+  clear(): Promise<void>;
+}
+
 export interface ProjectsStoreState {
   projects: PiProject[];
   state: ProjectsState;
@@ -58,6 +78,10 @@ export interface ProjectsStoreState {
   query: string;
   /** The project the 会话 tab will list sessions for (spec §8.5). */
   selected: string | null;
+  /** `projects` is the local backup, not yet confirmed by a server listing. */
+  stale: boolean;
+  /** A server listing is in flight behind the list already on screen. */
+  refreshing: boolean;
   browse: ProjectsBrowseState;
 }
 
@@ -89,6 +113,8 @@ export interface ProjectsStoreDeps {
   setPiSessionsDir?(name: string, dir: string): void;
   added?: ProjectsAddedDep;
   browse?: ProjectsBrowseDep;
+  /** The host's remembered list, painted before the network is touched. */
+  cache?: ProjectsCacheDep;
 }
 
 function errorMessage(error: unknown): string {
@@ -115,6 +141,8 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
     error: null,
     query: '',
     selected: null,
+    stale: false,
+    refreshing: false,
     browse: { open: false, cwd: null, root: null, dirs: null, error: null, busy: false },
   });
 
@@ -157,6 +185,53 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
   // synchronously before the first `await`; released on every exit path.
   const suppressed: Array<() => void> = [];
 
+  /** Discovered first, added behind, de-duped by path (R9). */
+  function mergeAdded(fresh: readonly PiProject[], added: readonly PiProject[]): PiProject[] {
+    const seen = new Set(fresh.map((project) => project.path));
+    return [...fresh, ...added.filter((project) => !seen.has(project.path))];
+  }
+
+  // The backup is best-effort in every direction: an unreadable, unwritable or
+  // unavailable cache degrades to the plain network discovery it replaced.
+  async function saveCache(projects: readonly PiProject[]): Promise<void> {
+    if (!deps.cache) return;
+    try {
+      await deps.cache.save(projects);
+    } catch {
+      // A cache that cannot be written still leaves the live list standing.
+    }
+  }
+
+  async function clearCache(): Promise<void> {
+    if (!deps.cache) return;
+    try {
+      await deps.cache.clear();
+    } catch {
+      // A backup that cannot be dropped is still only ever a placeholder.
+    }
+  }
+
+  /**
+   * Paint the host's remembered list, if any. Resolves with whether something
+   * was painted: a hit shows the projects at once (`state: 'ready'`, `stale`),
+   * and the listing that follows corrects it instead of blanking it.
+   */
+  async function paintCache(added: readonly PiProject[]): Promise<boolean> {
+    if (!deps.cache) return false;
+    let cached: PiProject[] | null = null;
+    try {
+      cached = await deps.cache.load();
+    } catch {
+      cached = null;
+    }
+    if (cached === null || cached.length === 0) return false;
+    state.projects = mergeAdded(cached, added);
+    state.state = 'ready';
+    state.error = null;
+    state.stale = true;
+    return true;
+  }
+
   async function discover(): Promise<boolean> {
     if (discovering) {
       return new Promise<boolean>((resolve) => {
@@ -169,27 +244,50 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
       state.error = null;
 
       const added = await loadAdded();
-      const root = await deps.resolveRoot();
-      if (root === null) {
-        // No session root on this host (Review Focus 3): say so, and still
-        // list what the user added by hand.
-        state.projects = added;
-        state.state = 'no-root';
+      // The remembered list goes up before the root probe and the listing:
+      // that is the whole point of the backup — projects are on screen while
+      // the phone is still opening SSH channels.
+      const painted = await paintCache(added);
+      state.refreshing = true;
+      try {
+        const root = await deps.resolveRoot();
+        if (root === null) {
+          // No session root on this host (Review Focus 3): say so, and still
+          // list what the user added by hand. An authoritative absence beats
+          // the backup, so the painted list goes — and so does the backup
+          // itself, which would otherwise paint the same wrong list on every
+          // later discovery.
+          state.projects = added;
+          state.state = 'no-root';
+          state.stale = false;
+          void clearCache();
+          return true;
+        }
+        const discovered = await deps.listProjects(root);
+        state.projects = mergeAdded(discovered, added);
+        state.state = 'ready';
+        state.stale = false;
+        void saveCache(state.projects);
         return true;
+      } catch (error) {
+        const message = errorMessage(error);
+        if (painted) {
+          // A refresh that fails must not trade a usable list for an error
+          // screen: the backup stays, and the failure is reported beside it.
+          state.state = 'ready';
+          state.stale = true;
+          state.error = message;
+          return true;
+        }
+        // A failed discovery with nothing to fall back on is an error, never
+        // an empty list masquerading as "no projects" (Review Focus 4).
+        state.projects = [];
+        state.state = 'error';
+        state.error = message;
+        return true;
+      } finally {
+        state.refreshing = false;
       }
-      const discovered = await deps.listProjects(root);
-      const seen = new Set(discovered.map((project) => project.path));
-      // Discovered first, added behind, de-duped by path (R9).
-      state.projects = [...discovered, ...added.filter((project) => !seen.has(project.path))];
-      state.state = 'ready';
-      return true;
-    } catch (error) {
-      // A failed discovery is an error, never an empty list masquerading as
-      // "no projects" (Review Focus 4).
-      state.projects = [];
-      state.state = 'error';
-      state.error = errorMessage(error);
-      return true;
     } finally {
       discovering = false;
       for (const resolve of suppressed.splice(0)) resolve();
@@ -207,6 +305,9 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
   async function savePiSessionsDir(name: string, dir: string): Promise<boolean> {
     if (!deps.setPiSessionsDir) return false;
     deps.setPiSessionsDir(name, dir);
+    // The remembered list belongs to the old root, so it is not a usable
+    // placeholder for the new one: drop it before the re-probe.
+    await clearCache();
     return discover();
   }
 
@@ -289,6 +390,10 @@ export function createProjectsStore(deps: ProjectsStoreDeps): ProjectsStore {
     set query(value: string) { state.query = value; },
     get selected() { return state.selected; },
     set selected(value: string | null) { state.selected = value; },
+    get stale() { return state.stale; },
+    set stale(value: boolean) { state.stale = value; },
+    get refreshing() { return state.refreshing; },
+    set refreshing(value: boolean) { state.refreshing = value; },
     get browse() { return state.browse; },
     set browse(value: ProjectsBrowseState) { state.browse = value; },
     get filtered() { return filteredProjects(); },
@@ -366,6 +471,14 @@ function writeAddedRecord(record: AddedProjectsRecord): void {
 }
 
 export const useProjectsStore = defineStore('projects', () => {
+  const connections = useConnectionsStore();
+
+  // The remembered list is per host (D8): a host's projects must never be
+  // painted on another host's reconnect.
+  function activeHostName(): string | null {
+    return connections.activeName;
+  }
+
   const store = createProjectsStore({
     // Bound lazily at call time through the shell's live seam (R9): the
     // remote $HOME and env only the live connection can answer, plus the
@@ -402,6 +515,13 @@ export const useProjectsStore = defineStore('projects', () => {
       home: async () => (await piLive().remoteContext()).home,
       listDirs: (path) => piLive().listDirectories(path),
     },
+    cache: {
+      // Read through the module-level accessor, not a captured host: the
+      // active host can change between the paint and its write.
+      load: () => projectsListCache().load(activeHostName()),
+      save: (projects) => projectsListCache().save(activeHostName(), projects),
+      clear: () => projectsListCache().clear(activeHostName()),
+    },
   });
 
   // The added record and the discovery both key off the active host: the
@@ -411,7 +531,6 @@ export const useProjectsStore = defineStore('projects', () => {
   // re-discover (the previous host's run still settling) must not be
   // dropped: retry once, only while the host is still the one that
   // triggered the watch.
-  const connections = useConnectionsStore();
   watch(
     () => connections.activeName,
     (name) => {
@@ -430,6 +549,8 @@ export const useProjectsStore = defineStore('projects', () => {
     error: toRef(store, 'error'),
     query: toRef(store, 'query'),
     selected: toRef(store, 'selected'),
+    stale: toRef(store, 'stale'),
+    refreshing: toRef(store, 'refreshing'),
     browse: toRef(store, 'browse'),
     filtered: computed(() => store.filtered),
     discover: store.discover,
