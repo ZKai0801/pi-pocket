@@ -35,6 +35,19 @@ export function resolveSessionRootCommand(root: string): string {
 }
 
 /**
+ * True when `root` has pi's session-file shape: pi groups sessions one encoded
+ * `--cwd--` directory below the root, so a real sessions root holds `*.jsonl`
+ * at exactly depth 2. A directory that merely exists (the agent tree itself,
+ * `~/.pi`) passes {@link resolveSessionRootCommand} and then lists zero
+ * sessions — this is the guard against a session-dir override that names a
+ * real-but-wrong directory.
+ */
+export function sessionsRootHasFilesCommand(root: string): string {
+  const quoted = quoteShell(root);
+  return `find ${quoted} -mindepth 2 -maxdepth 2 -name '*.jsonl' -print -quit 2>/dev/null | grep -q . && echo yes`;
+}
+
+/**
  * Where node keeps its bin directory when PATH does not have it. The pi
  * directory is derived from the resolved command and comes first: an
  * npm-style install puts `pi` and `node` in the same prefix's bin, so it is
@@ -115,26 +128,45 @@ export const PI_SLASH_PROBE_MARKER = '# pi-slash-probe';
  * extension/package trees, prompt templates, and skills, as
  * `kind<TAB>name<TAB>source` lines.
  *
- * pi exposes no command-list RPC, so this reads the resource directories the
- * pi docs name (`$HOME/.pi/agent/{extensions,packages,prompts,skills}` and the
- * project's `.pi/...`). `registerCommand` takes a string literal at every real
- * call site, which is what makes the source scan good enough; a call with a
- * non-literal name yields a stray token the caller drops as an unknown name.
- * `node_modules` is pruned so an installed package cannot turn this into a
- * multi-second walk.
+ * pi exposes no command-list RPC, so this reads the resource directories pi
+ * actually uses: the documented `$HOME/.pi/agent` tree and the project's
+ * `.pi/...`, plus — observed on pi 1.4 — every package under
+ * `<agent>/npm/node_modules`, where `pi install <npm:...>` puts the extension
+ * sources. Each package is scanned as its own grep root, so `node_modules`
+ * pruning still keeps a package's nested dependencies out of the walk.
+ * `agentRoots` prepends directories this app discovered the host actually
+ * uses (see `piAgentDir`: `PI_CODING_AGENT_DIR` in the exec or login-shell
+ * env, or the parent of the resolved session root) — a relocated agent tree
+ * otherwise answers "no commands" with exit 0, the exact silence that hides
+ * extension commands a working pi has.
+ * `registerCommand` takes a string literal at every real call site, which is
+ * what makes the source scan good enough; a call with a non-literal name
+ * yields a stray token the caller drops as an unknown name. `node_modules` is
+ * pruned so an installed package cannot turn this into a multi-second walk.
  */
-export function piSlashProbeCommand(projectPath: string): string {
+export function piSlashProbeCommand(projectPath: string, agentRoots: readonly string[] = []): string {
   const project = quoteShell(projectPath);
+  const roots = [...agentRoots.map((root) => quoteShell(root)), '"$HOME/.pi/agent"'].join(' ');
   return [
     PI_SLASH_PROBE_MARKER,
-    `for pi_ps_root in "$HOME/.pi/agent" ${project}/.pi; do`,
-    '  for pi_ps_dir in "$pi_ps_root/extensions" "$pi_ps_root/packages"; do',
+    `for pi_ps_root in ${roots} ${project}/.pi; do`,
+    // `npm/node_modules/@*/*` widens the scoped names and `*` the bare ones;
+    // an unmatched glob stays literal and the `-d` test drops it.
+    '  for pi_ps_dir in "$pi_ps_root/extensions" "$pi_ps_root/packages" "$pi_ps_root"/npm/node_modules/* "$pi_ps_root"/npm/node_modules/@*/*; do',
     '    [ -d "$pi_ps_dir" ] || continue',
-    // Every source file is scanned (no `--include` list) so this literal
-    // carries no file-extension token the release-copy guard reads as prose;
+    // Two extractions, both over the same tree. The first demands a quoted
+    // literal — an unquoted argument (a parameter name in a `.d.ts`, a bare
+    // identifier) is not a command name. The second resolves the indirection
+    // pi packages do use: `registerCommand(SESSION_NIX_COMMAND, ...)` with
+    // `const SESSION_NIX_COMMAND = "session-nix"` elsewhere in the package;
+    // the last `.`-segment covers `spec.name`-style references. A reference
+    // with no resolvable assignment simply stays silent.
+    // Every source file is scanned (no `--include` list) so these literals
+    // carry no file-extension token the release-copy guard reads as prose;
     // `-i` plus the `[A-Za-z]*[(]` strip keep the camelCase API name out of
     // the command for the same reason. The match itself stays exact.
-    "    grep -r -h -o -E -i --exclude-dir=node_modules --exclude-dir=.git -I 'registercommand[(][[:space:]]*[^[:space:],)]+' \"$pi_ps_dir\" 2>/dev/null | sed -E 's/^[A-Za-z]*[(]//; s/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9:_.-]+$//' | sort -u | while IFS= read -r pi_ps_name; do [ -n \"$pi_ps_name\" ] && printf 'cmd\\t%s\\t%s\\n' \"$pi_ps_name\" \"$pi_ps_dir\"; done",
+    "    grep -r -h -o -E -i --exclude-dir=node_modules --exclude-dir=.git -I \"registercommand[(][[:space:]]*[\\\"'][^[:space:],)\\\"']+[\\\"']\" \"$pi_ps_dir\" 2>/dev/null | sed -E 's/^[A-Za-z]*[(]//; s/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9:_.-]+$//' | sort -u | while IFS= read -r pi_ps_name; do [ -n \"$pi_ps_name\" ] && printf 'cmd\\t%s\\t%s\\n' \"$pi_ps_name\" \"$pi_ps_dir\"; done",
+    "    grep -r -h -o -E -i --exclude-dir=node_modules --exclude-dir=.git -I \"registercommand[(][[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[),]\" \"$pi_ps_dir\" 2>/dev/null | sed -E 's/^[A-Za-z]*[(]//; s/^[[:space:]]*//; s/[),]$//; s/.*[.]//' | sort -u | while IFS= read -r pi_ps_ref; do case \"$pi_ps_ref\" in ''|*[!A-Za-z0-9_]*) continue;; esac; pi_ps_val=$(grep -r -h -o -E --exclude-dir=node_modules --exclude-dir=.git -I \"(const|let|var)[[:space:]]+$pi_ps_ref[[:space:]]*=[[:space:]]*[\\\"'][a-z0-9][a-z0-9:_.-]*[\\\"']\" \"$pi_ps_dir\" 2>/dev/null | head -n 1 | sed -E 's/.*=[[:space:]]*//; s/[^a-z0-9:._-]//g'); [ -n \"$pi_ps_val\" ] && printf 'cmd\\t%s\\t%s\\n' \"$pi_ps_val\" \"$pi_ps_dir\"; done",
     '  done',
     '  for pi_ps_dir in "$pi_ps_root/prompts" "$pi_ps_root/skills"; do',
     '    [ -d "$pi_ps_dir" ] || continue',

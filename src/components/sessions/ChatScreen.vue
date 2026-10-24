@@ -13,6 +13,7 @@ import { useSessionsStore } from '../../stores/sessions';
 import { useConnectionsStore } from '../../stores/connections';
 import type { PiModelSwitch, PiTurn } from '../../pi/types';
 import { discoverPiCommands, type PiSlashCommand } from '../../pi/piSlashCommands';
+import { agentRootsForConnection } from '../../pi/piAgentDir';
 import {
   parsePiModelList,
   piModelListOutcome,
@@ -43,10 +44,22 @@ const emit = defineEmits<{
 }>();
 
 // The sheet lists pi's own vocabulary, so the host answers once per project
-// (built-ins are always shown, whether or not the probe answers).
+// (built-ins are always shown, whether or not the probe answers). The scan
+// roots come from the host's own answer about where its agent tree lives —
+// discovered once on the host's first connect and cached per host (the
+// connect flow warms it; this is the same cache), so a relocated layout does
+// not silently hide its extension commands.
 const commands = createChatCommandCatalog({
   projectPath: () => store.open?.cwd ?? null,
-  discover: (project) => discoverPiCommands(piLive().transport(), project),
+  discover: async (project) => {
+    const name = connections.activeName;
+    const entry = name === null ? undefined : connections.hosts.find((host) => host.name === name);
+    const { roots } = await agentRootsForConnection(piLive().transport(), {
+      name,
+      piSessionsDir: entry?.piSessionsDir,
+    });
+    return discoverPiCommands(piLive().transport(), project, roots);
+  },
 });
 
 function loadCommands(): void {

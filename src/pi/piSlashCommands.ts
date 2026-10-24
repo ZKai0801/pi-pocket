@@ -249,15 +249,22 @@ export interface PiCommandDiscovery {
 
 /**
  * Ask the live host which extension commands, templates and skills it has.
+ * `agentRoots` are the extra agent directories this app resolved for the host
+ * (`piAgentDir.agentRootsForHost`); the probe still scans `~/.pi/agent` and
+ * the project's `.pi` on its own, so an empty list is yesterday's behaviour.
  * Never throws: the caller merges whatever comes back with the built-ins, and
  * `error` only drives the sheet's “built-ins only” notice.
  */
 export async function discoverPiCommands(
   transport: PiTransport,
   projectPath: string,
+  agentRoots: readonly string[] = [],
 ): Promise<PiCommandDiscovery> {
   try {
-    const result = await transport.exec(piSlashProbeCommand(projectPath), PROBE_TIMEOUT_MS);
+    const result = await transport.exec(
+      piSlashProbeCommand(projectPath, agentRoots),
+      PROBE_TIMEOUT_MS,
+    );
     const commands = parsePiSlashProbe(result.stdout);
     if (result.exitCode !== 0 && commands.length === 0) {
       const detail = result.stderr.trim();

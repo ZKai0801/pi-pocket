@@ -20,6 +20,8 @@ import type { AndroidHostStore, HostAuth, SavedHost } from '../platform/android/
 import type { RememberedSecretKind, RememberedSecrets } from '../native/rememberedSecrets';
 import { buildSshCredential } from '../credentials/buildSshCredential';
 import { connectionPort, type ConnectionPort } from '../session/connectionPort';
+import { agentRootsForConnection } from '../pi/piAgentDir';
+import { piLive } from '../session/piLive';
 import { t } from '../i18n';
 
 /** The exact method surface the store needs from the Android host source. */
@@ -142,6 +144,22 @@ function withoutSecretIds(host: SavedHost): SavedHost {
   if (host.auth?.kind !== 'key') return host;
   const auth: HostAuth = { kind: 'key', keyHandleId: host.auth.keyHandleId };
   return { ...host, auth };
+}
+
+/**
+ * Warm a freshly connected host's pi agent roots (see `piAgentDir`): once per
+ * host on first connect, a durable-cache read afterwards. Fire-and-forget —
+ * a discovery that is slow (it reads a login shell) or fails must never delay
+ * or fail the connect; the command sheet retries on demand either way.
+ */
+function warmAgentRoots(host: { name: string; piSessionsDir?: string | null }): void {
+  void (async () => {
+    try {
+      await agentRootsForConnection(piLive().transport(), host);
+    } catch {
+      // No live seam is installed yet (or it went away with the connection).
+    }
+  })();
 }
 
 export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsStore {
@@ -466,6 +484,12 @@ export function createConnectionsStore(deps: ConnectionsStoreDeps): ConnectionsS
 
       state.activeName = host.name;
       state.status = 'connected';
+      // Where this host's pi agent tree lives, warmed on connect so the
+      // command sheet never pays for it. The first connect runs the probe
+      // once; every later connect is a pure durable-cache read, and the warm
+      // is fire-and-forget because a slow (login-shell) or failed discovery
+      // must never delay or fail the connect itself.
+      warmAgentRoots(host);
     } finally {
       inFlight = false;
     }

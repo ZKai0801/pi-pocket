@@ -268,6 +268,9 @@ export class MockHost {
   exec(command: string): MockExecResult {
     const inner = unwrapCommand(command);
     if (inner.startsWith('# pi-slash-probe')) return { exitCode: 0, stdout: `${PI_SLASH_PROBE_OUTPUT}\n`, stderr: '' };
+    // The agent-dir probe's empty answer: the fake box uses the default
+    // `~/.pi/agent` layout, so discovery finds nothing extra (see piAgentDir).
+    if (inner.startsWith('# pi-agent-dir-probe')) return { exitCode: 0, stdout: 'env=\nlogin=\n', stderr: '' };
     if (inner.includes('--list-models')) return { exitCode: 0, stdout: `${PI_MODEL_LIST_OUTPUT}\n`, stderr: '' };
     if (inner.startsWith('echo "<<<PS_SS_TLN>>>"')) return { exitCode: 0, stdout: listenerScan(), stderr: '' };
     if (inner.startsWith('for pid in ')) {

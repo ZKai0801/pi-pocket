@@ -137,6 +137,23 @@ describe('piSlashProbeCommand', () => {
     expect(command).toContain('$HOME/.pi/agent');
     expect(command.endsWith('true')).toBe(true);
   });
+
+  it('scans discovered agent roots before the default one', () => {
+    const command = piSlashProbeCommand('/home/dev/app', [
+      '/home/kai/projects/.pi-agent',
+      "/home/kai/agent's tree",
+    ]);
+    expect(command).toContain(
+      `for pi_ps_root in '/home/kai/projects/.pi-agent' '/home/kai/agent'\\''s tree' "$HOME/.pi/agent" '/home/dev/app'/.pi; do`,
+    );
+  });
+
+  it('scans the npm extension tree pi install uses, package by package', () => {
+    const command = piSlashProbeCommand('/home/dev/app');
+    expect(command).toContain(
+      'for pi_ps_dir in "$pi_ps_root/extensions" "$pi_ps_root/packages" "$pi_ps_root"/npm/node_modules/* "$pi_ps_root"/npm/node_modules/@*/*; do',
+    );
+  });
 });
 
 describe('discoverPiCommands', () => {
@@ -146,6 +163,20 @@ describe('discoverPiCommands', () => {
       '/home/dev/app',
     );
     expect(result.error).toBeNull();
+    expect(result.commands.map((command) => command.command)).toEqual(['/nix']);
+  });
+
+  it('scans the agent roots it is given', async () => {
+    const seen: string[] = [];
+    const recording: PiTransport = {
+      exec: async (command) => {
+        seen.push(command);
+        return { stdout: 'cmd\tnix\t/home/kai/projects/.pi-agent/extensions\n', stderr: '', exitCode: 0 };
+      },
+      sftpRead: async () => '',
+    };
+    const result = await discoverPiCommands(recording, '/home/dev/app', ['/home/kai/projects/.pi-agent']);
+    expect(seen[0]).toContain(`'/home/kai/projects/.pi-agent' "$HOME/.pi/agent"`);
     expect(result.commands.map((command) => command.command)).toEqual(['/nix']);
   });
 
