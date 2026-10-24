@@ -392,7 +392,9 @@ describe('mobile SSH key setup (#3021)', () => {
     return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr, timedOut: false };
   }
 
-  it('creates ~/.ssh/authorized_keys with private permissions and never duplicates the key', () => {
+  // POSIX modes (0600/0700) are unreadable from Node on NTFS, and MSYS chmod
+  // does not write ACLs — the assertion only means something on a POSIX host.
+  it.skipIf(process.platform === 'win32')('creates ~/.ssh/authorized_keys with private permissions and never duplicates the key', () => {
     const home = freshHome();
     const command = buildAuthorizedKeyInstallCommand(ED25519_LINE);
     expect(parseAuthorizedKeyInstallOutput(runRemote(command, home))).toBe('installed');
