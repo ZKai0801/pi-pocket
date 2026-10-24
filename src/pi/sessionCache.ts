@@ -18,7 +18,7 @@
 import type { ParsedPiSession } from './types';
 
 /** Bumped when the stored shape changes; older entries are discarded. */
-export const SESSION_CACHE_SCHEMA = 1;
+export const SESSION_CACHE_SCHEMA = 3;
 
 export interface CachedPiSession {
   /** `sessionCacheKey(host, path)` — the store's keyPath. */

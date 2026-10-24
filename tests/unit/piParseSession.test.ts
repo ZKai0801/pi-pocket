@@ -47,6 +47,8 @@ describe('parsePiSession', () => {
       cwd: null,
       name: null,
       turns: [],
+      modelSwitches: [],
+      model: null,
       settled: false,
     });
   });
@@ -133,5 +135,106 @@ describe('parsePiSession', () => {
         [header, multiUser, roundTripText1, roundTripTool, roundTripResult, finalAssistant].join('\n'),
       );
       expect(finished.settled).toBe(true);
+  });
+
+  // ---- model_change -----------------------------------------------------
+  //
+  // Pi appends a `model_change` entry for every `/model`, so the divider a
+  // chat draws between its turns comes from the file — including switches
+  // made in a terminal this app never sees.
+
+  const modelChange = '{"type":"model_change","id":"m1","parentId":"a2","timestamp":"2026-10-18T01:53:00.000Z","provider":"openai","modelId":"gpt-5"}';
+  const secondChange = '{"type":"model_change","id":"m2","parentId":"u2","timestamp":"2026-10-18T01:54:00.000Z","provider":"anthropic","modelId":"claude-opus-4-5"}';
+  const thirdChange = '{"type":"model_change","id":"m3","parentId":"u3","timestamp":"2026-10-18T01:55:00.000Z","provider":"google","modelId":"gemini-3-pro"}';
+  const user2 = '{"type":"message","id":"u2","parentId":"m1","timestamp":"2026-10-18T01:53:30.000Z","message":{"role":"user","content":[{"type":"text","text":"and now?"}],"timestamp":1792288410000}}';
+  const assistantWithModel = '{"type":"message","id":"am","parentId":"u1","timestamp":"2026-10-18T01:52:40.896Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-4-5","content":[{"type":"text","text":"ninfer is busy."}],"timestamp":1792288356896}}';
+
+  it('records a model_change as a switch between the turns it belongs between', () => {
+    const parsed = parsePiSession([header, user, modelChange, user2].join('\n'));
+
+    expect(parsed.turns.map((turn) => turn.text)).toEqual(['look at ninfer', 'and now?']);
+    expect(parsed.modelSwitches).toEqual([
+      {
+        from: null,
+        to: 'openai/gpt-5',
+        timestampMs: Date.parse('2026-10-18T01:53:00.000Z'),
+        afterTurns: 1,
+      },
+    ]);
+  });
+
+  it('carries the previous switch into the next one as its "from"', () => {
+    const parsed = parsePiSession([header, user, modelChange, user2, secondChange].join('\n'));
+
+    expect(parsed.modelSwitches?.map((item) => [item.from, item.to])).toEqual([
+      [null, 'openai/gpt-5'],
+      ['openai/gpt-5', 'anthropic/claude-opus-4-5'],
+    ]);
+  });
+
+  it('takes the first switch\'s "from" from the model on an earlier assistant message', () => {
+    const parsed = parsePiSession([header, user, assistantWithModel, modelChange, user2].join('\n'));
+
+    expect(parsed.modelSwitches).toEqual([
+      {
+        from: 'anthropic/claude-opus-4-5',
+        to: 'openai/gpt-5',
+        timestampMs: Date.parse('2026-10-18T01:53:00.000Z'),
+        afterTurns: 2,
+      },
+    ]);
+  });
+
+  it('places a switch after the assistant turn the file had already produced', () => {
+    // The switch sits between the assistant answer and the next user message;
+    // the assistant turn only becomes a turn at the next user entry, so the
+    // divider's position is the count the file held AFTER that turn stood.
+    const parsed = parsePiSession([header, user, assistantText, modelChange, user2].join('\n'));
+
+    expect(parsed.turns.map((turn) => turn.role)).toEqual(['user', 'assistant', 'user']);
+    expect(parsed.modelSwitches?.[0]?.afterTurns).toBe(2);
+  });
+
+  it('ignores a model_change that names no model', () => {
+    const empty = '{"type":"model_change","id":"m9","parentId":"a2","timestamp":"2026-10-18T01:53:00.000Z"}';
+    const parsed = parsePiSession([header, user, empty, user2].join('\n'));
+
+    expect(parsed.turns.map((turn) => turn.text)).toEqual(['look at ninfer', 'and now?']);
+    expect(parsed.modelSwitches).toEqual([]);
+  });
+
+  it('does not count a switch as a turn or unsettle the run', () => {
+    const parsed = parsePiSession([header, user, assistantText, modelChange].join('\n'));
+
+    expect(parsed.turns).toHaveLength(2);
+    expect(parsed.settled).toBe(true);
+    expect(parsed.modelSwitches).toHaveLength(1);
+  });
+
+  // ---- model in effect ---------------------------------------------------
+  //
+  // The header names the model answering, which is the one the walk ends on:
+  // the last switch's target, or the model the session's first assistant
+  // message named when the file records no switch.
+
+  it('names the model the first assistant message was produced by', () => {
+    const parsed = parsePiSession([header, user, assistantWithModel].join('\n'));
+
+    expect(parsed.model).toBe('anthropic/claude-opus-4-5');
+  });
+
+  it('ends on the last switch\'s target, not the model the session began with', () => {
+    const user3 = '{"type":"message","id":"u3","parentId":"m2","timestamp":"2026-10-18T01:54:30.000Z","message":{"role":"user","content":[{"type":"text","text":"again?"}],"timestamp":1792288470000}}';
+    const parsed = parsePiSession(
+      [header, user, assistantWithModel, modelChange, user2, secondChange, user3, thirdChange].join('\n'),
+    );
+
+    expect(parsed.model).toBe('google/gemini-3-pro');
+  });
+
+  it('leaves the model null when the file never says which one is in effect', () => {
+    const parsed = parsePiSession([header, user, assistantText].join('\n'));
+
+    expect(parsed.model).toBeNull();
   });
 });

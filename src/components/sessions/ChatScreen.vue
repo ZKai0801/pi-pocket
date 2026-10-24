@@ -11,7 +11,7 @@ import AppIcon from '@ui/components/AppIcon.vue';
 import { attachmentScopeKey } from '@pocketshell/core/shared/composerAttachments';
 import { useSessionsStore } from '../../stores/sessions';
 import { useConnectionsStore } from '../../stores/connections';
-import type { PiTurn } from '../../pi/types';
+import type { PiModelSwitch, PiTurn } from '../../pi/types';
 import { discoverPiCommands, type PiSlashCommand } from '../../pi/piSlashCommands';
 import {
   parsePiModelList,
@@ -142,6 +142,18 @@ const title = computed(() => {
   return id ? id : t('chat.title');
 });
 
+/**
+ * The model in effect for this chat, as the header's small line: the file's
+ * own record (its last `model_change`, or the model an assistant message
+ * named), or — for the moment before a read confirms it — the last switch
+ * this chat noted. Null when the file never said.
+ */
+const currentModel = computed(() => {
+  const notes = store.modelNotes;
+  const last = notes.length > 0 ? notes[notes.length - 1] : null;
+  return last !== null ? last.to : store.open?.model ?? null;
+});
+
 /** The chat's own project: the folder whose terminal the header opens. */
 const terminalPath = computed(() => store.lastProject?.path ?? null);
 
@@ -164,9 +176,21 @@ function openTerminal(): void {
 
 interface ChatRow {
   key: string;
-  kind: 'separator' | 'bubble';
+  kind: 'separator' | 'bubble' | 'model';
   time?: string;
   turn?: PiTurn;
+  /** A model row's sentence, already in the active language. */
+  text?: string;
+}
+
+/**
+ * The divider a model switch leaves in the transcript. A session's FIRST
+ * switch — the one appended before any turn, which is the model the session
+ * opened with rather than a change mid-conversation — draws no divider; the
+ * header's model name says which model is in effect instead.
+ */
+function isOpeningSwitch(item: PiModelSwitch): boolean {
+  return item.afterTurns === 0;
 }
 
 // A separator appears before the first timed turn, on a day change, and after
@@ -190,7 +214,23 @@ function formatTime(ms: number): string {
 
 const rows = computed<ChatRow[]>(() => {
   const turns = store.open?.turns ?? [];
+  // Pi appends a `model_change` entry per switch, so the dividers are the
+  // file's own record — switches made in a terminal show up here too.
+  const switches = (store.open?.modelSwitches ?? []).filter((item) => !isOpeningSwitch(item));
+  // A switch belongs after the turn it was appended behind: bucket them by
+  // that position so the walk below stays one pass over the turns.
+  const byPosition = new Map<number, PiModelSwitch[]>();
+  for (const item of switches) {
+    const bucket = byPosition.get(item.afterTurns);
+    if (bucket === undefined) byPosition.set(item.afterTurns, [item]);
+    else bucket.push(item);
+  }
   const out: ChatRow[] = [];
+  const pushSwitches = (position: number, keyPrefix: string): void => {
+    for (const item of byPosition.get(position) ?? []) {
+      out.push({ key: `${keyPrefix}-${out.length}`, kind: 'model', text: t('chat.modelSwitchedTo', { to: item.to }) });
+    }
+  };
   let lastDayKey: string | null = null;
   let lastMs = 0;
   turns.forEach((turn, index) => {
@@ -207,6 +247,7 @@ const rows = computed<ChatRow[]>(() => {
       }
     }
     out.push({ key: `turn-${index}`, kind: 'bubble', turn });
+    pushSwitches(index + 1, `model-${index}`);
   });
   return out;
 });
@@ -257,6 +298,18 @@ watch(
 // file has it, so the transcript has to follow that too.
 watch(
   () => store.pending.length,
+  () => void scrollToLatest(),
+);
+
+// A model switch is new content at the bottom of the transcript too — whether
+// the file just recorded it or a draft chat noted it — and it adds no turn,
+// so the length watch above would not fire for it.
+watch(
+  () => store.open?.modelSwitches?.length ?? 0,
+  () => void scrollToLatest(),
+);
+watch(
+  () => store.modelNotes.length,
   () => void scrollToLatest(),
 );
 
@@ -312,7 +365,12 @@ function goBack(): void {
       <button type="button" class="chat__back" :aria-label="t('chat.backAria')" @click="goBack">
         <AppIcon name="arrow-left" />
       </button>
-      <h1 class="chat__title">{{ title }}</h1>
+      <div class="chat__heading">
+        <h1 class="chat__title">{{ title }}</h1>
+        <!-- The model in effect, when the file (or a just-sent switch) says
+             which one that is: small, under the name, never in its way. -->
+        <p v-if="currentModel !== null" class="chat__model-name" data-testid="chat-model-name">{{ currentModel }}</p>
+      </div>
       <button
         type="button"
         class="chat__terminal"
@@ -362,7 +420,22 @@ function goBack(): void {
           <template v-for="row in rows" :key="row.key">
             <p v-if="row.kind === 'separator' && row.time !== undefined" class="chat__time">{{ row.time }}</p>
             <ChatBubble v-else-if="row.kind === 'bubble' && row.turn !== undefined" :role="row.turn.role" :text="row.turn.text" />
+            <p v-else-if="row.kind === 'model' && row.text !== undefined" class="chat__model" data-testid="chat-model-switch">
+              {{ row.text }}
+            </p>
           </template>
+          <!-- A switch the session file has not recorded yet: the command
+               was accepted moments ago and pi appends its `model_change`
+               entry after the write this store already saw. The note stands
+               until a read of the file overtakes it. -->
+          <p
+            v-for="note in store.modelNotes"
+            :key="note.id"
+            class="chat__model"
+            data-testid="chat-model-switch"
+          >
+            {{ t('chat.modelSwitchedTo', { to: note.to }) }}
+          </p>
           <!-- Lines typed into the running turn: pi writes them to the file only
                when it delivers them, so they wait here as ghosts until then. -->
           <div v-for="item in store.pending" :key="item.id" class="chat__pending">
@@ -461,13 +534,30 @@ function goBack(): void {
   opacity: var(--disabled-opacity);
 }
 
+/* The title and the model name stack in the header's middle column, which is
+   the only part of the bar that may shrink. */
+.chat__heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .chat__title {
   overflow: hidden;
-  flex: 1 1 auto;
   margin: 0;
   color: var(--fg);
   font-size: var(--fs-400);
   font-weight: var(--fw-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The model in effect: quiet small print under the name, so a reader can see
+   which model is answering without the header growing to say it. */
+.chat__model-name {
+  overflow: hidden;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-200);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -603,6 +693,19 @@ function goBack(): void {
   color: var(--fg-muted);
   font-size: var(--fs-200);
   text-align: center;
+}
+
+/* The model-switch divider: the same quiet centered line as a time separator,
+   so it reads as the same family of transcript markers. The `--- … ---` in
+   the copy is what makes it a break rather than a timestamp — everything
+   after it was answered by a different model. */
+.chat__model {
+  margin: var(--sp-2) 0 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-200);
+  line-height: 1.45;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 /* Not yet on the server: the bubble is the user's, but dimmed, so a queued

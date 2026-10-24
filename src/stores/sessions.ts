@@ -81,6 +81,26 @@ export interface PendingTurn {
   afterUserTurns: number;
 }
 
+/**
+ * A model switch this chat recorded itself. The session file is the authority
+ * on switches, but it only has one once pi has appended the `model_change`
+ * entry — after the PTY write this store already saw acknowledged. The note
+ * stands in for that record from the moment the command settles: the divider
+ * and the header's model name are on screen with no read in between. Every
+ * painted session then drops the notes it has overtaken.
+ */
+export interface ModelSwitchNote {
+  id: string;
+  /** The model the switch selected, as the user gave it. */
+  to: string;
+  /**
+   * How many switches the session file held when this note was taken. A parse
+   * that records more than this has the switch itself (or a newer one): the
+   * note has been overtaken and is dropped.
+   */
+  baseline: number;
+}
+
 export interface SessionsStoreState {
   sessions: PiSessionMeta[];
   /** The session open in the chat, or null while the list is showing. */
@@ -118,6 +138,12 @@ export interface SessionsStoreState {
    * turns and reconciled away as the file catches up.
    */
   pending: PendingTurn[];
+  /**
+   * Dividers for model switches the session file has not recorded yet (see
+   * {@link ModelSwitchNote}). Rendered after the turns, dropped by the first
+   * painted session that overtakes them.
+   */
+  modelNotes: ModelSwitchNote[];
 }
 
 export interface SessionsStore extends SessionsStoreState {
@@ -198,6 +224,8 @@ export interface SessionsStoreDeps {
    * existing tests) keep compiling; `send` refuses without one.
    */
   runner?: PiTurnRunner;
+  /** Pause used by the post-`/model` re-read; injectable so tests need not wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function errorMessage(error: unknown): string {
@@ -255,6 +283,33 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
+/**
+ * How many times the re-read after a `/model` command tries, and the pause
+ * before the second attempt. Pi appends the `model_change` entry when it
+ * handles the command — after the PTY write this store already saw
+ * acknowledged — so the first read almost always has it; the second covers a
+ * pi that was mid-repaint when the bytes arrived. A switch that still has not
+ * shown up is no failure: the divider belongs to the file, and the next
+ * natural read (the reply, a pull-to-refresh) brings it.
+ */
+const MODEL_SWITCH_REPAINT_READS = 2;
+const MODEL_SWITCH_REPAINT_DELAY_MS = 400;
+
+/**
+ * The one command whose whole effect is invisible to a chat that reads the
+ * session file turn by turn: `/model provider/model` switches the model and
+ * appends a `model_change` entry, never a turn, so the chat paints the switch
+ * from the command itself and lets the re-read confirm it against the file.
+ */
+function isModelSwitchCommand(slash: { token: string; argument: string }): boolean {
+  return slash.token === '/model' && slash.argument !== '';
+}
+
+/** The switches a parse records; a parse from before the field has none. */
+function countModelSwitches(session: ParsedPiSession | null): number {
+  return session?.modelSwitches?.length ?? 0;
+}
+
 /** 刚刚 / N 分钟 / N 小时 / N 天, then a date (spec §8.5 relative time). */
 export function relativeTime(updatedAtMs: number, nowMs: number = Date.now()): string {
   const age = nowMs - updatedAtMs;
@@ -283,11 +338,13 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     startingNew: false,
     running: [],
     pending: [],
+    modelNotes: [],
   });
 
   // The active host, re-read at write time (D8): a run captured on one host
   // must not write its result under another.
   const hostId = deps.hostId ?? (() => null);
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   // Host-keyed re-entrancy (D8, the sessions-side twin of the R10 contract in
   // `projects.ts`): each in-flight run is a claim carrying a monotonically
@@ -361,6 +418,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.sendError = null;
       state.sendNotice = null;
       state.startingNew = false;
+      state.pending = [];
+      state.modelNotes = [];
       // The last project's rows go with it; the backup paints the next
       // project's rows over the empty list instead of leaving them behind.
       state.sessions = [];
@@ -458,10 +517,13 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
         // screen is newer than any backup, and repainting it would flash
         // stale turns. A backup miss leaves the cold-open path unchanged.
         const coldOpen = state.openPath !== path || state.open === null;
-        // A different conversation's ghosts mean nothing here; the queued
-        // lines of a chat that is merely being re-read stay until the fresh
-        // parse proves them landed.
-        if (coldOpen) state.pending = [];
+        // A different conversation's ghosts mean nothing here, and neither do
+        // its switch notes; the queued lines and notes of a chat that is
+        // merely being re-read stay until the fresh parse proves them gone.
+        if (coldOpen) {
+          state.pending = [];
+          state.modelNotes = [];
+        }
         let paintedBackup = false;
         if (coldOpen && deps.loadCachedSession) {
           let backup: ParsedPiSession | null = null;
@@ -522,6 +584,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.sendError = null;
     state.sendNotice = null;
     state.pending = [];
+    state.modelNotes = [];
     // A draft is not a list load failure: never show the old error/retry.
     state.state = 'idle';
     state.error = null;
@@ -587,6 +650,12 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
    * appears at; anything the file still does not have is still queued.
    */
   function reconcilePending(session: ParsedPiSession): void {
+    // A note the file has now recorded itself is the file's to show: the
+    // divider moves to the position its entry was appended at, and the
+    // header's model name comes from the file from here.
+    state.modelNotes = state.modelNotes.filter(
+      (note) => note.baseline >= countModelSwitches(session),
+    );
     if (state.pending.length === 0) return;
     const users = userTurnCount(session);
     state.pending = state.pending.filter((item) => users < item.afterUserTurns + 1);
@@ -628,6 +697,9 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.open = session;
     state.state = 'ready';
     state.error = null;
+    // The reply's parse is a fresh read of the file: any switch note it has
+    // overtaken is the file's own divider from here.
+    reconcilePending(session);
   }
 
   /**
@@ -677,6 +749,41 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       },
     ];
     return 'sent';
+  }
+
+  /**
+   * Read the session again after a `/model` command and paint what comes back,
+   * so the note the command left behind is swapped for the file's own record
+   * — same divider, now at the position its `model_change` entry was appended
+   * at, and standing whatever the next reply adds after it. `before` is the
+   * number of switches the file held when the command was sent: once a read
+   * shows more, the file has the switch and there is nothing to wait for.
+   *
+   * Every write is guarded the way a turn's is (D8): the host the read was
+   * claimed on, the chat that is still open, and the send claim that started
+   * this — a newer send, a closed chat or a host switch drops the paint,
+   * because that parse is nobody's to show.
+   */
+  async function repaintAfterModelSwitch(sessionFile: string, before: number, token: number): Promise<void> {
+    const host = hostId();
+    for (let attempt = 0; attempt < MODEL_SWITCH_REPAINT_READS; attempt += 1) {
+      if (attempt > 0) await sleep(MODEL_SWITCH_REPAINT_DELAY_MS);
+      let session: ParsedPiSession;
+      try {
+        session = await deps.readSession(sessionFile);
+      } catch {
+        // A failed read changes nothing on screen; the next natural repaint
+        // (the reply, a pull-to-refresh) still brings the divider.
+        return;
+      }
+      if (sendToken !== token || hostId() !== host || state.openPath !== sessionFile) return;
+      reconcilePending(session);
+      state.open = session;
+      state.state = 'ready';
+      state.error = null;
+      rememberSession(host, sessionFile, session);
+      if (countModelSwitches(session) > before) return;
+    }
   }
 
   // One turn at a time in each conversation (D10) — not one in the app: a
@@ -751,6 +858,27 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
         return 'error';
       }
       if (command.hiddenUi) state.sendNotice = t('store.commandTerminalOnly');
+      if (isModelSwitchCommand(slash)) {
+        // The argument the user typed IS the model now in effect, so the
+        // divider and the header's model name go up with no read in between;
+        // the note stands until a painted session overtakes it. A draft has
+        // no file to re-read, so an open session also gets the confirmatory
+        // read below — the same one the note is waiting on.
+        state.modelNotes = [
+          ...state.modelNotes,
+          {
+            id: `model-note-${token}`,
+            to: slash.argument,
+            baseline: countModelSwitches(state.open),
+          },
+        ];
+        if (!startingNew) {
+          // Fire-and-forget: the send settled when pi had the bytes, and the
+          // repaint is a follow-on read of the same file. Its own staleness
+          // checks decide whether the parse it brings back is still ours.
+          void repaintAfterModelSwitch(sessionFile as string, countModelSwitches(state.open), token);
+        }
+      }
       return 'sent';
     }
 
@@ -802,6 +930,9 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
         // The draft has a file now, so the chat and the list can name it.
         state.openPath = startedFile;
         state.startingNew = false;
+        // The draft's switch notes stay: the reply's parse is the first read
+        // of the new file, and it drops whichever of them the file itself
+        // has recorded (see `reconcilePending`).
         rememberStartedSession(startedFile, projectPath, line);
       }
     }
@@ -829,6 +960,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.open = null;
     state.openPath = null;
     state.pending = [];
+    state.modelNotes = [];
   }
 
   // D8: called by the wrapper's host-switch watch. Bumping the tokens makes
@@ -846,6 +978,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     state.startingNew = false;
     state.running = [];
     state.pending = [];
+    state.modelNotes = [];
     // The painted rows belong to the old host's root: they are not this
     // host's to show, so neither the backup marker nor its sync survives.
     state.stale = false;
@@ -877,6 +1010,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     set sendError(value: string | null) { state.sendError = value; },
     get sendNotice() { return state.sendNotice; },
     set sendNotice(value: string | null) { state.sendNotice = value; },
+    get modelNotes() { return state.modelNotes; },
+    set modelNotes(value: ModelSwitchNote[]) { state.modelNotes = value; },
     get startingNew() { return state.startingNew; },
     set startingNew(value: boolean) { state.startingNew = value; },
     get running() { return state.running; },
@@ -1545,6 +1680,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     sendNotice: toRef(store, 'sendNotice'),
     startingNew: toRef(store, 'startingNew'),
     pending: toRef(store, 'pending'),
+    modelNotes: toRef(store, 'modelNotes'),
     running: toRef(store, 'running'),
     openRunning: computed(() => store.openRunning),
     load: store.load,

@@ -137,6 +137,7 @@ export const ZH = {
   'chat.queued': '已排队，这轮全部做完后发送',
   'chat.steering': '已插话，下一步生效',
   'chat.retry': '重试',
+  'chat.modelSwitchedTo': '--- 模型已切换为 {to} ---',
 
   /* ---- chat composer ----------------------------------------------- */
   'composer.placeholder': '输入消息…',
@@ -445,6 +446,7 @@ export const EN: Record<MessageKey, string> = {
   'chat.queued': 'Queued — sent when this run finishes',
   'chat.steering': 'Steering — takes effect at the next step',
   'chat.retry': 'Retry',
+  'chat.modelSwitchedTo': '--- model switched to {to} ---',
 
   'composer.placeholder': 'Message…',
   'composer.aria': 'Message',

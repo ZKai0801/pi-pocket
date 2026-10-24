@@ -73,6 +73,40 @@ function storeWith(runner: unknown, hostId?: () => string | null) {
   } as never);
 }
 
+/** The session as it stands once pi has appended the `model_change` entry. */
+const switched: ParsedPiSession = {
+  ...session,
+  modelSwitches: [
+    { to: 'openai/gpt-5.1-codex', from: null, timestampMs: 0, afterTurns: 1 },
+  ],
+};
+
+/**
+ * A store whose post-`/model` re-read is observable: `read` decides what each
+ * read returns (a value or a promise of one), and `sleep` is injectable so
+ * the retry pause costs nothing.
+ */
+function storeWithRepaint(
+  runner: unknown,
+  read: () => ParsedPiSession | Promise<ParsedPiSession>,
+  options: { sleep?: (ms: number) => Promise<void>; hostId?: () => string | null } = {},
+) {
+  const readSession = vi.fn(read);
+  const store = createSessionsStore({
+    listSessions: vi.fn(async () => []),
+    readSession,
+    runner,
+    sleep: options.sleep,
+    hostId: options.hostId,
+  } as never);
+  return { store, readSession };
+}
+
+/** Long enough for the fire-and-forget repaint's reads and retry to run. */
+async function settle(): Promise<void> {
+  for (let index = 0; index < 50; index += 1) await Promise.resolve();
+}
+
 describe('sessions store send', () => {
   it('reports sent once the line is delivered, with the user turn on screen and the chat running', async () => {
     const reply = deferred<PiTurnSendResult>();
@@ -712,9 +746,9 @@ describe('sessions store send', () => {
   });
 
   it('drops a command whose chat closed before it settled', async () => {
-    let settle!: (value: PiCommandRunResult) => void;
+    let settleCommand!: (value: PiCommandRunResult) => void;
     const pendingCommand = new Promise<PiCommandRunResult>((resolve) => {
-      settle = resolve;
+      settleCommand = resolve;
     });
     const runner = runnerWith({ runCommand: vi.fn(() => pendingCommand) });
     const store = storeWith(runner, () => 'A');
@@ -722,10 +756,330 @@ describe('sessions store send', () => {
 
     const pending = store.send('/tree');
     store.closeChat();
-    settle({ ok: true, hiddenUi: true });
+    settleCommand({ ok: true, hiddenUi: true });
 
     expect(await pending).toBe('error');
     expect(store.sendNotice).toBeNull();
     expect(store.sending).toBe(false);
+  });
+});
+
+describe('sessions store /model repaint', () => {
+  it('re-reads the session after a /model command and paints the divider', async () => {
+    // Pi writes the entry as it handles the command: the first read can still
+    // be the file as it was, so the second attempt is what brings the switch.
+    let reads = 0;
+    const read = (): ParsedPiSession => (reads++ === 0 ? session : switched);
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      read,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+    reads = 0;
+
+    expect(await store.send('/model openai/gpt-5.1-codex')).toBe('sent');
+
+    // The divider is on screen the moment the command settles: the argument
+    // the user typed is the model now in effect, and the note stands until a
+    // read of the file overtakes it.
+    expect(store.modelNotes).toEqual([
+      { id: expect.any(String), to: 'openai/gpt-5.1-codex', baseline: 0 },
+    ]);
+
+    await settle();
+
+    expect(readSession).toHaveBeenCalledTimes(2);
+    expect(readSession).toHaveBeenCalledWith('/r/a.jsonl');
+    expect(store.open?.modelSwitches).toHaveLength(1);
+    expect(store.open?.turns).toEqual(session.turns);
+    expect(store.state).toBe('ready');
+    expect(store.sendError).toBeNull();
+    // The file has the switch now, at the position its entry was appended
+    // at: the note has been overtaken.
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('paints on the first read when pi already wrote the entry', async () => {
+    // The file held no switch while the chat was open, so the command's own
+    // read is the first that sees one: there is nothing to wait for.
+    let file: ParsedPiSession | Promise<ParsedPiSession> = session;
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => file,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+    file = switched;
+
+    expect(await store.send('/model openai/gpt-5.1-codex')).toBe('sent');
+    await settle();
+
+    expect(readSession).toHaveBeenCalledTimes(1);
+    expect(store.open?.modelSwitches).toHaveLength(1);
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('stops after two reads when the entry never appears', async () => {
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+
+    expect(await store.send('/model openai/gpt-5.1-codex')).toBe('sent');
+    await settle();
+
+    expect(readSession).toHaveBeenCalledTimes(2);
+    expect(store.open?.modelSwitches).toBeUndefined();
+    // A switch that is not in the file is no failure: the chat stands, and
+    // the note stays as the only record of it.
+    expect(store.sendError).toBeNull();
+    expect(store.open).toEqual(session);
+    expect(store.modelNotes).toHaveLength(1);
+  });
+
+  it('drops the repaint when a newer send claims the chat', async () => {
+    let deliver!: (value: ParsedPiSession) => void;
+    const pendingRead = new Promise<ParsedPiSession>((resolve) => {
+      deliver = resolve;
+    });
+    let file: ParsedPiSession | Promise<ParsedPiSession> = session;
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => file,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+    // The command's re-read is the one that has not answered yet.
+    file = pendingRead;
+
+    await store.send('/model openai/gpt-5.1-codex');
+    // The next line claims the chat before the re-read answers.
+    expect(await store.send('hi')).toBe('sent');
+    deliver(switched);
+    await settle();
+
+    expect(readSession).toHaveBeenCalledTimes(1);
+    expect(store.open?.modelSwitches).toBeUndefined();
+    // The newer send's reply owns the chat: the stale `/model` parse never
+    // paints over it, switch and all — and the note stands until some read
+    // overtakes it.
+    expect(store.open).toEqual(session);
+    expect(store.modelNotes).toHaveLength(1);
+  });
+
+  it('drops the repaint when the chat closes first', async () => {
+    let deliver!: (value: ParsedPiSession) => void;
+    const pendingRead = new Promise<ParsedPiSession>((resolve) => {
+      deliver = resolve;
+    });
+    let file: ParsedPiSession | Promise<ParsedPiSession> = session;
+    const { store } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => file,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    file = pendingRead;
+
+    await store.send('/model openai/gpt-5.1-codex');
+    store.closeChat();
+    deliver(switched);
+    await settle();
+
+    // The closed chat is nobody's to paint, and the switch shows up the next
+    // time the session is opened and read.
+    expect(store.open).toBeNull();
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('drops the repaint when the host changes under it', async () => {
+    let deliver!: (value: ParsedPiSession) => void;
+    const pendingRead = new Promise<ParsedPiSession>((resolve) => {
+      deliver = resolve;
+    });
+    let file: ParsedPiSession | Promise<ParsedPiSession> = session;
+    let host = 'A';
+    const { store } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => file,
+      { sleep: async () => {}, hostId: () => host },
+    );
+    await store.openSession('/r/a.jsonl');
+    file = pendingRead;
+
+    await store.send('/model openai/gpt-5.1-codex');
+    host = 'B';
+    deliver(switched);
+    await settle();
+
+    expect(store.open?.modelSwitches).toBeUndefined();
+    expect(store.open).toEqual(session);
+    // The chat is still open on the same session, so the note stands; only
+    // the stale read was dropped. A real host switch calls `hostChanged()`,
+    // which clears it with everything else.
+  });
+
+  it('notes a draft\'s switch and keeps it until a read of the new file overtakes it', async () => {
+    const adopted: PiTurnSendResult = {
+      ok: true,
+      session: { ...session, id: 'new', cwd: '/p/a', turns: replied.turns },
+    };
+    const runner = runnerWith({
+      runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
+      beginStartNew: vi.fn(async () => begun('/r/new.jsonl', Promise.resolve(adopted))),
+    });
+    const { store, readSession } = storeWithRepaint(runner, () => session, { sleep: async () => {} });
+    store.newConversation({ path: '/p/a', name: 'a' });
+
+    expect(await store.send('/model openai/gpt-5.1-codex')).toBe('sent');
+
+    // A draft has no file to re-read: the switch stands as its own note.
+    expect(runner.runCommand).toHaveBeenCalledWith(null, '/model openai/gpt-5.1-codex');
+    expect(readSession).not.toHaveBeenCalled();
+    expect(store.modelNotes).toEqual([
+      { id: expect.any(String), to: 'openai/gpt-5.1-codex', baseline: 0 },
+    ]);
+
+    // Adoption names the file but reads nothing: the note stands, and so does
+    // the reply's parse — this file records no switch of its own, so the note
+    // is still the only record of the switch.
+    expect(await store.send('first message')).toBe('sent');
+    await flush();
+    expect(store.openPath).toBe('/r/new.jsonl');
+    expect(store.modelNotes).toHaveLength(1);
+  });
+
+  it('drops a draft\'s note once the reply\'s parse records the switch', async () => {
+    const adopted: PiTurnSendResult = {
+      ok: true,
+      session: { ...session, id: 'new', cwd: '/p/a', turns: replied.turns, modelSwitches: switched.modelSwitches },
+    };
+    const runner = runnerWith({
+      runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
+      beginStartNew: vi.fn(async () => begun('/r/new.jsonl', Promise.resolve(adopted))),
+    });
+    const { store } = storeWithRepaint(runner, () => session, { sleep: async () => {} });
+    store.newConversation({ path: '/p/a', name: 'a' });
+    await store.send('/model openai/gpt-5.1-codex');
+    expect(store.modelNotes).toHaveLength(1);
+
+    // The new file's own `model_change` entry is the record from here: the
+    // divider the file draws replaces the note.
+    expect(await store.send('first message')).toBe('sent');
+    await flush();
+
+    expect(store.open?.modelSwitches).toHaveLength(1);
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('drops a note the reply\'s parse of the same session overtakes', async () => {
+    let read: ParsedPiSession = session;
+    const runner = runnerWith({
+      runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
+      beginSend: vi.fn(async (path: string) => begun(path, Promise.resolve({ ok: true as const, session: read }))),
+    });
+    const { store } = storeWithRepaint(runner, () => read, { sleep: async () => {} });
+    await store.openSession('/r/a.jsonl');
+    await store.send('/model openai/gpt-5.1-codex');
+    expect(store.modelNotes).toHaveLength(1);
+
+    // The reply's parse is a fresh read of the file: the switch is in it, so
+    // the note has been overtaken.
+    read = switched;
+    expect(await store.send('next please')).toBe('sent');
+    await flush();
+
+    expect(store.open?.modelSwitches).toHaveLength(1);
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('clears the note when a different session opens', async () => {
+    const { store } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    await store.send('/model openai/gpt-5.1-codex');
+    expect(store.modelNotes).toHaveLength(1);
+
+    // Another conversation's switch means nothing in this one.
+    await store.openSession('/r/b.jsonl');
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('drops a draft\'s note when the draft chat closes', async () => {
+    const { store } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    store.newConversation({ path: '/p/a', name: 'a' });
+    await store.send('/model openai/gpt-5.1-codex');
+    expect(store.modelNotes).toHaveLength(1);
+
+    store.closeChat();
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('drops a draft\'s note when another project loads or the host changes', async () => {
+    const { store } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    store.newConversation({ path: '/p/a', name: 'a' });
+    await store.send('/model openai/gpt-5.1-codex');
+
+    await store.load({ path: '/p/b', name: 'b' });
+    expect(store.modelNotes).toEqual([]);
+
+    // A fresh draft for the same project records the next switch again.
+    store.newConversation({ path: '/p/a', name: 'a' });
+    await store.send('/model google/gemini-3-pro');
+    expect(store.modelNotes).toHaveLength(1);
+    store.hostChanged();
+    expect(store.modelNotes).toEqual([]);
+  });
+
+  it('leaves a bare /model alone: no argument, no switch, no re-read', async () => {
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+
+    // A bare `/model` opens pi's own picker; nothing has been switched.
+    expect(await store.send('/model')).toBe('sent');
+    await settle();
+
+    expect(readSession).not.toHaveBeenCalled();
+    expect(store.modelNotes).toEqual([]);
+    expect(store.open).toEqual(session);
+  });
+
+  it('does not re-read for any other command', async () => {
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+
+    expect(await store.send('/thinking high')).toBe('sent');
+    await settle();
+
+    expect(readSession).not.toHaveBeenCalled();
+    expect(store.open).toEqual(session);
   });
 });

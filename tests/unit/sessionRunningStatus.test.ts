@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     sendError: null as string | null,
     running: [] as string[],
     pending: [] as Array<Record<string, unknown>>,
+    modelNotes: [] as Array<Record<string, unknown>>,
     newConversation: vi.fn(),
     load: vi.fn(async () => {}),
     openSession: vi.fn(async () => {}),
@@ -69,6 +70,7 @@ describe('sessions running status', () => {
     mocks.sessions.open = null;
     mocks.sessions.openRunning = false;
     mocks.sessions.pending = [];
+    mocks.sessions.modelNotes = [];
     mocks.sessions.lastProject = { path: '/p/a', name: 'a' };
   });
 

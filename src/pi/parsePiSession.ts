@@ -1,4 +1,4 @@
-import type { ParsedPiSession, PiTurn } from './types';
+import type { ParsedPiSession, PiModelSwitch, PiTurn } from './types';
 
 interface PiContentBlock {
   type?: string;
@@ -13,6 +13,9 @@ interface PiMessage {
   role?: string;
   content?: string | PiContentBlock[];
   timestamp?: number;
+  /** The model that produced an assistant message, as pi names it. */
+  model?: string;
+  provider?: string;
 }
 
 interface PiEntry {
@@ -23,6 +26,10 @@ interface PiEntry {
   name?: string;
   timestamp?: string;
   message?: PiMessage;
+  /** `model_change`: the provider of the model the change selected. */
+  provider?: string;
+  /** `model_change`: the model id the change selected. */
+  modelId?: string;
 }
 
 function messageText(content: string | PiContentBlock[] | undefined): string {
@@ -40,14 +47,34 @@ function messageTimestamp(message: PiMessage, entry: PiEntry): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** An entry's own ISO timestamp; 0 when it carried none a reader can use. */
+function entryTimestamp(entry: PiEntry): number {
+  const parsed = Date.parse(entry.timestamp ?? '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** `provider/model`, or the lone id when the entry named no provider. */
+function joinModel(provider: string | undefined, model: string | undefined): string | null {
+  const id = typeof model === 'string' ? model.trim() : '';
+  if (id === '') return null;
+  const prefix = typeof provider === 'string' ? provider.trim() : '';
+  return prefix === '' ? id : `${prefix}/${id}`;
+}
+
 export function parsePiSession(jsonl: string): ParsedPiSession {
   const parsed: ParsedPiSession = { version: null, id: null, cwd: null, name: null, turns: [] };
+  const modelSwitches: PiModelSwitch[] = [];
   let pendingAssistant: PiTurn | null = null;
   // The last message entry of any role, for the settled test: a run is over
   // only when its final message is an assistant one with nothing left to run.
   // Every message entry updates this — user, assistant and toolResult alike —
   // because any of them as the tail means work is still owed.
   let tail: { role: string; toolCall: boolean } | null = null;
+  // The model in effect as the file is walked: the last `model_change`'s
+  // target, or — before the first of those — the model on the first assistant
+  // message, which is the one the session began with. It is what the NEXT
+  // `model_change` switched away from, and what the walk ends on: `parsed.model`.
+  let currentModel: string | null = null;
 
   const flushAssistant = (): void => {
     if (pendingAssistant && pendingAssistant.text.trim()) parsed.turns.push(pendingAssistant);
@@ -77,6 +104,25 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
       continue;
     }
 
+    if (entry.type === 'model_change') {
+      // The assistant turn the file had produced stands on its own from here:
+      // the switch happened after it, which is where the divider belongs.
+      flushAssistant();
+      const to = joinModel(entry.provider, entry.modelId);
+      // An entry that names no model is a record of nothing; dropping it keeps
+      // a malformed line from becoming an empty divider.
+      if (to !== null) {
+        modelSwitches.push({
+          to,
+          from: currentModel,
+          timestampMs: entryTimestamp(entry),
+          afterTurns: parsed.turns.length,
+        });
+        currentModel = to;
+      }
+      continue;
+    }
+
     if (entry.type !== 'message' || !entry.message) continue;
     const { role } = entry.message;
     tail = { role: role ?? '', toolCall: hasToolCall(entry.message.content) };
@@ -90,6 +136,13 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
         parsed.turns.push({ role: 'user', text, timestampMs: messageTimestamp(entry.message, entry) });
       }
     } else {
+      // The first assistant message that names its model says which model the
+      // session began with — the only "from" a first switch can have. Later
+      // ones are already covered by the `model_change` entries themselves.
+      if (currentModel === null) {
+        const model = joinModel(entry.message.provider, entry.message.model);
+        if (model !== null) currentModel = model;
+      }
       if (!text.trim()) continue;
       const timestampMs = messageTimestamp(entry.message, entry);
       if (pendingAssistant) {
@@ -102,6 +155,8 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
   }
 
   flushAssistant();
+  parsed.modelSwitches = modelSwitches;
+  parsed.model = currentModel;
   parsed.settled = tail !== null && tail.role === 'assistant' && !tail.toolCall;
   return parsed;
 }
