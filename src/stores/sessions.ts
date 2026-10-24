@@ -29,6 +29,13 @@
  * with an empty error screen. Rows that are already on screen are never
  * repainted from the backup: a refresh must not move the list under the
  * user's thumb.
+ *
+ * `loadRecents()` reads the conversations recently opened on this host into
+ * `recents`: the 会话 tab paints them before any project is selected, so a
+ * cold start lands on the last conversation instead of a hint. Every fresh
+ * read of a conversation re-saves its entry through `rememberSession` — a
+ * cold open moves it to the top, a reply landing in an already-open chat only
+ * refreshes its row — and the host-switch watch reloads them for the new host.
  */
 import { computed, reactive, toRef, watch } from 'vue';
 import { defineStore } from 'pinia';
@@ -61,6 +68,11 @@ import type { SavedHost } from '../platform/android/hostStore';
 import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { sessionBackupCache } from '../pi/sessionCache';
 import { sessionListsCache } from '../pi/sessionListCache';
+import {
+  recentSessionsCache,
+  type RecentSessionEntry,
+  type RecentSessionMeta,
+} from '../pi/recentSessionsCache';
 import { useConnectionsStore } from './connections';
 import { useProjectsStore } from './projects';
 import { t } from '../i18n';
@@ -103,6 +115,13 @@ export interface ModelSwitchNote {
 
 export interface SessionsStoreState {
   sessions: PiSessionMeta[];
+  /**
+   * The conversations recently opened on this host, most recent first: the
+   * 会话 tab's first screen, painted before any project is selected (spec
+   * §8.5). A shortcut into the server's files, never a source of truth —
+   * every open still reads the session file from the host.
+   */
+  recents: RecentSessionEntry[];
   /** The session open in the chat, or null while the list is showing. */
   open: ParsedPiSession | null;
   /** The open session's file path: `ParsedPiSession` carries no path, and the chat's pull-to-refresh re-reads it. */
@@ -149,6 +168,10 @@ export interface SessionsStoreState {
 export interface SessionsStore extends SessionsStoreState {
   /** The open chat's conversation still has a turn in flight. */
   readonly openRunning: boolean;
+  /** The conversations recently opened on this host, for the 会话 tab's first screen. */
+  readonly recents: RecentSessionEntry[];
+  /** Reads the host's recently opened conversations into `recents`. Never throws. */
+  loadRecents(): Promise<void>;
   /** Lists `project`'s sessions. Joins the in-flight run only for the same host and project; otherwise claims fresh. */
   load(project: PiProject): Promise<void>;
   /** Reads `path` into `open`. Joins the in-flight run only for the same host and path; a failure leaves the previous `open` intact. */
@@ -211,6 +234,24 @@ export interface SessionsStoreDeps {
     host: string | null,
     projectPath: string,
     sessions: readonly PiSessionMeta[],
+  ): Promise<void>;
+  /**
+   * The conversations recently opened on `host`, most recent first: the 会话
+   * tab's first screen. Optional so host-less callers (and the existing tests)
+   * keep compiling; a miss or a failure is an empty list.
+   */
+  loadRecentSessions?(host: string | null): Promise<RecentSessionEntry[]>;
+  /**
+   * Remember an opened conversation for the 会话 tab's recent list.
+   * `reopened` tells a fresh open (the entry jumps to the top) from a refresh
+   * of a conversation that is already open — a reply landing in the background
+   * updates its row but never reorders the list. Best-effort: failures are
+   * swallowed.
+   */
+  rememberRecentSession?(
+    host: string | null,
+    meta: RecentSessionMeta,
+    reopened: boolean,
   ): Promise<void>;
   /**
    * The active host's name, read at claim time and again at write time (D8):
@@ -325,6 +366,7 @@ export function relativeTime(updatedAtMs: number, nowMs: number = Date.now()): s
 export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   const state = reactive<SessionsStoreState>({
     sessions: [],
+    recents: [],
     open: null,
     openPath: null,
     lastProject: null,
@@ -490,11 +532,61 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     return loadInFlight.promise;
   }
 
-  // Remembering a backup is best-effort: a full disk or a closed IndexedDB
-  // must never fail the open or the turn that produced the fresh parse.
-  function rememberSession(host: string | null, path: string, session: ParsedPiSession): void {
-    if (!deps.saveCachedSession) return;
+/** The recent-list row for a freshly read conversation. */
+function recentMetaFromSession(path: string, session: ParsedPiSession): RecentSessionMeta {
+  const lastTurn = session.turns[session.turns.length - 1];
+  return {
+    path,
+    id: session.id ?? sessionIdFromPath(path),
+    name: session.name,
+    updatedAtMs: lastTurn?.timestampMs ?? Date.now(),
+    preview: sessionPreview(session),
+    turnCount: session.turns.length,
+    projectPath: session.cwd,
+  };
+}
+
+// Remembering a backup is best-effort: a full disk or a closed IndexedDB
+// must never fail the open or the turn that produced the fresh parse. The
+// recent-list entry rides along: `reopened` is the store's `coldOpen`, so a
+// fresh open jumps the conversation to the top while a reply landing in an
+// already-open chat only refreshes its row.
+function rememberSession(
+  host: string | null,
+  path: string,
+  session: ParsedPiSession,
+  reopened = false,
+): void {
+  if (deps.saveCachedSession) {
     void deps.saveCachedSession(host, path, session).catch(() => undefined);
+  }
+  if (deps.rememberRecentSession) {
+    void deps
+      .rememberRecentSession(host, recentMetaFromSession(path, session), reopened)
+      .catch(() => undefined);
+  }
+}
+
+  // The 会话 tab's first screen: the conversations recently opened on this
+  // host, read before any project has been selected. Claimed and host-checked
+  // the way the listings are (D8), so a host switch under the read drops its
+  // write instead of painting the previous host's conversations.
+  let recentsToken = 0;
+  function loadRecents(): Promise<void> {
+    const host = hostId();
+    const token = ++recentsToken;
+    return (async () => {
+      let entries: RecentSessionEntry[] = [];
+      if (deps.loadRecentSessions) {
+        try {
+          entries = await deps.loadRecentSessions(host);
+        } catch {
+          entries = [];
+        }
+      }
+      if (recentsToken !== token || hostId() !== host) return;
+      state.recents = entries;
+    })();
   }
 
   // Same treatment for reads, keyed on { host, path }; a failed open keeps
@@ -554,7 +646,9 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
           state.openPath = path;
           state.startingNew = false;
           state.state = 'ready';
-          rememberSession(host, path, session);
+          // A cold open is what the recent list remembers as "just opened"; a
+          // refresh of the chat already on screen only keeps its row honest.
+          rememberSession(host, path, session, coldOpen);
         } catch (error) {
           if (openToken !== token || hostId() !== host) return;
           // A painted backup survives a failed re-read (R11.2's twin): the
@@ -972,6 +1066,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     loadToken += 1;
     openToken += 1;
     sendToken += 1;
+    recentsToken += 1;
     state.sending = false;
     state.sendError = null;
     state.sendNotice = null;
@@ -983,6 +1078,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     // host's to show, so neither the backup marker nor its sync survives.
     state.stale = false;
     state.refreshing = false;
+    // And neither are the conversations recently opened there.
+    state.recents = [];
     loadInFlight = null;
     openInFlight = null;
   }
@@ -990,6 +1087,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   return reactive({
     get sessions() { return state.sessions; },
     set sessions(value: PiSessionMeta[]) { state.sessions = value; },
+    get recents() { return state.recents; },
+    set recents(value: RecentSessionEntry[]) { state.recents = value; },
     get open() { return state.open; },
     set open(value: ParsedPiSession | null) { state.open = value; },
     get openPath() { return state.openPath; },
@@ -1022,6 +1121,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     get openRunning() {
       return state.openPath !== null && state.running.includes(state.openPath);
     },
+    loadRecents,
     load,
     openSession,
     newConversation,
@@ -1605,6 +1705,12 @@ export const useSessionsStore = defineStore('sessions', () => {
     loadCachedSessions: (host, projectPath) => sessionListsCache().load(host, projectPath),
     saveCachedSessions: (host, projectPath, sessions) =>
       sessionListsCache().save(host, projectPath, sessions),
+    // The 会话 tab's first screen: the conversations recently opened on this
+    // host, so the tab answers before the 项目 tab has been visited. Every
+    // fresh read re-saves its entry (see `rememberSession`).
+    loadRecentSessions: (host) => recentSessionsCache().load(host),
+    rememberRecentSession: (host, meta, reopened) =>
+      recentSessionsCache().save(host, meta, reopened),
     // D8: claims are keyed to the active host and re-checked at write time,
     // so a run captured on one host cannot write under another.
     hostId: () => connections.activeName,
@@ -1629,6 +1735,9 @@ export const useSessionsStore = defineStore('sessions', () => {
       store.stale = false;
       store.refreshing = false;
       store.state = 'idle';
+      // The new host's recents are the 会话 tab's first screen; the previous
+      // host's went with the state clear above.
+      void store.loadRecents();
     },
   );
 
@@ -1668,6 +1777,7 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   return {
     sessions: toRef(store, 'sessions'),
+    recents: toRef(store, 'recents'),
     open: toRef(store, 'open'),
     openPath: toRef(store, 'openPath'),
     lastProject: toRef(store, 'lastProject'),
@@ -1683,6 +1793,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     modelNotes: toRef(store, 'modelNotes'),
     running: toRef(store, 'running'),
     openRunning: computed(() => store.openRunning),
+    loadRecents: store.loadRecents,
     load: store.load,
     openSession: store.openSession,
     newConversation,

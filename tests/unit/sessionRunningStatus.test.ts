@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   sessions: {
     lastProject: { path: '/p/a', name: 'a' } as { path: string; name: string } | null,
     sessions: [] as Array<Record<string, unknown>>,
+    recents: [] as Array<Record<string, unknown>>,
     state: 'ready' as string,
     error: null as string | null,
     open: null as Record<string, unknown> | null,
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     modelNotes: [] as Array<Record<string, unknown>>,
     newConversation: vi.fn(),
     load: vi.fn(async () => {}),
+    loadRecents: vi.fn(async () => {}),
     openSession: vi.fn(async () => {}),
     refresh: vi.fn(async () => {}),
     send: vi.fn(async () => 'sent' as const),
@@ -66,6 +68,7 @@ describe('sessions running status', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.sessions.sessions = [];
+    mocks.sessions.recents = [];
     mocks.sessions.running = [];
     mocks.sessions.open = null;
     mocks.sessions.openRunning = false;

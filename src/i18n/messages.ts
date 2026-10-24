@@ -127,6 +127,8 @@ export const ZH = {
   'sessions.emptyForProject': '「{project}」还没有会话',
   'sessions.running': '正在运行',
   'sessions.cachedOnly': '暂时无法同步，显示的是上次缓存的会话。',
+  'sessions.recent': '最近打开',
+  'sessions.recentHint': '其他会话请先到「项目」页选择项目',
 
   /* ---- 会话 chat --------------------------------------------------- */
   'chat.title': '会话',
@@ -437,6 +439,8 @@ export const EN: Record<MessageKey, string> = {
   'sessions.emptyForProject': '"{project}" has no sessions yet',
   'sessions.running': 'Running',
   'sessions.cachedOnly': 'Showing the sessions from last time — syncing is unavailable right now.',
+  'sessions.recent': 'Recently opened',
+  'sessions.recentHint': 'Open the Projects tab for other conversations',
 
   'chat.title': 'Session',
   'chat.backAria': 'Back to list',

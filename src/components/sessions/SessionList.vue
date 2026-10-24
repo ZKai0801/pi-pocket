@@ -4,15 +4,18 @@
  * most recent first, each row title + preview + relative time. Tapping a row
  * opens it in the read-only chat; the + opens a draft chat for the selected
  * project, whose first message creates the session. The list loads for the
- * projects tab's selection; with nothing selected it is a hint, not an empty
- * list. The project's remembered rows paint first, so entering a project shows
- * its conversations while the server's listing is still walking the files.
+ * projects tab's selection; with nothing selected it shows the conversations
+ * recently opened on this host, so the tab is useful before the 项目 tab has
+ * been visited — only a phone with no recents at all sees the hint. The
+ * project's remembered rows paint first, so entering a project shows its
+ * conversations while the server's listing is still walking the files.
  */
 import { computed, onMounted } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
-import { projectBasename, relativeTime, useSessionsStore } from '../../stores/sessions';
+import { projectBasename, useSessionsStore } from '../../stores/sessions';
 import { useProjectsStore } from '../../stores/projects';
 import { t } from '../../i18n';
+import SessionRow from './SessionRow.vue';
 
 const store = useSessionsStore();
 const projects = useProjectsStore();
@@ -24,6 +27,10 @@ onMounted(() => {
   if (selected !== null && store.lastProject?.path !== selected) {
     void store.load({ path: selected, name: projectBasename(selected) });
   }
+  // The recently-opened conversations are this tab's first screen: read them
+  // on mount, and the wrapper's host-switch watch reloads them when the host
+  // changes.
+  void store.loadRecents();
 });
 
 const emptyText = computed(() => {
@@ -67,59 +74,69 @@ function retry(): void {
     </header>
 
     <div class="sessions__body">
-      <p v-if="projects.selected === null" class="sessions__status">{{ t('sessions.selectProjectFirst') }}</p>
-
-      <p v-else-if="store.state === 'loading'" class="sessions__status">{{ t('sessions.loading') }}</p>
-
-      <div v-else-if="store.state === 'error'" class="sessions__failed">
-        <p class="sessions__error" role="alert">{{ store.error }}</p>
-        <button type="button" class="sessions__retry" @click="retry">
-          <AppIcon name="refresh" /> {{ t('sessions.retry') }}
-        </button>
-      </div>
+      <!-- Nothing selected: the conversations this phone was last in, painted
+           from the local memory of opens so the tab answers without a trip
+           through the 项目 tab. A phone with no recents keeps the hint. -->
+      <template v-if="projects.selected === null">
+        <template v-if="store.recents.length > 0">
+          <h2 class="sessions__recent" data-testid="sessions-recent">{{ t('sessions.recent') }}</h2>
+          <ul class="sessions__list">
+            <SessionRow
+              v-for="entry in store.recents"
+              :key="entry.path"
+              :path="entry.path"
+              :title="entry.name ?? entry.id"
+              :preview="entry.preview"
+              :when-ms="entry.openedAtMs"
+              :running="isRunning(entry.path)"
+              @open="openSession"
+            />
+          </ul>
+          <p class="sessions__recent-hint">{{ t('sessions.recentHint') }}</p>
+        </template>
+        <p v-else class="sessions__status">{{ t('sessions.selectProjectFirst') }}</p>
+      </template>
 
       <template v-else>
-        <!-- The backup line appears only once the sync has finished without
-             confirming the rows: while the listing is still in flight the list
-             is about to correct itself, so saying so would only shift the rows
-             under the user's thumb. -->
-        <p
-          v-if="store.state === 'ready' && store.stale && !store.refreshing"
-          class="sessions__stale"
-          data-testid="sessions-stale"
-        >
-          {{ t('sessions.cachedOnly') }}
-        </p>
+        <p v-if="store.state === 'loading'" class="sessions__status">{{ t('sessions.loading') }}</p>
 
-        <ul v-if="store.sessions.length > 0" class="sessions__list">
-          <li v-for="session in store.sessions" :key="session.path" class="sessions__row">
-            <button type="button" class="sessions__item" @click="openSession(session.path)">
-              <span
-                v-if="isRunning(session.path)"
-                class="sessions__pulse"
-                data-testid="session-running"
-                :data-running="session.path"
-                role="img"
-                :aria-label="t('sessions.running')"
-              >
-                <AppIcon name="activity" class="sessions__glyph sessions__glyph--running" />
-              </span>
-              <AppIcon v-else name="activity" class="sessions__glyph" />
-              <span class="sessions__text">
-                <span class="sessions__head">
-                  <span class="sessions__name">{{ session.name ?? session.id }}</span>
-                  <span class="sessions__when">{{ relativeTime(session.updatedAtMs) }}</span>
-                </span>
-                <span class="sessions__preview">{{ session.preview ?? t('sessions.noPreview') }}</span>
-              </span>
-              <AppIcon name="chevron-right" class="sessions__chevron" />
-            </button>
-          </li>
-        </ul>
-
-        <div v-else class="sessions__empty">
-          <p class="sessions__empty-text">{{ emptyText }}</p>
+        <div v-else-if="store.state === 'error'" class="sessions__failed">
+          <p class="sessions__error" role="alert">{{ store.error }}</p>
+          <button type="button" class="sessions__retry" @click="retry">
+            <AppIcon name="refresh" /> {{ t('sessions.retry') }}
+          </button>
         </div>
+
+        <template v-else>
+          <!-- The backup line appears only once the sync has finished without
+               confirming the rows: while the listing is still in flight the list
+               is about to correct itself, so saying so would only shift the rows
+               under the user's thumb. -->
+          <p
+            v-if="store.state === 'ready' && store.stale && !store.refreshing"
+            class="sessions__stale"
+            data-testid="sessions-stale"
+          >
+            {{ t('sessions.cachedOnly') }}
+          </p>
+
+          <ul v-if="store.sessions.length > 0" class="sessions__list">
+            <SessionRow
+              v-for="session in store.sessions"
+              :key="session.path"
+              :path="session.path"
+              :title="session.name ?? session.id"
+              :preview="session.preview"
+              :when-ms="session.updatedAtMs"
+              :running="isRunning(session.path)"
+              @open="openSession"
+            />
+          </ul>
+
+          <div v-else class="sessions__empty">
+            <p class="sessions__empty-text">{{ emptyText }}</p>
+          </div>
+        </template>
       </template>
     </div>
   </section>
@@ -242,127 +259,20 @@ function retry(): void {
   overflow-y: auto;
 }
 
-.sessions__row {
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.sessions__row:last-child {
-  border-bottom: 0;
-}
-
-.sessions__item {
-  display: flex;
-  width: 100%;
-  min-height: 56px;
-  align-items: center;
-  gap: var(--sp-3);
-  border: 0;
-  background: transparent;
-  padding: var(--sp-3) var(--sp-3);
-  text-align: left;
-}
-
-.sessions__item:active {
-  background: var(--state-hover);
-}
-
-.sessions__item:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--focus-ring-offset);
-}
-
-.sessions__glyph {
-  width: 20px;
-  height: 20px;
-  flex: 0 0 auto;
-  color: var(--accent);
-}
-
-/* A running conversation's glyph beats in place: the row keeps its alignment,
-   and the motion is the only difference from a finished one. */
-.sessions__pulse {
-  display: inline-flex;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  animation: sessions-pulse 1.4s ease-in-out infinite;
-}
-
-.sessions__glyph--running {
-  width: 20px;
-  height: 20px;
-}
-
-@keyframes sessions-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.55;
-    transform: scale(0.86);
-  }
-}
-
-/* Reduced motion: a static accent ring instead of the beat. */
-@media (prefers-reduced-motion: reduce) {
-  .sessions__pulse {
-    border: 2px solid var(--accent);
-    animation: none;
-  }
-}
-
-.sessions__text {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sessions__head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.sessions__name {
-  overflow: hidden;
-  flex: 1 1 auto;
-  color: var(--fg);
-  font-size: var(--fs-400);
+/* The recent list's section label: quieter than the tab title, it only says
+   where these rows came from. */
+.sessions__recent {
+  margin: 0 0 var(--sp-2);
+  color: var(--fg-secondary);
+  font-size: var(--fs-200);
   font-weight: var(--fw-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.sessions__when {
-  flex: 0 0 auto;
+.sessions__recent-hint {
+  margin: var(--sp-3) 0 0;
   color: var(--fg-muted);
   font-size: var(--fs-200);
-}
-
-.sessions__preview {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--fg-secondary);
-  font-size: var(--fs-300);
-  line-height: 1.4;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  word-break: break-word;
-}
-
-.sessions__chevron {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  color: var(--fg-muted);
+  line-height: 1.45;
 }
 
 .sessions__empty {

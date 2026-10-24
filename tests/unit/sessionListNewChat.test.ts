@@ -6,10 +6,13 @@ const mocks = vi.hoisted(() => ({
   sessions: {
     lastProject: null as { path: string; name: string } | null,
     sessions: [] as Array<Record<string, unknown>>,
+    recents: [] as Array<Record<string, unknown>>,
     state: 'ready' as string,
     error: null as string | null,
+    running: [] as string[],
     newConversation: vi.fn(),
     load: vi.fn(async () => {}),
+    loadRecents: vi.fn(async () => {}),
     openSession: vi.fn(async () => {}),
     refresh: vi.fn(async () => {}),
   },
@@ -46,6 +49,8 @@ describe('session list new chat', () => {
     vi.clearAllMocks();
     mocks.sessions.lastProject = null;
     mocks.sessions.sessions = [];
+    mocks.sessions.recents = [];
+    mocks.sessions.running = [];
     mocks.sessions.state = 'ready';
     mocks.sessions.error = null;
     mocks.selected = null;

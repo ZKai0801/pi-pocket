@@ -49,10 +49,18 @@ hide behind a spinner:
   keeps them (`stale`/`refreshing` on the sessions store). Re-pointing a
   host's Pi directory drops every list for that host, since their paths name
   files under the old root.
+- `src/pi/recentSessionsCache.ts` — the conversations recently opened on a
+  host, in the same localStorage record shape (keyed by host, 30-day TTL, 20
+  entries). Not a paint for a listing but a shortcut into one: the 会话 tab
+  shows these rows before any project is selected, so a cold start lands on
+  the last conversation instead of the 先选择一个项目 hint. Every fresh read
+  re-saves its entry — a cold open moves it to the top, a reply landing in an
+  already-open chat only refreshes its row. Re-pointing a host's Pi directory
+  drops its entries, since their paths name files under the old root.
 - `src/pi/sessionCache.ts` — the parsed conversation, in IndexedDB, for the
   same reason at a larger size (spec §8.6).
 
-Neither backup is ever a source of truth: every open and every discovery
+No backup is ever a source of truth: every open and every discovery
 re-reads the host.
 
 ## 0.5.x history (`release/0.5.x`)

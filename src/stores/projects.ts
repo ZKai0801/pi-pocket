@@ -34,6 +34,7 @@ import { resolveAndRememberRoot } from '../pi/lastSessionRoot';
 import { piLive, type PiDirectoryEntry } from '../session/piLive';
 import { projectsListCache } from '../pi/projectCache';
 import { sessionListsCache } from '../pi/sessionListCache';
+import { recentSessionsCache } from '../pi/recentSessionsCache';
 import { useConnectionsStore } from './connections';
 
 export type ProjectsState = 'idle' | 'loading' | 'ready' | 'no-root' | 'error';
@@ -501,8 +502,9 @@ export const useProjectsStore = defineStore('projects', () => {
       useConnectionsStore().setPiSessionsDir(name, dir);
       // Re-pointing the root invalidates that host's session rows as well:
       // their paths name files under the old root, so they are wrong rather
-      // than merely old.
+      // than merely old. The recently-opened entries name the same files.
       void sessionListsCache().clearHost(name);
+      void recentSessionsCache().clearHost(name);
     },
     added: {
       load: async () => {
