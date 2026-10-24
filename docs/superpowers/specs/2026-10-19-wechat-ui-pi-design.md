@@ -378,8 +378,13 @@ bytes to it. Pi can instead be driven directly for a turn. v1 mechanism:
    `/home/projects/softwares/node-v25.2.1-linux-x64/bin/pi`, off the
    non-interactive PATH, so the run prefixes a PATH export.
 2. Write the user message as a line (reuse `composerDelivery.ts` framing).
-3. Poll/re-read the session `.jsonl` until the assistant text turn appears;
-   refresh the chat.
+3. Poll/re-read the session `.jsonl` until the run has actually finished: the
+   assistant-turn count the run owes AND a settled tail — the file's last
+   message entry is an assistant message with no outstanding tool calls.
+   Pi appends each message the moment it is produced, an assistant's narration
+   text before the tool calls in that same message run, so a text turn
+   appearing in the file does not by itself mean the run answered; reading the
+   count alone as "answered" is what used to kill turns mid-flight.
 4. Keep the PTY for the next message in the same open chat; close it on leave.
 
 Why PTY and not a one-shot `pi -p "<msg>"` over `exec`: an agent turn can run
@@ -407,13 +412,17 @@ the 8-per-connection budget while a turn runs. Rules:
   dropped and the run is kept, so the chat still says "running" and the next
   line re-attaches to the same session instead of being refused.
 - The session is killed only once a turn has actually been answered — never on
-  a deadline or a disconnect, where Pi may still be working.
+  a deadline or a disconnect, where Pi may still be working. "Answered" is the
+  assistant-turn count the run owes **and** a settled tail (see step 3 above):
+  the same shared predicate in the runner's poll and the sweep, because a
+  count alone is reached seconds into a narrating run.
 - The runner is the only watcher that kills that session, and it does not
   outlive the app: every delivered turn is written down (host, session name,
   file, the assistant-turn count that means "answered"), and each connection
   rechecks its host's records. A run that finished while the phone was away is
-  closed then; a run whose count has not been reached is left alone, and a
-  record whose file cannot be read survives for the next connection.
+  closed then; a run whose count has not been reached — or whose tail still
+  owes tool work — is left alone, and a record whose file cannot be read
+  survives for the next connection.
 - One turn at a time per open chat; the composer is disabled while a turn runs.
 
 **Known risks to resolve in the plan:** concurrency with an already-running

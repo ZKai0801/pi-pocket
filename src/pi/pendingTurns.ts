@@ -12,10 +12,11 @@
  *
  * So every delivered turn is written down here, and each new connection
  * rechecks the records it holds for the host it just reached. A record names
- * the conversation's file and the assistant-turn count that means "answered" —
- * the same count, from the same parser, that the runner itself settles on — so
- * the sweep closes only runs that are provably finished. A run that is still
- * working has not reached that count and is left strictly alone: killing it
+ * the conversation's file and the assistant-turn count that means "answered"
+ * — the same count, from the same parser, that the runner itself settles on,
+ * backed by the same settled-tail test — so the sweep closes only runs that
+ * are provably finished. A run that is still working has not reached that
+ * count or still owes tool work, and is left strictly alone: killing it
  * would destroy exactly the work this app keeps alive across a disconnect.
  *
  * Keyed by host and session name: the name is what tmux needs, the host is
@@ -73,6 +74,21 @@ export const DEFAULT_PENDING_TURN_POLICY: PendingTurnPolicy = {
   ttlMs: 24 * 60 * 60 * 1000,
   maxTurns: 32,
 };
+
+/**
+ * Whether a run has actually been answered: the assistant-turn count the run
+ * itself settled on, AND a session file whose last message entry is an
+ * assistant message with no outstanding tool calls (`settled`).
+ *
+ * The count alone is not enough: pi appends each assistant message the moment
+ * it is produced — its text lands in the file before the tool calls in that
+ * same message run — so a narrating model reaches the target count seconds
+ * into a run that is still working. Reading the count as "answered" there is
+ * what killed turns mid-flight.
+ */
+export function isRunAnswered(session: ParsedPiSession, target: number): boolean {
+  return countAssistantTurns(session) >= target && session.settled === true;
+}
 
 /**
  * The count a record's `target` is compared against: one per assistant turn,
@@ -226,7 +242,7 @@ export async function sweepAnsweredTurns(deps: PendingTurnSweepDeps): Promise<nu
   for (const turn of turns) {
     let answered = false;
     try {
-      answered = countAssistantTurns(await deps.readSession(turn.sessionFile)) >= turn.target;
+      answered = isRunAnswered(await deps.readSession(turn.sessionFile), turn.target);
     } catch {
       continue;
     }

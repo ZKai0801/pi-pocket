@@ -41,7 +41,14 @@ describe('parsePiSession', () => {
   });
 
   it('returns an empty result for empty input', () => {
-    expect(parsePiSession('')).toEqual({ version: null, id: null, cwd: null, name: null, turns: [] });
+    expect(parsePiSession('')).toEqual({
+      version: null,
+      id: null,
+      cwd: null,
+      name: null,
+      turns: [],
+      settled: false,
+    });
   });
 
   it('previews the last assistant turn', () => {
@@ -65,5 +72,66 @@ describe('parsePiSession', () => {
     expect(assistantTurns[0].text).toBe("I'll check.\nOne moment.\nIt's busy.\nAll done.");
     expect(assistantTurns[0].text).not.toContain('check.One');
     expect(assistantTurns[0].timestampMs).toBe(1792288405001);
+  });
+
+  // The settled cases live flat in this one describe block: the unit gate's
+  // manifest registers exactly one suite per file, so nesting would hide them.
+  it('settled: is false while the last assistant message still owes tool work', () => {
+    // The narration text is already in the file, but the tool call in the
+    // same message has not run: pi appends text before it works, so only
+    // the tail separates this from a finished run.
+    const parsed = parsePiSession(
+      [header, user, assistantText, assistantThinking].join('\n'),
+    );
+    expect(parsed.settled).toBe(false);
+  });
+
+  it('settled: is false while a tool result is the last message entry', () => {
+    const parsed = parsePiSession([header, user, assistantThinking, toolResult].join('\n'));
+    expect(parsed.settled).toBe(false);
+  });
+
+  it('settled: is false when a user message is the last entry', () => {
+    const parsed = parsePiSession([header, user].join('\n'));
+    expect(parsed.settled).toBe(false);
+  });
+
+  it('settled: is true when the last message is an assistant answer without tool calls', () => {
+    const parsed = parsePiSession([header, user, assistantThinking, toolResult, assistantText].join('\n'));
+    expect(parsed.settled).toBe(true);
+  });
+
+  it('settled: is true for a thinking-only final message, as nothing is left to run', () => {
+    const thinkingOnly = '{"type":"message","id":"a9","parentId":"u1","timestamp":"2026-10-18T01:52:41.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"done"}],"timestamp":1792288357000}}';
+    const parsed = parsePiSession([header, user, thinkingOnly].join('\n'));
+    expect(parsed.settled).toBe(true);
+  });
+
+  it('settled: ignores non-message entries after the final answer', () => {
+    const parsed = parsePiSession([header, user, assistantText, sessionInfo].join('\n'));
+    expect(parsed.settled).toBe(true);
+  });
+
+  it('settled: tracks the tail across a multi-round run', () => {
+      const multiUser = '{"type":"message","id":"mu","parentId":"s1","timestamp":"2026-10-18T02:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"check the build"}],"timestamp":1792288400001}}';
+      const roundTripText1 = '{"type":"message","id":"r1","parentId":"mu","timestamp":"2026-10-18T02:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I\'ll check."}],"timestamp":1792288401001}}';
+      const roundTripTool = '{"type":"message","id":"rt","parentId":"r1","timestamp":"2026-10-18T02:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c9","name":"bash","arguments":{}}],"timestamp":1792288402001}}';
+      const roundTripResult = '{"type":"message","id":"rr","parentId":"rt","timestamp":"2026-10-18T02:00:03.000Z","message":{"role":"toolResult","toolCallId":"c9","toolName":"bash","content":[{"type":"text","text":"busy"}],"isError":false}}';
+      const finalAssistant = '{"type":"message","id":"r3","parentId":"rr","timestamp":"2026-10-18T02:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"All done."}],"timestamp":1792288405001}}';
+
+      const midRun = parsePiSession(
+        [header, multiUser, roundTripText1, roundTripTool].join('\n'),
+      );
+      expect(midRun.settled).toBe(false);
+
+      const toolsDone = parsePiSession(
+        [header, multiUser, roundTripText1, roundTripTool, roundTripResult].join('\n'),
+      );
+      expect(toolsDone.settled).toBe(false);
+
+      const finished = parsePiSession(
+        [header, multiUser, roundTripText1, roundTripTool, roundTripResult, finalAssistant].join('\n'),
+      );
+      expect(finished.settled).toBe(true);
   });
 });

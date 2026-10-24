@@ -1109,7 +1109,14 @@
         "ignores a truncated trailing line",
         "returns an empty result for empty input",
         "previews the last assistant turn",
-        "separates assistant text fragments across tool round-trips with a newline"
+        "separates assistant text fragments across tool round-trips with a newline",
+        "settled: is false while the last assistant message still owes tool work",
+        "settled: is false while a tool result is the last message entry",
+        "settled: is false when a user message is the last entry",
+        "settled: is true when the last message is an assistant answer without tool calls",
+        "settled: is true for a thinking-only final message, as nothing is left to run",
+        "settled: ignores non-message entries after the final answer",
+        "settled: tracks the tail across a multi-round run"
       ]
     },
     "tests/unit/piRepository.test.ts": {
@@ -1179,6 +1186,8 @@
         "refuses a second send while a turn is in flight",
         "reports a failed write without polling and clears busy",
         "fails with a readiness error when the PTY never prints a prompt",
+        "waits for Pi itself when the session had to be created",
+        "treats a re-attached session as ready on its repaint alone",
         "times out when a poll never sees a new assistant turn",
         "times out when a session read never settles",
         "refuses an empty message without opening a PTY",
@@ -1193,7 +1202,32 @@
         "startNew refuses to reuse a runner already attached to a session",
         "startNew refuses an empty message without opening a PTY",
         "startNew refuses a second turn while one is in flight",
-        "startNew abandons an in-flight draft when the runner is disposed"
+        "startNew abandons an in-flight draft when the runner is disposed",
+        "delivers a command and returns without polling for a reply",
+        "reuses the PTY for an in-place command, so the next message follows it",
+        "drops a terminal-owning command's PTY before the next line, not during it",
+        "runs a draft command on the sessionless PTY and adopts nothing",
+        "refuses a line that is not a command without opening a PTY",
+        "refuses a command while a turn is in flight",
+        "reports a command delivery failure without leaving the runner busy",
+        "beginSend resolves once the line is delivered and keeps the reply pending in completed",
+        "beginSend reports a delivery failure without leaving the runner busy",
+        "beginStartNew returns the adopted file before the reply and completes later",
+        "beginStartNew times out waiting for the adopted file and leaves the runner idle",
+        "steers the run in flight with Enter and waits for the extra reply",
+        "queues a follow-up with Alt+Enter and waits for its reply too",
+        "refuses to queue when no turn is running",
+        "tears the conversation session down once the reply has landed",
+        "does not settle — or kill the session — while the reply still owes tool work",
+        "refuses the send when the baseline read never succeeds",
+        "writes the turn down so a connection arriving later can close it",
+        "raises the recorded target when another message joins the run",
+        "rolls the recorded target back when the extra message never landed",
+        "leaves the session running when the poll gives up before the reply",
+        "never tears the session down when the connection goes away mid-turn",
+        "drops the dead PTY on a reconnect and keeps the run",
+        "re-attaches to the same session and delivers the line after a reconnect",
+        "re-attaches a draft to its own session, which its adopted file cannot name"
       ]
     },
     "tests/unit/turnReadiness.test.ts": {
@@ -1497,6 +1531,26 @@
         "keeps text and files when the send did not land",
         "hides the paperclip when there is no session to stage into",
         "shows the acknowledged byte count while the batch is in flight"
+      ]
+    },
+    "tests/unit/pendingTurns.test.ts": {
+      "suite": "pending turns",
+      "tests": [
+        "countAssistantTurns: counts merged turns, not assistant entries",
+        "isRunAnswered: does not call a run answered while its narration still owes tool work",
+        "isRunAnswered: calls a run answered only when the count is reached and the tail is settled",
+        "PendingTurns: remembers a turn for the host it runs on and no other",
+        "PendingTurns: overwrites the record when the same conversation sends again",
+        "PendingTurns: forgets a settled run",
+        "PendingTurns: drops a record past its ttl instead of acting on it",
+        "PendingTurns: keeps the cap by dropping the oldest records",
+        "PendingTurns: rejects a record from another build or with unusable fields",
+        "sweepAnsweredTurns: closes and forgets a session whose turn was answered while nobody watched",
+        "sweepAnsweredTurns: leaves a session alone while Pi is still working",
+        "sweepAnsweredTurns: leaves a session alone when the count is reached but tools are still running",
+        "sweepAnsweredTurns: keeps the record when the file cannot be read, so the next connection retries",
+        "sweepAnsweredTurns: does not let a failed kill drop the record",
+        "sweepAnsweredTurns: does nothing at all without a host"
       ]
     }
   }

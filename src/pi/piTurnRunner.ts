@@ -5,7 +5,7 @@ import {
   type PtyWriteAcknowledgement,
 } from '../session/composerDelivery';
 import type { TurnPtyGeometry, TurnPtyHandle } from '../session/turnPty';
-import { countAssistantTurns } from './pendingTurns';
+import { countAssistantTurns, isRunAnswered } from './pendingTurns';
 import { parseSlashLine, takesOverTerminal } from './piInteractivity';
 import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, toTurnLine, turnSessionName } from './piTurn';
 import { createConsoleTracker, isPiReady } from './turnReadiness';
@@ -432,7 +432,11 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         const session = await readAbortable(active.sessionFile, active.deadline);
         if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
         if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
-        if (countAssistantTurns(session) >= active.target) return { ok: true, session };
+        // The settle test is the count AND a settled tail: pi writes an
+        // assistant's text before the tool calls in that same message run, so
+        // the count alone is reached seconds into a run that narrates before
+        // it works — settling there is what used to kill turns mid-flight.
+        if (isRunAnswered(session, active.target)) return { ok: true, session };
       } catch {
         // A transient read failure is retried until the deadline.
       }
@@ -556,22 +560,31 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   }
 
   /**
-   * Read the assistant-turn baseline this turn has to beat. A brand-new
-   * conversation may not exist yet, and a transient failure is not fatal: the
-   * baseline stays 0, which simply means "any assistant turn". A disposal or a
-   * blown deadline is passed through, so the turn is refused before the line
-   * is written rather than delivered without a reply to wait for.
+   * Read the assistant-turn baseline this turn has to beat, retrying a
+   * transient read failure until the deadline. A baseline that defaults to
+   * zero on failure is not safe any more: an existing conversation whose last
+   * run settled would satisfy a zero-based target the moment the poll can
+   * read again, and the runner would tear the session down right after the
+   * line landed — the same mid-run kill the settle test exists to prevent. A
+   * disposal or a blown deadline is passed through, so the turn is refused
+   * before the line is written rather than delivered without a reply to wait
+   * for.
    */
   async function assistantBaseline(
     sessionFile: string,
     deadline: number,
   ): Promise<number | typeof DISPOSED | typeof TURN_DEADLINE> {
-    try {
-      const session = await readAbortable(sessionFile, deadline);
-      if (session === DISPOSED || session === TURN_DEADLINE) return session;
-      return countAssistantTurns(session);
-    } catch {
-      return 0;
+    while (true) {
+      if (disposed) return DISPOSED;
+      try {
+        const session = await readAbortable(sessionFile, deadline);
+        if (session === DISPOSED || session === TURN_DEADLINE) return session;
+        return countAssistantTurns(session);
+      } catch {
+        const remaining = deadline - now();
+        if (remaining <= 0) return TURN_DEADLINE;
+        await wait(Math.min(pollIntervalMs, remaining));
+      }
     }
   }
 

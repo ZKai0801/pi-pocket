@@ -16,12 +16,18 @@ interface FakeHandle extends TurnPtyHandle {
   close: ReturnType<typeof vi.fn>;
 }
 
-function sessionWithAssistantTurns(assistantTurns: number): ParsedPiSession {
+function sessionWithAssistantTurns(
+  assistantTurns: number,
+  settled: boolean = assistantTurns > 0,
+): ParsedPiSession {
   const turns: ParsedPiSession['turns'] = [{ role: 'user', text: 'hi', timestampMs: 1 }];
   for (let index = 0; index < assistantTurns; index += 1) {
     turns.push({ role: 'assistant', text: `reply ${index}`, timestampMs: 2 + index });
   }
-  return { version: 3, id: 'a', cwd: '/home/kai/project', name: null, turns };
+  // A turn held by the fixture is the run's final answer unless the file says
+  // otherwise: `settled: false` models a run whose last message still owes
+  // tool work (a narration with tool calls, or a trailing tool result).
+  return { version: 3, id: 'a', cwd: '/home/kai/project', name: null, turns, settled };
 }
 
 function fakeHandle(options: { autoReady?: boolean; writeError?: Error } = {}): FakeHandle {
@@ -751,6 +757,61 @@ describe('createPiTurnRunner', () => {
     // and one kept after a successful close would outlive its session.
     await flushMicrotasks();
     expect(h.forgetTurn).toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+  });
+
+  it('does not settle — or kill the session — while the reply still owes tool work', async () => {
+    // The file as pi really writes it during a run: the assistant's narration
+    // text lands before the tool calls in that same message run, then the
+    // tool's result, and only then a message without tool calls. The count
+    // reaches its target on the very first read; only the tail tells the
+    // difference between "answered" and "still working".
+    const narration = sessionWithAssistantTurns(1, false);
+    const toolResultLanded = sessionWithAssistantTurns(1, false);
+    const answered = sessionWithAssistantTurns(1, true);
+    const tail = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), narration, toolResultLanded, tail.promise],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'run the build');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+    await flushMicrotasks();
+
+    // The narration reached the turn count while the tool was still running:
+    // this is exactly the read that used to be taken for "answered" and got
+    // the agent killed mid-run (the background-running bug).
+    expect(h.runner.isBusy()).toBe(true);
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+
+    tail.resolve(answered);
+    await expect(begun.completed).resolves.toEqual({ ok: true, session: answered });
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
+    expect(h.forgetTurn).toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+  });
+
+  it('refuses the send when the baseline read never succeeds', async () => {
+    // A baseline that silently defaulted to zero would let the poll see the
+    // conversation's previous idle tail as this run's answer and tear the
+    // session down right after the line landed, so an unreadable baseline has
+    // to refuse the turn instead of guessing.
+    const h = harness({
+      autoReady: true,
+      reads: [new Error('sftp down')],
+      turnTimeoutMs: 3_000,
+    });
+
+    const result = await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/timed out/i);
+    expect(h.handle.writes).toEqual([]);
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.rememberTurn).not.toHaveBeenCalled();
   });
 
   it('writes the turn down so a connection arriving later can close it', async () => {
