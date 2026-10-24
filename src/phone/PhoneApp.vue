@@ -963,7 +963,7 @@ onBeforeUnmount(() => {
       {{ connectionMessage }}
     </p>
 
-    <div class="phone-shell__content">
+    <div class="phone-shell__content" :class="{ 'phone-shell__content--chat': sessions.open !== null }">
       <ConnectionsList
         v-show="activeTab === 'connections'"
         :editor-open="connectionView !== null"
@@ -982,7 +982,10 @@ onBeforeUnmount(() => {
       <SessionList v-show="activeTab === 'sessions' && sessions.open === null" />
     </div>
 
-    <AppTabBar v-model="activeTab" />
+    <!-- A conversation owns the whole screen: the tab bar hides while a chat
+         is open, and the chat's own back button (or Android Back) returns to
+         the 会话 list. -->
+    <AppTabBar v-if="sessions.open === null" v-model="activeTab" />
 
     <div v-if="trustCard" class="phone-shell__trust" data-testid="phone-shell-trust">
       <HostKeyTrustPrompt
@@ -1014,6 +1017,13 @@ onBeforeUnmount(() => {
   min-height: 0;
   padding-bottom: 56px;
   overflow: hidden;
+}
+
+/* With the tab bar hidden behind an open chat, its 56px clearance is dead
+   space; the shell's own safe-area padding still seats the composer above the
+   Android navigation bar. */
+.phone-shell__content--chat {
+  padding-bottom: 0;
 }
 
 .phone-shell__content > * {
