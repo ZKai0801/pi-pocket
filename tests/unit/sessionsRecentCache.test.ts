@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PiTurnBegun, PiTurnRunner, PiTurnSendResult } from '../../src/pi/piTurnRunner';
 import type { RecentSessionEntry, RecentSessionMeta } from '../../src/pi/recentSessionsCache';
+import { RECENT_SESSIONS_CACHE_SCHEMA } from '../../src/pi/recentSessionsCache';
 import type { ParsedPiSession } from '../../src/pi/types';
 import { createSessionsStore } from '../../src/stores/sessions';
 
@@ -72,7 +73,7 @@ function recents() {
       const openedAtMs = reopened || existing === undefined ? (clock += 1_000) : existing.openedAtMs;
       const kept = entries.filter((entry) => !(entry.host === host && entry.path === meta.path));
       entries.length = 0;
-      entries.push(...kept, { host, ...meta, openedAtMs });
+      entries.push(...kept, { host, schema: RECENT_SESSIONS_CACHE_SCHEMA, ...meta, openedAtMs });
     }),
     ids: () => [...entries].sort(byOpenTime).map((entry) => entry.id),
   };
