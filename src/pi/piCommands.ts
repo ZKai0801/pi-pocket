@@ -23,6 +23,17 @@ export function readSessionTailCommand(path: string, maxBytes: number): string {
   return `tail -c ${maxBytes} -- ${quoteShell(path)} 2>/dev/null`;
 }
 
+/**
+ * Remove one session file. `-f` so an already-gone file (deleted on the host
+ * while the phone was offline) still exits 0: the user's intent is "this
+ * conversation is gone", and reporting a failure for a file that is no longer
+ * there would be noise. The `--` is what keeps a path starting with `-` from
+ * being read as an option.
+ */
+export function deleteSessionFileCommand(path: string): string {
+  return `rm -f -- ${quoteShell(path)}`;
+}
+
 /** Lines `startLine..startLine+lineCount-1` (1-based), for paged fallback reads. */
 export function readSessionLinesCommand(path: string, startLine: number, lineCount: number): string {
   const from = Math.max(1, Math.floor(startLine));

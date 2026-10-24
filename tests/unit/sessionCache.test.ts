@@ -137,6 +137,39 @@ describe('SessionBackupCache', () => {
     expect(await cache.load('h', '/a.jsonl')).toBeNull();
   });
 
+  it('forgets one conversation without disturbing the others', async () => {
+    const storage = createMemorySessionCacheStorage();
+    const cache = new SessionBackupCache(storage);
+    await cache.save('hetzner', '/a.jsonl', session('a'));
+    await cache.save('hetzner', '/b.jsonl', session('b'));
+    await cache.forget('hetzner', '/a.jsonl');
+
+    expect(await cache.load('hetzner', '/a.jsonl')).toBeNull();
+    expect(await cache.load('hetzner', '/b.jsonl')).not.toBeNull();
+  });
+
+  it('forgets a conversation only on the host it was forgotten on', async () => {
+    const storage = createMemorySessionCacheStorage();
+    const cache = new SessionBackupCache(storage);
+    await cache.save('hetzner', '/a.jsonl', session('a'));
+    await cache.save('other-box', '/a.jsonl', session('a'));
+    await cache.forget('hetzner', '/a.jsonl');
+
+    expect(await cache.load('hetzner', '/a.jsonl')).toBeNull();
+    expect(await cache.load('other-box', '/a.jsonl')).not.toBeNull();
+  });
+
+  it('never throws when the storage cannot forget', async () => {
+    const storage = createMemorySessionCacheStorage();
+    const cache = new SessionBackupCache({
+      get: storage.get,
+      put: storage.put,
+      delete: vi.fn(async () => { throw new Error('idb blocked'); }),
+      all: storage.all,
+    });
+    await expect(cache.forget('hetzner', '/a.jsonl')).resolves.toBeUndefined();
+  });
+
   it('sweeps the least recently used entries past the cap on every save', async () => {
     const storage = createMemorySessionCacheStorage();
     let now = 100 * DAY_MS;

@@ -1,6 +1,7 @@
 import type { ParsedPiSession } from './types';
 import { parsePiSession, sessionPreview } from './parsePiSession';
 import {
+  deleteSessionFileCommand,
   encodePiCwd,
   listSessionDirsCommand,
   listSessionFilesCommand,
@@ -60,6 +61,30 @@ const SESSION_DIR_PATTERN = /^--.*--$/;
 function projectNameFromPath(path: string): string {
   const index = path.lastIndexOf('/');
   return index === -1 ? path : path.slice(index + 1);
+}
+
+/**
+ * `path` when it names a session file this repository may remove, else null.
+ *
+ * Deleting is the one destructive call here and it is driven by a remote
+ * listing, so the shape is checked rather than trusted: the file must sit
+ * exactly one encoded `--cwd--` directory below the session root and end in
+ * `.jsonl`. A path that fails this is refused instead of being handed to
+ * `rm` — a listing that ever answers something else (a symlink out of the
+ * tree, a stray `..`) must not become a deleted file somewhere else on the
+ * host.
+ */
+export function isRemovableSessionFile(root: string, path: string): boolean {
+  if (root.length === 0 || path.length === 0) return false;
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  if (!path.startsWith(prefix)) return false;
+  const parts = path.slice(prefix.length).split('/');
+  if (parts.length !== 2) return false;
+  const [dir = '', file = ''] = parts;
+  if (dir.length === 0 || file.length === 0) return false;
+  if (dir === '.' || dir === '..' || file === '.' || file === '..') return false;
+  if (dir.includes('\0') || file.includes('\0')) return false;
+  return file.endsWith('.jsonl') && file.length > '.jsonl'.length;
 }
 
 /** Complete lines in a `head -n` page: a trailing newline closes its last line, the absence of one ends the file. */
@@ -147,6 +172,24 @@ export class PiRepository {
 
   async readSession(path: string): Promise<ParsedPiSession> {
     return parsePiSession(await this.readSessionText(path));
+  }
+
+  /**
+   * Delete one conversation: remove its session file on the host. There is no
+   * undo — the file is the conversation, and pi has no trash. Refuses a path
+   * that is not a session file under this repository's root (see
+   * {@link isRemovableSessionFile}) rather than deleting it.
+   */
+  async deleteSession(path: string): Promise<void> {
+    if (!isRemovableSessionFile(this.sessionRoot, path)) {
+      throw new PiRepositoryError(`refusing to delete a path outside the session root: ${path}`);
+    }
+    const result = await this.transport.exec(deleteSessionFileCommand(path), EXEC_TIMEOUT_MS);
+    if (result.exitCode !== 0) {
+      throw new PiRepositoryError(
+        `failed to delete session (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
   }
 
   /**

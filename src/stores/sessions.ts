@@ -122,6 +122,14 @@ export interface SessionsStoreState {
    * every open still reads the session file from the host.
    */
   recents: RecentSessionEntry[];
+  /** The list is in multi-select mode: a tap ticks a row instead of opening it. */
+  selecting: boolean;
+  /** The ticked session file paths, in the order the user ticked them. */
+  selected: string[];
+  /** Deletions are in flight. */
+  deleting: boolean;
+  /** Why the last deletion did not go through, already in the UI's language. */
+  deleteError: string | null;
   /** The session open in the chat, or null while the list is showing. */
   open: ParsedPiSession | null;
   /** The open session's file path: `ParsedPiSession` carries no path, and the chat's pull-to-refresh re-reads it. */
@@ -170,6 +178,25 @@ export interface SessionsStore extends SessionsStoreState {
   readonly openRunning: boolean;
   /** The conversations recently opened on this host, for the 会话 tab's first screen. */
   readonly recents: RecentSessionEntry[];
+  /** Enter multi-select mode with `path` ticked. */
+  startSelection(path: string): void;
+  /** Tick or untick one row. A conversation with a turn in flight is left alone. */
+  toggleSelected(path: string): void;
+  /**
+   * Tick every deletable row in `paths`, or untick them all. The caller passes
+   * the rows it is showing: the 会话 tab paints the selected project's
+   * conversations or the recently opened ones, never both at once (spec
+   * §8.5), and only it knows which of the two is on screen.
+   */
+  setAllSelected(selected: boolean, paths: readonly string[]): void;
+  /** Leave multi-select mode and forget the ticks. */
+  cancelSelection(): void;
+  /**
+   * Delete every ticked conversation's file on the host. Conversations with a
+   * turn still in flight are skipped, and a row whose deletion failed stays
+   * ticked so it can be retried. Returns how many were deleted.
+   */
+  deleteSelected(): Promise<number>;
   /** Reads the host's recently opened conversations into `recents`. Never throws. */
   loadRecents(): Promise<void>;
   /** Lists `project`'s sessions. Joins the in-flight run only for the same host and project; otherwise claims fresh. */
@@ -253,6 +280,18 @@ export interface SessionsStoreDeps {
     meta: RecentSessionMeta,
     reopened: boolean,
   ): Promise<void>;
+  /**
+   * Remove `path`'s session file from the host. Destructive and permanent —
+   * the caller asks the user first. Optional so host-less callers (and the
+   * existing tests) keep compiling; `deleteSelected` refuses without one.
+   */
+  deleteSession?(path: string): Promise<void>;
+  /**
+   * Drop `path` from every local backup: the parsed transcript it mirrors is
+   * being deleted, and a backup that outlives its file would paint a
+   * conversation the host no longer has. Optional and best-effort.
+   */
+  forgetSession?(host: string | null, path: string): Promise<void>;
   /**
    * The active host's name, read at claim time and again at write time (D8):
    * a run captured on one host must not write under another. Defaults to
@@ -367,6 +406,10 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   const state = reactive<SessionsStoreState>({
     sessions: [],
     recents: [],
+    selecting: false,
+    selected: [],
+    deleting: false,
+    deleteError: null,
     open: null,
     openPath: null,
     lastProject: null,
@@ -397,6 +440,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   let loadToken = 0;
   let openToken = 0;
   let sendToken = 0;
+  let deleteToken = 0;
   let loadInFlight: { token: number; host: string | null; project: PiProject; promise: Promise<void> } | null = null;
   let openInFlight: { token: number; host: string | null; path: string; promise: Promise<void> } | null = null;
 
@@ -692,6 +736,147 @@ function rememberSession(
     if (state.lastProject !== null) {
       await load(state.lastProject);
     }
+  }
+
+  /* ------------------------------------------------------------ selection */
+
+  /** A conversation whose turn is still running owns a tmux session on the host: it cannot be deleted from under pi. */
+  function isDeletable(path: string): boolean {
+    return !state.running.includes(path);
+  }
+
+  /**
+   * A long-press on one row: the list becomes a tick list with that row
+   * ticked. A running conversation's row enters the mode without being
+   * ticked — it has nothing to offer a delete.
+   */
+  function startSelection(path: string): void {
+    state.selecting = true;
+    state.deleteError = null;
+    if (!isDeletable(path) || state.selected.includes(path)) return;
+    state.selected = [...state.selected, path];
+  }
+
+  function toggleSelected(path: string): void {
+    if (!isDeletable(path)) return;
+    state.deleteError = null;
+    state.selected = state.selected.includes(path)
+      ? state.selected.filter((item) => item !== path)
+      : [...state.selected, path];
+  }
+
+  /**
+   * Tick every deletable row in `paths`, or untick them all. The caller passes
+   * the rows it is showing: the 会话 tab paints the selected project's
+   * conversations or the recently opened ones, never both at once (spec
+   * §8.5), and only it knows which of the two is on screen.
+   */
+  function setAllSelected(selected: boolean, paths: readonly string[]): void {
+    state.deleteError = null;
+    if (!selected) {
+      state.selected = [];
+      return;
+    }
+    state.selected = paths.filter(isDeletable);
+  }
+
+  function cancelSelection(): void {
+    state.selecting = false;
+    state.selected = [];
+    state.deleteError = null;
+  }
+
+  /** Drop a deleted conversation from both lists and from the open chat. */
+  function dropSession(path: string): void {
+    state.sessions = state.sessions.filter((session) => session.path !== path);
+    state.recents = state.recents.filter((entry) => entry.path !== path);
+    if (state.openPath !== path) return;
+    // Its file is gone, so the chat cannot stay: the next pull-to-refresh
+    // would read a session that is no longer there.
+    state.open = null;
+    state.openPath = null;
+    state.pending = [];
+    state.modelNotes = [];
+    state.sendError = null;
+    state.sendNotice = null;
+    state.startingNew = false;
+  }
+
+  function forgetSession(host: string | null, path: string): void {
+    if (!deps.forgetSession) return;
+    void deps.forgetSession(host, path).catch(() => undefined);
+  }
+
+  /**
+   * Delete every ticked conversation: remove its session file on the host,
+   * drop it from both lists on screen, and forget the local backups that
+   * would otherwise keep painting a conversation the host no longer has.
+   *
+   * Serialised, not fanned out: each removal is an SSH round trip, and a
+   * partial failure has to know exactly which files went, so the rest stay
+   * ticked and visible instead of quietly leaving the selection. The first
+   * failure stops the sweep — whatever is still ticked is still on the host.
+   *
+   * Host-keyed like the listings (D8): the paths came from one host's
+   * listing, so a switch mid-sweep abandons the rest rather than deleting
+   * them over another host's connection.
+   */
+  async function deleteSelected(): Promise<number> {
+    if (state.deleting) return 0;
+    const requested = [...state.selected];
+    if (requested.length === 0) return 0;
+    if (!deps.deleteSession) {
+      state.deleteError = t('sessions.deleteUnavailable');
+      return 0;
+    }
+    const targets = requested.filter(isDeletable);
+    if (targets.length === 0) {
+      // Nothing there can be removed: the ticks all name conversations whose
+      // turn is still running on the host.
+      state.deleteError = t('sessions.deleteConfirmAllRunning');
+      return 0;
+    }
+    const host = hostId();
+    const token = ++deleteToken;
+    state.deleteError = null;
+    state.deleting = true;
+    const removed: string[] = [];
+    let failure: string | null = null;
+    try {
+      for (const path of targets) {
+        try {
+          await deps.deleteSession(path);
+        } catch (error) {
+          failure = t('sessions.deleteFailed', { detail: errorMessage(error) });
+          break;
+        }
+        // It went, so the row goes: the file is off the host whatever the
+        // connection does in the next tick.
+        removed.push(path);
+        dropSession(path);
+        forgetSession(host, path);
+        // A host switch under the sweep abandons the rest: the paths still
+        // to go name files on the host that was just left.
+        if (deleteToken !== token || hostId() !== host) break;
+      }
+    } finally {
+      if (deleteToken === token) {
+        state.deleting = false;
+        // What failed stays ticked so it can be retried or unticked; only a
+        // clean sweep leaves the mode.
+        state.selected = requested.filter((path) => !removed.includes(path));
+        if (state.selected.length === 0) state.selecting = false;
+      }
+    }
+    // Only a failure is an error. A skipped conversation is named in the
+    // confirm dialog before the sweep starts, not reported after it.
+    if (failure !== null) state.deleteError = failure;
+    if (removed.length > 0 && state.lastProject !== null && hostId() === host) {
+      // Keep the list's backup truthful: a deleted row must not come back on
+      // the next cold open.
+      rememberSessions(host, state.lastProject.path, state.sessions);
+    }
+    return removed.length;
   }
 
   /** Keep the just-created conversation at the top of the project's list. */
@@ -1074,6 +1259,11 @@ function rememberSession(
     state.running = [];
     state.pending = [];
     state.modelNotes = [];
+    // The ticks named files on the old host; deleting over the new host's
+    // connection would remove files this host never listed.
+    state.selecting = false;
+    state.selected = [];
+    state.deleteError = null;
     // The painted rows belong to the old host's root: they are not this
     // host's to show, so neither the backup marker nor its sync survives.
     state.stale = false;
@@ -1089,6 +1279,14 @@ function rememberSession(
     set sessions(value: PiSessionMeta[]) { state.sessions = value; },
     get recents() { return state.recents; },
     set recents(value: RecentSessionEntry[]) { state.recents = value; },
+    get selecting() { return state.selecting; },
+    set selecting(value: boolean) { state.selecting = value; },
+    get selected() { return state.selected; },
+    set selected(value: string[]) { state.selected = value; },
+    get deleting() { return state.deleting; },
+    set deleting(value: boolean) { state.deleting = value; },
+    get deleteError() { return state.deleteError; },
+    set deleteError(value: string | null) { state.deleteError = value; },
     get open() { return state.open; },
     set open(value: ParsedPiSession | null) { state.open = value; },
     get openPath() { return state.openPath; },
@@ -1129,6 +1327,11 @@ function rememberSession(
     closeChat,
     send,
     hostChanged,
+    startSelection,
+    toggleSelected,
+    setAllSelected,
+    cancelSelection,
+    deleteSelected,
   });
 }
 
@@ -1711,6 +1914,21 @@ export const useSessionsStore = defineStore('sessions', () => {
     loadRecentSessions: (host) => recentSessionsCache().load(host),
     rememberRecentSession: (host, meta, reopened) =>
       recentSessionsCache().save(host, meta, reopened),
+    // The destructive half of the seam: one exec that removes the session
+    // file. The repository refuses any path outside the active host's session
+    // root, so a listing that answers something odd cannot delete it.
+    deleteSession: async (path) => {
+      const root = await resolveActiveSessionRoot();
+      await new PiRepository(piLive().transport(), root).deleteSession(path);
+    },
+    // Its file is going away, so the local memories of it must go too: the
+    // parsed-transcript backup and the 最近打开 shortcut.
+    forgetSession: async (host, path) => {
+      await Promise.all([
+        sessionBackupCache().forget(host, path).catch(() => undefined),
+        recentSessionsCache().forget(host, path).catch(() => undefined),
+      ]);
+    },
     // D8: claims are keyed to the active host and re-checked at write time,
     // so a run captured on one host cannot write under another.
     hostId: () => connections.activeName,
@@ -1775,9 +1993,28 @@ export const useSessionsStore = defineStore('sessions', () => {
     store.newConversation(project);
   }
 
+  /**
+   * The wrapper's delete: the store drops the rows, this gives their PTYs
+   * back. A conversation with a turn still in flight is skipped by the store,
+   * so its runner is untouched here — which is what keeps a background turn
+   * alive while its neighbours are removed.
+   */
+  async function deleteSelected(): Promise<number> {
+    const before = [...store.selected];
+    const removed = await store.deleteSelected();
+    for (const path of before) {
+      if (!store.selected.includes(path)) turnRunners.release(path);
+    }
+    return removed;
+  }
+
   return {
     sessions: toRef(store, 'sessions'),
     recents: toRef(store, 'recents'),
+    selecting: toRef(store, 'selecting'),
+    selected: toRef(store, 'selected'),
+    deleting: toRef(store, 'deleting'),
+    deleteError: toRef(store, 'deleteError'),
     open: toRef(store, 'open'),
     openPath: toRef(store, 'openPath'),
     lastProject: toRef(store, 'lastProject'),
@@ -1800,6 +2037,11 @@ export const useSessionsStore = defineStore('sessions', () => {
     refresh: store.refresh,
     closeChat,
     send: store.send,
+    startSelection: store.startSelection,
+    toggleSelected: store.toggleSelected,
+    setAllSelected: store.setAllSelected,
+    cancelSelection: store.cancelSelection,
+    deleteSelected,
     disposeTurnRunner,
     rebindTurnRunner,
     sweepPendingTurns,

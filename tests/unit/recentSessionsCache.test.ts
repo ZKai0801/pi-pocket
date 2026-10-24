@@ -124,6 +124,23 @@ describe('recent sessions cache', () => {
     await expect(cache.sweep()).resolves.toBeUndefined();
   });
 
+  it('forgets one remembered conversation, keeping the rest in order', async () => {
+    const cache = memoryCache();
+    await cache.save('hetzner', meta('a'), true);
+    await cache.save('hetzner', meta('b'), true);
+    await cache.save('hetzner', meta('c'), true);
+    await cache.forget('hetzner', '/root/b.jsonl');
+
+    expect(ids(await cache.load('hetzner')).sort()).toEqual(['a', 'c']);
+  });
+
+  it('forgets nothing without a host to key the entry by', async () => {
+    const cache = memoryCache();
+    await cache.save('hetzner', meta('a'), false);
+    await cache.forget(null, '/root/a.jsonl');
+    expect(ids(await cache.load('hetzner'))).toEqual(['a']);
+  });
+
   it('clears every conversation on a host, leaving other hosts alone', async () => {
     const cache = memoryCache();
     await cache.save('hetzner', meta('a'), false);

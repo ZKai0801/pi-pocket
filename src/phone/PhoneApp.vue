@@ -116,7 +116,7 @@ function setChatCommandsOpen(open: boolean): void {
   chatCommandsOpen.value = open;
 }
 
-/** Topmost overlay/sheet wins: the terminal, then the chat's command sheet, then the Projects directory sheet. */
+/** Topmost overlay/sheet wins: the terminal, then the chat's command sheet, then the 会话 tick list, then the Projects directory sheet. */
 function closeTopmostOverlay(): boolean {
   if (terminalTarget.value !== null) {
     terminalTarget.value = null;
@@ -124,6 +124,12 @@ function closeTopmostOverlay(): boolean {
   }
   if (chatCommandsOpen.value) {
     chatCommandsOpen.value = false;
+    return true;
+  }
+  // Back out of a tick list before it becomes a tab: the ticks are one
+  // gesture from deleting files on the host, so they must be easy to drop.
+  if (sessions.selecting) {
+    sessions.cancelSelection();
     return true;
   }
   if (projects.browse.open) {

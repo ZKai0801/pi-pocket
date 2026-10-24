@@ -192,6 +192,21 @@ export class RecentSessionsCache {
   }
 
   /**
+   * Drop one remembered conversation: it was deleted, and a recent entry that
+   * outlives its file is a shortcut into a session that no longer exists.
+   * Silent when there is no host to key the entry by, and best-effort like
+   * every other write here.
+   */
+  async forget(host: string | null, path: string): Promise<void> {
+    if (host === null || host === '' || path === '') return;
+    try {
+      await this.storage.delete({ host, path });
+    } catch {
+      // A store that cannot be written leaves the entry for the sweep.
+    }
+  }
+
+  /**
    * Forget every conversation remembered on one host: its Pi session root was
    * just re-pointed, so every remembered path under the old root is wrong, not
    * merely old — tapping one would open a file that is not there.

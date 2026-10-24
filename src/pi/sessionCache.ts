@@ -140,6 +140,19 @@ export class SessionBackupCache {
     await this.sweep();
   }
 
+  /**
+   * Drop one conversation's backup outright: the file it mirrors is gone, and
+   * a backup that outlives its session would paint a conversation the host no
+   * longer has. Best-effort, like every other write here.
+   */
+  async forget(host: string | null, path: string): Promise<void> {
+    try {
+      await this.storage.delete(sessionCacheKey(host, path));
+    } catch {
+      // A store that cannot be written leaves the entry for the sweep.
+    }
+  }
+
   /** Apply the retention policy; safe to call often, cheap when nothing is due. */
   async sweep(): Promise<void> {
     const entries = await this.storage.all();
