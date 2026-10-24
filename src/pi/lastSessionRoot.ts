@@ -22,7 +22,11 @@ export function installSessionRootStorage(storage: SessionRootStorage | null): v
 function storage(): SessionRootStorage | null {
   if (installed) return installed;
   try {
-    return (globalThis as { localStorage?: SessionRootStorage }).localStorage ?? null;
+    // Node ≥25 ships a built-in `localStorage` that is an empty object when no
+    // `--localstorage-file` is configured; it shadows jsdom's working Storage
+    // under vitest, so shape-check before trusting it.
+    const ls = (globalThis as { localStorage?: SessionRootStorage }).localStorage;
+    return ls && typeof ls.getItem === 'function' ? ls : null;
   } catch {
     return null;
   }
