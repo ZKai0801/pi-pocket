@@ -227,7 +227,13 @@
         "stages sanitized attachment names, preserves partial success, and returns retention candidates",
         "does not return completed uploads as attachments after cancellation",
         "leaves the remote tree untouched for an empty attachment batch",
-        "rejects files above the native transfer limit before issuing a write",
+        "streams a file above the single-shot ceiling instead of refusing it",
+        "rejects an attachment above the upload ceiling before issuing any write",
+        "streams an attachment from a lazy source without buffering it whole",
+        "reports upload progress from acknowledged writes, ending at the full batch size",
+        "keeps reporting later files after one of them failed",
+        "deletes a staged file, and treats a missing one as already gone",
+        "refuses to delete a directory through the file-only pruner",
         "rejects stale generations before requests and after in-flight responses",
         "rejects native responses with an unrelated request ID"
       ]
@@ -1436,6 +1442,61 @@
         "reports a failed dial and an unknown host in Chinese",
         "keeps the boundary honest: native-contract and impossible failures stay English",
         "keeps the boundary note from re-absorbing a translatable family"
+      ]
+    },
+    "tests/unit/sftpChunkWriter.test.ts": {
+      "suite": "sftp chunk writer",
+      "tests": [
+        "writes a file as ordered chunks ending at the declared size",
+        "sends the exact bytes the source produced for each offset",
+        "reports progress only from acknowledged writes",
+        "marks the first chunk create-only so an existing file is refused",
+        "refuses a size above the streaming ceiling",
+        "refuses a size that is not a positive safe integer",
+        "rejects a response whose offset disagrees with the request",
+        "rejects a response whose byte count disagrees with the chunk sent",
+        "rejects a response carrying another request id",
+        "stops before the next chunk when cancelled",
+        "cancels without writing when the signal is already set",
+        "refuses a source that stalls before the declared end",
+        "refuses a chunk size outside the per-call ceiling"
+      ]
+    },
+    "tests/unit/androidAttachments.test.ts": {
+      "suite": "android attachment port",
+      "tests": [
+        "picks files as bounded saf handles instead of byte buffers",
+        "answers an empty list when the picker is cancelled",
+        "honours a single-select pick",
+        "reads a picked file back whole, in native-sized ranges",
+        "refuses to read a path this phone did not pick",
+        "stages a picked file by streaming it into the per-session folder",
+        "stages a 5 MB photo, which the old 512 KiB ceiling refused outright",
+        "prunes expired attachments in the same scope, and never the ones just uploaded",
+        "stages a clipboard-pasted byte source without touching the picker",
+        "isolates one unreadable source instead of failing the batch",
+        "refuses a file path that is not a picker handle",
+        "reports a missing connection rather than staging anywhere",
+        "reports a host whose home could not be read",
+        "answers success with no paths for an empty batch",
+        "releases the picked grant once the batch is staged",
+        "stops mid-file when the generation is replaced, and keeps what landed",
+        "evicts the oldest pick once the handle table is full"
+      ]
+    },
+    "tests/unit/chatComposerAttachments.test.ts": {
+      "suite": "chat composer attachments",
+      "tests": [
+        "stages a pick and shows it as a chip without touching the draft",
+        "folds the staged paths into the draft at send time and clears them after",
+        "allows an attachment-only send, where the block IS the message",
+        "keeps the files that landed on a partial failure, and says why",
+        "treats a cancelled pick as nothing at all",
+        "reports a missing connection owner instead of throwing at the tap",
+        "drops a removed chip from the message",
+        "keeps text and files when the send did not land",
+        "hides the paperclip when there is no session to stage into",
+        "shows the acknowledged byte count while the batch is in flight"
       ]
     }
   }

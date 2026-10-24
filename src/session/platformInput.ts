@@ -1,5 +1,5 @@
 import type { AttachmentSource } from '@pocketshell/core';
-import { MAX_SFTP_FILE_BYTES } from './files';
+import { MAX_SFTP_UPLOAD_BYTES } from './files';
 import type {
   DocumentContentPlugin,
   NativeDocumentChunk,
@@ -15,7 +15,8 @@ import { documentContent } from '../native/documentContent';
 import { speechRecognition } from '../native/speechRecognition';
 
 const CHUNK_BYTES = 48 * 1024;
-const MAX_PICKED_BATCH_BYTES = 4 * 1024 * 1024;
+/** Uploads stream, so a picked batch is bounded by the upload ceiling, not by memory. */
+const MAX_PICKED_BATCH_BYTES = MAX_SFTP_UPLOAD_BYTES;
 
 export interface PickedAttachmentFailure {
   name: string;
@@ -25,6 +26,22 @@ export interface PickedAttachmentFailure {
 export interface PickedAttachmentBatch {
   sources: AttachmentSource[];
   failures: PickedAttachmentFailure[];
+}
+
+/** A picked file that has NOT been read yet, plus the release the caller owes. */
+export interface PickedAttachmentHandle {
+  name: string;
+  fileId: string;
+  sizeBytes: number | null;
+  mimeType: string | null;
+}
+
+export interface PickedAttachmentHandles {
+  cancelled: boolean;
+  handles: PickedAttachmentHandle[];
+  failures: PickedAttachmentFailure[];
+  /** Releases the native URI permissions. Call exactly once, when done reading. */
+  release: () => Promise<void>;
 }
 
 export interface SharedContent {
@@ -82,7 +99,7 @@ export function createPlatformInputService(
 ) {
   const dictationRequests = new Map<string, DictationRequestState>();
   const chunkBytes = boundedInteger(serviceOptions.chunkBytes ?? CHUNK_BYTES, 1, 64 * 1024, 'chunkBytes');
-  const maxFileBytes = boundedInteger(serviceOptions.maxFileBytes ?? MAX_SFTP_FILE_BYTES, 1, Number.MAX_SAFE_INTEGER, 'maxFileBytes');
+  const maxFileBytes = boundedInteger(serviceOptions.maxFileBytes ?? MAX_SFTP_UPLOAD_BYTES, 1, Number.MAX_SAFE_INTEGER, 'maxFileBytes');
   const maxBatchBytes = boundedInteger(serviceOptions.maxBatchBytes ?? MAX_PICKED_BATCH_BYTES, maxFileBytes, Number.MAX_SAFE_INTEGER, 'maxBatchBytes');
 
   async function pickAttachments(): Promise<PickedAttachmentBatch> {
@@ -247,6 +264,87 @@ export function createPlatformInputService(
     await listener?.remove();
   }
 
+  /**
+   * Pick files WITHOUT reading them.
+   *
+   * Returns opaque handles plus the release the caller owes the native side.
+   * A multi-megabyte pick must not be buffered whole in JS memory, so this is
+   * the path the composer's stager uses: it reads through `readAttachmentRange`
+   * one chunk at a time and releases only when the upload is done.
+   */
+  async function pickAttachmentHandles(
+    options: { multiple?: boolean } = {},
+  ): Promise<PickedAttachmentHandles> {
+    const picked = await documents.pickFiles({ mimeType: '*/*', multiple: options.multiple !== false });
+    if (!isPickedDocuments(picked)) {
+      throw new PlatformInputError('invalid-picker-response', 'The Android file picker returned an invalid response.');
+    }
+    if (picked.cancelled) return { cancelled: true, handles: [], failures: [], release: async () => undefined };
+
+    const handles: PickedAttachmentHandle[] = [];
+    const failures: PickedAttachmentFailure[] = [];
+    let batchBytes = 0;
+    for (const file of picked.files) {
+      const name = validName(file?.name) ? file.name : 'Shared file';
+      try {
+        validatePickedDocument(file);
+        if (file.sizeBytes != null && file.sizeBytes > maxFileBytes) {
+          throw new PlatformInputError('file-too-large', `This transfer supports files up to ${maxFileBytes} bytes.`);
+        }
+        if (batchBytes + (file.sizeBytes ?? 0) > maxBatchBytes) {
+          throw new PlatformInputError('batch-too-large', `A single selection can contain at most ${maxBatchBytes} bytes.`);
+        }
+        batchBytes += file.sizeBytes ?? 0;
+        handles.push({
+          name,
+          fileId: file.fileId,
+          sizeBytes: file.sizeBytes ?? null,
+          mimeType: typeof file.mimeType === 'string' && file.mimeType.length > 0 ? file.mimeType : null,
+        });
+      } catch (error) {
+        failures.push({ name, message: errorMessage(error) });
+      }
+    }
+    return { cancelled: false, handles, failures, release: () => releasePicked(picked.files) };
+  }
+
+  async function releasePicked(files: readonly NativePickedDocument[]): Promise<void> {
+    await Promise.all(files.map(async (file) => {
+      if (typeof file?.fileId !== 'string' || file.fileId === '') return;
+      try {
+        await documents.releasePickedFile({ fileId: file.fileId });
+      } catch {
+        // Releasing is best-effort; the native registry is process-local and bounded.
+      }
+    }));
+  }
+
+  /**
+   * Read one bounded range of a still-open picked document.
+   *
+   * This is the streaming counterpart of `readDocument`: a large pick is
+   * handed to the uploader as a handle plus this reader, so its bytes are
+   * pulled one chunk at a time and never collected whole in JS memory.
+   */
+  async function readAttachmentRange(
+    fileId: string,
+    offset: number,
+    maxBytes: number,
+  ): Promise<Uint8Array> {
+    if (typeof fileId !== 'string' || fileId === '') {
+      throw new PlatformInputError('invalid-file-id', 'This picked file can no longer be read.');
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new PlatformInputError('invalid-range', 'The file range to read is invalid.');
+    }
+    const requestedBytes = Math.min(maxBytes, chunkBytes);
+    if (!Number.isSafeInteger(requestedBytes) || requestedBytes < 1) {
+      throw new PlatformInputError('invalid-range', 'The file range to read is invalid.');
+    }
+    const response = await documents.readPickedFileChunk({ fileId, offset, maxBytes: requestedBytes });
+    return decodeChunk(response, fileId, offset, requestedBytes);
+  }
+
   async function readDocument(file: NativePickedDocument, maxBytes: number): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     let totalBytes = 0;
@@ -286,6 +384,8 @@ export function createPlatformInputService(
 
   return {
     pickAttachments,
+    pickAttachmentHandles,
+    readAttachmentRange,
     listenForShares,
     startRecognition,
     stopRecognition,

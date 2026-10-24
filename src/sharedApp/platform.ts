@@ -7,6 +7,7 @@
 import { App as CapacitorApp } from '@capacitor/app';
 import { ConnectionController, type HostKeyTrustPin, type HostKeyTrustStore } from '@pocketshell/core';
 import { loadSshTransportCapabilities, sshCapability } from '@/native/sshCapability';
+import { platformInput } from '@/session/platformInput';
 import { gatewayPairings } from '@/native/gatewayPairing';
 import { createAndroidPlatform, type AndroidLifecycle } from '@/platform/android/androidApi';
 import { androidHosts, androidKeyManager } from '@/platform/android/hosts';
@@ -138,6 +139,7 @@ export const androidPlatform = createAndroidPlatform({
   gatewayTransport: async () => (await nativeTransports).gatewayTransport,
   gatewayPairings,
   vault: androidVault,
+  attachments: { picker: platformInput, capability: sshCapability },
 });
 
 export type { HostKeyTrustPin };

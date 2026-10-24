@@ -8,6 +8,7 @@
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
+import { attachmentScopeKey } from '@pocketshell/core/shared/composerAttachments';
 import { useSessionsStore } from '../../stores/sessions';
 import { useConnectionsStore } from '../../stores/connections';
 import type { PiTurn } from '../../pi/types';
@@ -143,6 +144,18 @@ const title = computed(() => {
 
 /** The chat's own project: the folder whose terminal the header opens. */
 const terminalPath = computed(() => store.lastProject?.path ?? null);
+
+/**
+ * Where this chat's attachments land: `~/.pocketshell/attachments/<scope>/`.
+ * The scope nests the workspace's basename with the session's own name, so one
+ * project's files stay in one directory across all of its sessions — the shape
+ * core's `attachmentScopeKey` defines for every platform. An open draft has no
+ * session name yet, so it scopes to the workspace alone.
+ */
+const attachmentScope = computed(() => attachmentScopeKey(
+  store.open?.name ?? 'draft',
+  store.open?.cwd ?? store.lastProject?.path ?? null,
+));
 
 function openTerminal(): void {
   const path = terminalPath.value;
@@ -373,6 +386,7 @@ function goBack(): void {
         :commands-state="commands.state"
         :command-options="commandOptions"
         :sheet-open="props.commandsOpen"
+        :attachment-scope="store.open === null ? '' : attachmentScope"
         @update:sheet-open="emit('update:commands-open', $event)"
         @request-commands="loadCommands"
         @request-options="loadOptions"

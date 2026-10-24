@@ -83,6 +83,10 @@ public final class SshCapabilityPlugin extends Plugin {
     private static final int MAX_PTY_READ_BYTES = 32 * 1024;
     private static final int MAX_PTY_WRITE_BYTES = 32 * 1024;
     private static final int MAX_SFTP_TRANSFER_BYTES = 512 * 1024;
+    /** Per-bridge-call ceiling for one chunk of a streaming write. */
+    private static final int MAX_SFTP_CHUNK_BYTES = 256 * 1024;
+    /** Declared total-size ceiling for one streaming write sequence. */
+    private static final int MAX_SFTP_STREAM_BYTES = 64 * 1024 * 1024;
     private static final int MAX_EXEC_COMMAND_CHARS = 32 * 1024;
     private static final int MAX_EXEC_OUTPUT_BYTES = 1024 * 1024;
     private static final int MAX_EXEC_TIMEOUT_MS = 120_000;
@@ -1000,6 +1004,110 @@ public final class SshCapabilityPlugin extends Plugin {
                 }
             }
             return ack(requestId);
+        });
+    }
+
+    /**
+     * Bounds for one chunk of a streaming write.
+     *
+     * Pure and package-visible so these rules are testable without an SSH
+     * connection or a mocked SFTP client: everything here is arithmetic on the
+     * declared size, the offset and the chunk length.
+     */
+    static void validateStreamChunk(long offset, long totalBytes, int length) throws PluginFailure {
+        if (totalBytes < 1 || totalBytes > MAX_SFTP_STREAM_BYTES) {
+            throw new PluginFailure("INVALID_ARGUMENT", "totalBytes is outside its supported range.");
+        }
+        if (length == 0) throw new PluginFailure("INVALID_ARGUMENT", "SFTP chunk is empty.");
+        if (length > MAX_SFTP_CHUNK_BYTES) {
+            throw new PluginFailure("INVALID_ARGUMENT", "SFTP chunk exceeds 256 KiB.");
+        }
+        if (offset < 0 || offset > MAX_SFTP_STREAM_BYTES) {
+            throw new PluginFailure("INVALID_ARGUMENT", "offset is outside its supported range.");
+        }
+        if (offset + length > totalBytes) {
+            throw new PluginFailure("INVALID_ARGUMENT", "SFTP chunk runs past the declared file size.");
+        }
+    }
+
+    /**
+     * Write one bounded chunk of a file at an absolute byte offset.
+     *
+     * Stateless on purpose. Every call resolves the path, opens, validates the
+     * OPENED inode's size against the requested offset, writes and closes. A
+     * multi-megabyte upload is therefore a sequence of independent, resumable
+     * writes with no native handle held between bridge calls: no registry, no
+     * abort path, and nothing left behind if the process dies mid-upload.
+     * The cost is one open/validate/write/close round trip per chunk, which is
+     * why MAX_SFTP_CHUNK_BYTES is large.
+     *
+     * The size check is the invariant that makes the sequence safe: a chunk
+     * may only land where the previous one ended, so a retried, reordered or
+     * concurrent write cannot silently interleave into a corrupt file.
+     */
+    @PluginMethod
+    public void sftpWriteChunk(PluginCall call) {
+        run(call, options -> {
+            String requestId = requiredString(options, "requestId");
+            SshConnection connection = requireConnection(options);
+            String path = requiredString(options, "path");
+            String rootPath = optionalString(options, "rootPath");
+            long offset = boundedLong(options, "offset", 0, MAX_SFTP_STREAM_BYTES, 0);
+            long totalBytes = requiredLong(options, "totalBytes");
+            if (totalBytes < 1 || totalBytes > MAX_SFTP_STREAM_BYTES) {
+                throw new PluginFailure("INVALID_ARGUMENT", "totalBytes is outside its supported range.");
+            }
+            boolean createOnly = Boolean.TRUE.equals(options.getBool("createOnly"));
+            String encoded = requiredString(options, "dataBase64");
+            byte[] bytes;
+            try {
+                bytes = Base64.decode(encoded, Base64.DEFAULT);
+            } catch (IllegalArgumentException error) {
+                throw new PluginFailure("INVALID_ARGUMENT", "SFTP content is not valid base64.", error);
+            }
+            validateStreamChunk(offset, totalBytes, bytes.length);
+            SFTPClient client = requireSftp(connection);
+            synchronized (connection.sftpLock) {
+                try {
+                    String writePath = path;
+                    if (rootPath != null) {
+                        ResolvedSftpPath resolved = resolveSftpPath(client, rootPath, path, true);
+                        if (offset > 0 && !resolved.exists) {
+                            throw new PluginFailure("SFTP_NOT_FOUND", "The SFTP write target does not exist.");
+                        }
+                        if (resolved.exists) {
+                            requireSftpType(resolved.attributes, net.schmizz.sshj.sftp.FileMode.Type.REGULAR,
+                                "SFTP write target is not a regular file.");
+                            if (offset == 0 && createOnly) {
+                                throw new PluginFailure("SFTP_FILE_EXISTS", "SFTP write target already exists.");
+                            }
+                        }
+                        writePath = resolved.path;
+                    }
+                    Set<OpenMode> modes = new HashSet<>(Arrays.asList(OpenMode.WRITE, OpenMode.CREAT));
+                    if (offset == 0 && createOnly) modes.add(OpenMode.EXCL);
+                    try (RemoteFile file = client.open(writePath, modes)) {
+                        FileAttributes opened = file.fetchAttributes();
+                        if (opened.getType() == net.schmizz.sshj.sftp.FileMode.Type.SYMLINK) {
+                            throw new PluginFailure("SFTP_SYMLINK", "SFTP file operations do not follow symbolic links.");
+                        }
+                        if (opened.getType() != net.schmizz.sshj.sftp.FileMode.Type.REGULAR) {
+                            throw new PluginFailure("SFTP_NOT_FILE", "SFTP write target is not a regular file.");
+                        }
+                        if (opened.getSize() != offset) {
+                            throw new PluginFailure("SFTP_OFFSET_MISMATCH",
+                                "The remote file size does not match the requested write offset.");
+                        }
+                        file.write(offset, bytes, 0, bytes.length);
+                        return ack(requestId)
+                            .put("offset", offset)
+                            .put("bytesWritten", bytes.length)
+                            .put("size", offset + bytes.length);
+                    }
+                } catch (Exception error) {
+                    throw failureFor(error);
+                }
+            }
         });
     }
 

@@ -53,6 +53,35 @@ export interface SftpReadWithOffsetOptions extends SshSftpOptions {
   offset?: number;
 }
 
+/**
+ * One bounded chunk of a streaming write.
+ *
+ * Like `SftpReadWithOffsetOptions.offset`, this is an Android-only addition:
+ * the pinned core contract carries no chunked write, the native plugin reads
+ * the method when present, and every other platform simply never calls it.
+ * The write is stateless — `offset` and the native size check are the whole
+ * sequencing mechanism, so no handle is held between calls.
+ */
+export interface SftpWriteChunkOptions extends SshSftpOptions {
+  /** Remote root the path is resolved under, as `sftpWrite` carries it. */
+  rootPath?: string;
+  /** Byte offset the chunk must land at; the native side rejects a mismatch. */
+  offset: number;
+  /** Declared total size of the file; a chunk may never run past it. */
+  totalBytes: number;
+  /** Refuse to write over an existing file on the first chunk. */
+  createOnly?: boolean;
+  dataBase64: string;
+}
+
+export interface SftpWriteChunkResult {
+  requestId: string;
+  offset: number;
+  bytesWritten: number;
+  /** Remote size after this chunk, i.e. `offset + bytesWritten`. */
+  size: number;
+}
+
 export interface NativeSftpWriteIfUnchangedOptions {
   requestId: string;
   connectionId: string;
@@ -70,6 +99,15 @@ export interface NativeSftpWriteIfUnchangedResult {
   bytesWritten?: number;
 }
 
+/** Mirrors the plugin's request/ack pair; `path` may name a file or a directory. */
+export interface NativeSftpDeleteOptions extends SshSftpOptions {
+  path: string;
+}
+
+export interface NativeSftpDeleteResult {
+  requestId: string;
+}
+
 /** Capacitor registration for the platform-neutral core effects contract. */
 export type SshCapabilityPlugin = Plugin & SshCapability;
 
@@ -81,6 +119,14 @@ export type NativeSshCapabilityPlugin = Plugin & {
   sftpWriteIfUnchanged(
     options: NativeSftpWriteIfUnchangedOptions,
   ): Promise<NativeSftpWriteIfUnchangedResult>;
+  /** Android-only chunked write; absent on every other platform. */
+  sftpWriteChunk(options: SftpWriteChunkOptions): Promise<SftpWriteChunkResult>;
+  /**
+   * Delete a file or an empty directory. Present on the native side since the
+   * Kotlin build (#2857's attachment retention), but not part of core's
+   * `SshCapability` contract — the phone is the only surface that prunes.
+   */
+  sftpDelete(options: NativeSftpDeleteOptions): Promise<NativeSftpDeleteResult>;
 };
 
 function isResourceSnapshot(value: unknown, requestId: string): value is SshResourceSnapshot {

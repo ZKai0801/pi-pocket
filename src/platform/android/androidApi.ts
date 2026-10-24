@@ -39,6 +39,8 @@ import {
   type SshHostTarget,
 } from '@pocketshell/core';
 import { AndroidConnectionHub, type ConnectionJournalEntry, type TofuDecision } from './connectionHub';
+import { createAndroidAttachmentPort, type AttachmentPicker } from './attachmentPort';
+import type { SshCapabilityPlugin } from '@/native/sshCapability';
 import { MissingHostCredential, type AndroidHostStore } from './hostStore';
 import { declinedAccountHostMessage, type AccountHostKeys } from './accountHosts';
 import { insecureGatewayMessage, resolveGatewayTarget, type GatewayConnectRequest, type GatewayPairings } from './gatewayTarget';
@@ -156,6 +158,13 @@ export interface AndroidApiDeps {
    * for a key. Absent, or an account without a vault: the phone's key flow.
    */
   vault?: Pick<AndroidVault, 'credentialFor'>;
+  /**
+   * The two native halves the attachment stager writes through (#2857): the
+   * Android document picker and the SSH capability. Absent, the `attachments`
+   * group answers "not implemented" — the same shape it had before the stager
+   * existed, so a platform built without them cannot pretend to upload.
+   */
+  attachments?: { picker: AttachmentPicker; capability: SshCapabilityPlugin };
 }
 
 export interface AndroidPlatform {
@@ -177,6 +186,42 @@ export function createAndroidPlatform(deps: AndroidApiDeps): AndroidPlatform {
     : () => undefined;
 
   const exec = (connectionId: string, command: string) => hub.exec(connectionId, command);
+
+  /**
+   * Attachments (#2857): the picker half is the phone's SAF flow, the writer
+   * half is the same SFTP capability the Files screen uses. The connection ref
+   * is read from the controller at the moment of use — the native side rejects
+   * a generation that is no longer live, so caching one would turn an ordinary
+   * reconnect into a failed upload.
+   */
+  const attachments: PocketShellApi['attachments'] = deps.attachments
+    ? createAndroidAttachmentPort({
+        picker: deps.attachments.picker,
+        capability: deps.attachments.capability,
+        connectionRef: (connectionId) => {
+          const snapshot = hub.controllerOf(connectionId)?.getSnapshot();
+          return typeof snapshot?.connectionId === 'string'
+            && snapshot.connectionId !== ''
+            && typeof snapshot.generationId === 'string'
+            && snapshot.generationId !== ''
+            ? { connectionId: snapshot.connectionId, generationId: snapshot.generationId }
+            : null;
+        },
+        home: async (connectionId) => {
+          try {
+            const result = await exec(connectionId, 'printf %s "$HOME"');
+            const home = result.stdout.trim();
+            return result.exitCode === 0 && home.startsWith('/') ? home : null;
+          } catch {
+            return null;
+          }
+        },
+      })
+    : {
+        stage: unsupported('attachments.stage'),
+        pickFiles: unsupported('attachments.pickFiles'),
+        readLocal: unsupported('attachments.readLocal'),
+      };
 
   /**
    * A gateway dial: the pairing names the device, the pin and the host's own
@@ -448,11 +493,7 @@ export function createAndroidPlatform(deps: AndroidApiDeps): AndroidPlatform {
       onStates: () => () => undefined,
     },
 
-    attachments: {
-      stage: unsupported('attachments.stage'),
-      pickFiles: unsupported('attachments.pickFiles'),
-      readLocal: unsupported('attachments.readLocal'),
-    },
+    attachments,
 
     agent: {
       kinds: async () => null,

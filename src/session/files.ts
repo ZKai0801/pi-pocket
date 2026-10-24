@@ -2,6 +2,7 @@ import {
   classifyFileByName,
   classifyFileBytes,
   composeAttachmentFilename,
+  createAttachmentUploadProgressTracker,
   decideAttachmentStage,
   evaluateFileEditSave,
   formatBytes,
@@ -19,6 +20,7 @@ import {
   sortFileEntries,
   type AttachmentRetentionPolicy,
   type AttachmentStageDecision,
+  type AttachmentUploadProgressSnapshot,
   type FileClassification,
   type FileEditSaveVerdict,
   type RemoteFileMetadata,
@@ -29,9 +31,21 @@ import type {
   SshConnectionRef,
   SshSftpEntry,
 } from '../native/sshCapability';
+import { createSftpChunkWriter, MAX_SFTP_STREAM_BYTES } from './sftpChunkWriter';
 
+/** Ceiling for anything read into JS memory at once: the editor and previews. */
 export const MAX_SFTP_FILE_BYTES = 512 * 1024;
 export const DEFAULT_FILE_READ_BYTES = MAX_SFTP_FILE_BYTES;
+/**
+ * Ceiling for an upload. Uploads stream in offset-addressed chunks, so they are
+ * not bounded by what one bridge call can carry — only by this total.
+ */
+export const MAX_SFTP_UPLOAD_BYTES = MAX_SFTP_STREAM_BYTES;
+/**
+ * Below this an upload is one `sftpWrite` round trip. Above it the chunked
+ * path is used, because a single bridge call cannot carry more than this.
+ */
+export const SINGLE_SHOT_UPLOAD_BYTES = 512 * 1024;
 
 export type FileWorkspaceEntryType = 'directory' | 'file' | 'symlink' | 'other';
 
@@ -88,6 +102,13 @@ export interface FileUploadResult {
 export interface AttachmentSource {
   name: string;
   bytes: Uint8Array;
+  /** Total size, when `bytes` is not the whole file. Defaults to its length. */
+  sizeBytes?: number;
+  /**
+   * Pull bytes on demand. Lets a picker hand over a large file without it ever
+   * being buffered whole in JS; absent means `bytes` is the entire content.
+   */
+  read?: (offset: number, maxBytes: number) => Promise<Uint8Array>;
 }
 
 export interface StagedAttachment {
@@ -106,6 +127,23 @@ export interface AttachmentStageResult {
   directory: string;
   decision: AttachmentStageDecision<StagedAttachment>;
   failures: AttachmentStageFailure[];
+}
+
+/**
+ * One acknowledged step of a staging batch.
+ *
+ * Every byte advance here comes from a native write ack (core's
+ * `createAttachmentUploadProgressTracker` enforces that), so this is a
+ * measurement of what the host has, never an estimate from elapsed time. That
+ * matters on a phone: a progress bar that predicts is a progress bar that lies
+ * when the link stalls, and this one is the only feedback a 5 MB upload has.
+ *
+ * `fileIndex`/`fileCount` address the BATCH, while a single file's own byte
+ * counts are `fileBytesWritten`/`fileBytesTotal`.
+ */
+export interface AttachmentUploadProgress extends Omit<AttachmentUploadProgressSnapshot, 'completedFileCount'> {
+  /** How many earlier files of the batch already finished. */
+  completedFileCount: number;
 }
 
 export interface AttachmentRetentionPlan {
@@ -161,7 +199,8 @@ export function createFileWorkspaceService(
   if (rootPath == null) throw new FileWorkspaceError('invalid-path', 'The file workspace root is invalid.');
   const normalizedRoot: string = rootPath;
   const fileCapability = capability as SshCapabilityPlugin &
-    Pick<NativeSshCapabilityPlugin, 'sftpWriteIfUnchanged'>;
+    Pick<NativeSshCapabilityPlugin, 'sftpWriteIfUnchanged' | 'sftpWriteChunk' | 'sftpDelete'>;
+  const chunkWriter = createSftpChunkWriter(fileCapability);
   currentDirectory = resolvePath(configuration.initialDirectory ?? normalizedRoot, normalizedRoot);
 
   function assertCurrent(): void {
@@ -341,26 +380,94 @@ export function createFileWorkspaceService(
     return btoa(binary);
   }
 
-  function checkByteLimit(bytes: Uint8Array): void {
+  function checkByteLimit(bytes: Uint8Array, limit = MAX_SFTP_FILE_BYTES, label = 'transfer'): void {
     if (!(bytes instanceof Uint8Array)) {
       throw new FileWorkspaceError('invalid-content', 'SFTP content must be a byte array.');
     }
-    if (bytes.byteLength > MAX_SFTP_FILE_BYTES) {
+    if (bytes.byteLength > limit) {
       throw new FileWorkspaceError(
         'file-too-large',
-        `This file is larger than the ${formatBytes(MAX_SFTP_FILE_BYTES)} transfer limit.`,
+        `This file is larger than the ${formatBytes(limit)} ${label} limit.`,
       );
     }
   }
 
-  async function writeBytes(path: string, bytes: Uint8Array, createOnly = true): Promise<FileUploadResult> {
-    checkByteLimit(bytes);
+  async function writeBytes(
+    path: string,
+    bytes: Uint8Array,
+    createOnly = true,
+    onProgress?: (bytesWritten: number) => void,
+  ): Promise<FileUploadResult> {
+    checkByteLimit(bytes, MAX_SFTP_UPLOAD_BYTES, 'upload');
+    if (bytes.byteLength > SINGLE_SHOT_UPLOAD_BYTES) {
+      const streamed = await chunkWriter.write({
+        connection: configuration.connection,
+        rootPath: normalizedRoot,
+        path,
+        sizeBytes: bytes.byteLength,
+        read: async (offset, maxBytes) => bytes.subarray(offset, Math.min(offset + maxBytes, bytes.byteLength)),
+        isCancelled: () => configuration.isCurrent?.() === false,
+        ...(onProgress === undefined ? {} : { onProgress }),
+      });
+      assertCurrent();
+      return { path, bytesWritten: streamed.bytesWritten };
+    }
     const options = { ...requestOptions(path), createOnly, dataBase64: encodeBase64(bytes) };
     const response = await checkedResponse(capability.sftpWrite(options), options.requestId);
     if (!Number.isSafeInteger(response.bytesWritten) || response.bytesWritten !== bytes.byteLength) {
       throw new FileWorkspaceError('invalid-response', 'The server did not confirm the whole file was written.');
     }
     return { path, bytesWritten: response.bytesWritten };
+  }
+
+  /**
+   * Stage one attachment. A source carrying `read` is streamed chunk by chunk,
+   * so a multi-megabyte pick never has to exist whole in JS memory; an empty
+   * file still takes the single-shot path because a zero-byte stream has no
+   * chunks to send.
+   */
+  async function writeAttachment(
+    path: string,
+    source: AttachmentSource,
+    sizeBytes: number,
+    onProgress?: (bytesWritten: number) => void,
+  ): Promise<FileUploadResult> {
+    if (source.read && sizeBytes > 0) {
+      const streamed = await chunkWriter.write({
+        connection: configuration.connection,
+        rootPath: normalizedRoot,
+        path,
+        sizeBytes,
+        read: source.read,
+        isCancelled: () => configuration.isCurrent?.() === false,
+        ...(onProgress === undefined ? {} : { onProgress }),
+      });
+      assertCurrent();
+      return { path, bytesWritten: streamed.bytesWritten };
+    }
+    return writeBytes(path, source.bytes, true, onProgress);
+  }
+
+  /**
+   * Remove one regular file. A missing path is success — the caller is a
+   * pruner working from a listing it read moments ago, and "already gone" is
+   * the outcome it wanted.
+   *
+   * A symlink is refused rather than followed: the pruner only ever names
+   * files the host listed inside the staging directory, so a link there means
+   * the directory was changed under us, and following it could remove
+   * something outside the tree.
+   */
+  async function deleteFile(path: string): Promise<void> {
+    const parts = fileParts(path);
+    const entry = await entryAt(parts.path);
+    if (entry == null) return;
+    assertNotSymlink(entry);
+    if (entry.type !== 'file') {
+      throw new FileWorkspaceError('not-file', 'Only regular files can be removed from the staging directory.');
+    }
+    const options = requestOptions(parts.path);
+    await checkedResponse(fileCapability.sftpDelete(options), options.requestId);
   }
 
   async function readFile(path: string, maxBytes = DEFAULT_FILE_READ_BYTES): Promise<FileReadResult> {
@@ -426,18 +533,39 @@ export function createFileWorkspaceService(
     };
   }
 
-  async function ensureDirectory(directory: string): Promise<void> {
-    const parts = fileParts(directory);
-    const existing = await entryAt(parts.path);
-    if (existing != null) {
+  /**
+   * Create `directory` and every missing ancestor below the workspace root.
+   *
+   * `~/.pocketshell/attachments` does not exist on a host that has never
+   * received an attachment, and a single-level mkdir cannot make it: probing
+   * an entry lists its PARENT, so a missing parent throws before any mkdir is
+   * issued. Walking down from the root keeps that invariant — at each step the
+   * parent was just ensured — at the cost of one listing per level, which for a
+   * staging directory is two.
+   */
+  async function ensureDirectoryTree(directory: string): Promise<void> {
+    const target = normalizeRemotePath(directory);
+    if (target == null || !isRemotePathWithin(normalizedRoot, target)) {
+      throw new FileWorkspaceError('outside-root', 'The remote path is outside the configured file workspace root.');
+    }
+    const prefix = normalizedRoot === '/' ? 1 : normalizedRoot.length + 1;
+    const rest = target === normalizedRoot ? '' : target.slice(prefix);
+    let current = normalizedRoot;
+    for (const segment of rest.split('/').filter(Boolean)) {
+      const child = joinRemoteChildPath(current, segment);
+      if (!child.ok) throw new FileWorkspaceError('invalid-path', 'The remote path cannot be created safely.');
+      current = child.path;
+      const existing = await entryAt(current);
+      if (existing == null) {
+        const options = requestOptions(current);
+        await checkedResponse(capability.sftpMkdir(options), options.requestId);
+        continue;
+      }
       assertNotSymlink(existing);
       if (!existing.isDirectory) {
-        throw new FileWorkspaceError('not-directory', 'The attachment staging path is not a directory.');
+        throw new FileWorkspaceError('not-directory', 'A part of the attachment staging path is not a directory.');
       }
-      return;
     }
-    const options = requestOptions(parts.path);
-    await checkedResponse(capability.sftpMkdir(options), options.requestId);
   }
 
   async function uploadAttachmentBatch(input: {
@@ -446,6 +574,8 @@ export function createFileWorkspaceService(
     timestamp: string;
     attachments: readonly AttachmentSource[];
     isCancelled?: () => boolean;
+    /** Called on every acknowledged write step, for the composer's progress bar. */
+    onProgress?: (progress: AttachmentUploadProgress) => void;
   }): Promise<AttachmentStageResult> {
     const base = resolvePath(input.directory);
     const scope = sanitizeAttachmentScope(input.scopeKey);
@@ -469,12 +599,23 @@ export function createFileWorkspaceService(
     const prepared = input.attachments.map((source, index) => ({
       source,
       filename: composeAttachmentFilename(input.timestamp, index, sanitizeFilename(source.name)),
+      sizeBytes: source.bytes instanceof Uint8Array
+        ? (source.sizeBytes ?? source.bytes.byteLength)
+        : Number.NaN,
     }));
-    await ensureDirectory(directory);
+    // Bounds first, then progress: a batch containing an oversized file still
+    // reports the files that CAN land, so the total is the sum of those.
+    const batchBytesTotal = prepared.reduce(
+      (total, item) => (Number.isSafeInteger(item.sizeBytes) && item.sizeBytes > 0 ? total + item.sizeBytes : total),
+      0,
+    );
+    let completedBytes = 0;
+    let completedFiles = 0;
+    await ensureDirectoryTree(folder.path);
     const initialListing = await listDirectoryAt(directory);
     const occupiedNames = new Set(initialListing.entries.map((entry) => entry.name));
 
-    for (const { source, filename } of prepared) {
+    for (const [index, { source, filename, sizeBytes }] of prepared.entries()) {
       if (input.isCancelled?.() === true) {
         return { directory, decision: decideAttachmentStage(attempts, true), failures };
       }
@@ -495,19 +636,41 @@ export function createFileWorkspaceService(
         failures.push({ sourceName: source.name, message: 'An attachment with this generated name already exists.' });
         continue;
       }
-      if (!(source.bytes instanceof Uint8Array) || source.bytes.byteLength > MAX_SFTP_FILE_BYTES) {
+      if (!(source.bytes instanceof Uint8Array)
+        || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_SFTP_UPLOAD_BYTES) {
         attempts.push({ kind: 'failed' });
         failures.push({
           sourceName: source.name,
           message: source.bytes instanceof Uint8Array
-            ? `This file is larger than the ${formatBytes(MAX_SFTP_FILE_BYTES)} transfer limit.`
+            ? `This file is larger than the ${formatBytes(MAX_SFTP_UPLOAD_BYTES)} upload limit.`
             : 'Attachment content must be a byte array.',
         });
         continue;
       }
 
+      // One tracker per FILE, not per batch: core's tracker advances its active
+      // index only on `complete`, and a failed file must not stop the progress
+      // of the ones after it (the batch keeps going on purpose). The batch
+      // totals are accumulated here instead, from the same acknowledged counts.
+      const tracker = createAttachmentUploadProgressTracker([{ name: source.name, sizeBytes }]);
+      const report = (fileBytesWritten: number, completedFileCount: number): void => {
+        input.onProgress?.({
+          fileName: source.name,
+          fileIndex: index,
+          fileCount: prepared.length,
+          fileBytesWritten,
+          fileBytesTotal: sizeBytes,
+          batchBytesWritten: completedBytes + fileBytesWritten,
+          batchBytesTotal,
+          completedFileCount,
+        });
+      };
+
       try {
-        const uploaded = await writeBytes(child.path, source.bytes);
+        const uploaded = await writeAttachment(child.path, source, sizeBytes, (written) => {
+          const step = tracker.report(0, written, sizeBytes);
+          if (step !== null) report(step.fileBytesWritten, completedFiles);
+        });
         const attachment = {
           path: uploaded.path,
           filename,
@@ -516,8 +679,15 @@ export function createFileWorkspaceService(
         };
         attempts.push({ kind: 'uploaded', attachment });
         occupiedNames.add(filename);
+        // A single-shot write has no intermediate reports at all, so the final
+        // ack is the only thing that can move the bar — and it always should.
+        tracker.complete(0, uploaded.bytesWritten);
+        report(uploaded.bytesWritten, completedFiles);
+        completedBytes += uploaded.bytesWritten;
+        completedFiles += 1;
       } catch (error) {
         assertCurrent();
+        tracker.fail(0);
         attempts.push({ kind: 'failed' });
         failures.push({ sourceName: source.name, message: errorMessage(error) });
       }
@@ -605,6 +775,7 @@ export function createFileWorkspaceService(
     },
     stageAttachments: uploadAttachmentBatch,
     planAttachmentRetention: planRetention,
+    deleteFile,
   };
 }
 

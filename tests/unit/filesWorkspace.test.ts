@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createFileWorkspaceService,
   MAX_SFTP_FILE_BYTES,
+  MAX_SFTP_UPLOAD_BYTES,
+  SINGLE_SHOT_UPLOAD_BYTES,
   type AttachmentSource,
 } from '../../src/session/files';
 import type { SshCapabilityPlugin, SshConnectionRef, SshSftpEntry } from '../../src/native/sshCapability';
@@ -26,6 +28,7 @@ interface MockSftp {
     list: ReturnType<typeof vi.fn>;
     read: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
+    writeChunk: ReturnType<typeof vi.fn>;
     conditionalWrite: ReturnType<typeof vi.fn>;
     mkdir: ReturnType<typeof vi.fn>;
     rename: ReturnType<typeof vi.fn>;
@@ -140,6 +143,30 @@ function createMockSftp(seed?: {
     }
     return { requestId: options.requestId };
   });
+  const writeChunk = vi.fn(async (options: {
+    requestId: string;
+    path: string;
+    offset: number;
+    totalBytes: number;
+    dataBase64: string;
+    createOnly?: boolean;
+  }) => {
+    const existing = files.get(options.path);
+    if (options.createOnly && existing) throw new Error(`Already exists: ${options.path}`);
+    if (options.offset > 0 && !existing) throw new Error(`No such file: ${options.path}`);
+    if (existing && existing.bytes.byteLength !== options.offset) {
+      throw new Error(`Offset mismatch at ${options.path}: ${existing.bytes.byteLength} vs ${options.offset}`);
+    }
+    const content = base64ToBytes(options.dataBase64);
+    const merged = existing ? concatBytes(existing.bytes, content) : content;
+    files.set(options.path, { bytes: merged, modifiedEpochMs: 2_000 });
+    return {
+      requestId: options.requestId,
+      offset: options.offset,
+      bytesWritten: content.byteLength,
+      size: options.offset + content.byteLength,
+    };
+  });
   const remove = vi.fn(async (options: { requestId: string; path: string }) => {
     files.delete(options.path);
     return { requestId: options.requestId };
@@ -150,6 +177,7 @@ function createMockSftp(seed?: {
     sftpList: list,
     sftpRead: read,
     sftpWrite: write,
+    sftpWriteChunk: writeChunk,
     sftpWriteIfUnchanged: conditionalWrite,
     sftpMkdir: mkdir,
     sftpRename: rename,
@@ -160,8 +188,15 @@ function createMockSftp(seed?: {
     files,
     directories,
     atomicWrite,
-    calls: { list, read, write, conditionalWrite, mkdir, rename, remove },
+    calls: { list, read, write, writeChunk, conditionalWrite, mkdir, rename, remove },
   };
+}
+
+function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const merged = new Uint8Array(left.byteLength + right.byteLength);
+  merged.set(left, 0);
+  merged.set(right, left.byteLength);
+  return merged;
 }
 
 function serviceFor(mock: MockSftp, options?: {
@@ -373,7 +408,8 @@ describe('SFTP file workspace policy and byte-I/O adapter', () => {
     const valid = new TextEncoder().encode('attachment');
     const attachments: AttachmentSource[] = [
       { name: '../plan for review?.md', bytes: valid },
-      { name: 'too-large.bin', bytes: new Uint8Array(MAX_SFTP_FILE_BYTES + 1) },
+      // Oversize is declared, not allocated: the guard rejects it on size alone.
+      { name: 'too-large.bin', bytes: new Uint8Array(0), sizeBytes: MAX_SFTP_UPLOAD_BYTES + 1 },
     ];
     const staged = await service.stageAttachments({
       directory: 'uploads',
@@ -434,13 +470,171 @@ describe('SFTP file workspace policy and byte-I/O adapter', () => {
     expect(mock.calls.mkdir).not.toHaveBeenCalled();
   });
 
-  it('rejects files above the native transfer limit before issuing a write', async () => {
+  it('streams a file above the single-shot ceiling instead of refusing it', async () => {
     const mock = createMockSftp();
     const service = serviceFor(mock);
+    const payload = new Uint8Array(SINGLE_SHOT_UPLOAD_BYTES + 1024).fill(7);
 
-    await expect(service.writeFile('large.bin', new Uint8Array(MAX_SFTP_FILE_BYTES + 1)))
-      .rejects.toMatchObject({ code: 'file-too-large' });
+    const uploaded = await service.writeFile('large.bin', payload);
+
+    expect(uploaded.bytesWritten).toBe(payload.byteLength);
+    // Offset-addressed chunks, never one oversized single-shot write.
     expect(mock.calls.write).not.toHaveBeenCalled();
+    expect(mock.calls.writeChunk).toHaveBeenCalled();
+    expect(mock.files.get('/home/alex/project/large.bin')?.bytes.byteLength).toBe(payload.byteLength);
+  });
+
+  it('rejects an attachment above the upload ceiling before issuing any write', async () => {
+    const mock = createMockSftp({ directories: ['/home/alex/project/uploads'] });
+    const service = serviceFor(mock);
+    const staged = await service.stageAttachments({
+      directory: 'uploads',
+      scopeKey: 'too-large',
+      timestamp: '20260102-030405',
+      attachments: [{
+        name: 'huge.bin',
+        bytes: new Uint8Array(0),
+        sizeBytes: MAX_SFTP_UPLOAD_BYTES + 1,
+        read: async () => new Uint8Array(0),
+      }],
+    });
+
+    expect(staged.decision).toMatchObject({ kind: 'failed' });
+    expect(staged.failures[0]?.message).toContain('upload limit');
+    expect(mock.calls.write).not.toHaveBeenCalled();
+    expect(mock.calls.writeChunk).not.toHaveBeenCalled();
+  });
+
+  it('streams an attachment from a lazy source without buffering it whole', async () => {
+    const mock = createMockSftp({ directories: ['/home/alex/project/uploads'] });
+    const service = serviceFor(mock);
+    const sizeBytes = 700 * 1024;
+    let largestRequest = 0;
+
+    const staged = await service.stageAttachments({
+      directory: 'uploads',
+      scopeKey: 'lazy',
+      timestamp: '20260102-030405',
+      attachments: [{
+        name: 'photo.png',
+        bytes: new Uint8Array(0),
+        sizeBytes,
+        read: async (offset, maxBytes) => {
+          largestRequest = Math.max(largestRequest, maxBytes);
+          return new Uint8Array(Math.min(maxBytes, sizeBytes - offset)).fill(3);
+        },
+      }],
+    });
+
+    expect(staged.decision).toMatchObject({ kind: 'complete' });
+    expect(staged.decision.kind === 'complete' && staged.decision.attachments[0]?.sizeBytes).toBe(sizeBytes);
+    // The reader is never asked for the whole file at once.
+    expect(largestRequest).toBeLessThan(sizeBytes);
+    expect(mock.calls.write).not.toHaveBeenCalled();
+  });
+
+  it('reports upload progress from acknowledged writes, ending at the full batch size', async () => {
+    const mock = createMockSftp({ directories: ['/home/alex/project/uploads'] });
+    const service = serviceFor(mock);
+    const sizeBytes = 700 * 1024;
+    const reports: Array<{
+      fileIndex: number;
+      fileCount: number;
+      batchBytesWritten: number;
+      batchBytesTotal: number;
+      completedFileCount: number;
+    }> = [];
+
+    const staged = await service.stageAttachments({
+      directory: 'uploads',
+      scopeKey: 'progress',
+      timestamp: '20260102-030405',
+      attachments: [{
+        name: 'photo.png',
+        bytes: new Uint8Array(0),
+        sizeBytes,
+        read: async (offset, maxBytes) => new Uint8Array(Math.min(maxBytes, sizeBytes - offset)).fill(3),
+      }],
+      onProgress: (progress) => {
+        reports.push({
+          fileIndex: progress.fileIndex,
+          fileCount: progress.fileCount,
+          batchBytesWritten: progress.batchBytesWritten,
+          batchBytesTotal: progress.batchBytesTotal,
+          completedFileCount: progress.completedFileCount,
+        });
+      },
+    });
+
+    expect(staged.decision).toMatchObject({ kind: 'complete' });
+    // More than one step: a 700 KiB file cannot arrive in a single ack.
+    expect(reports.length).toBeGreaterThan(1);
+    // Monotonic, never past the batch total.
+    const written = reports.map((report) => report.batchBytesWritten);
+    expect(written).toEqual([...written].sort((left, right) => left - right));
+    expect(written.every((count) => count <= sizeBytes)).toBe(true);
+    // The final ack is what closes the bar: nothing is left over.
+    expect(reports[reports.length - 1]).toMatchObject({
+      fileIndex: 0,
+      fileCount: 1,
+      batchBytesWritten: sizeBytes,
+      batchBytesTotal: sizeBytes,
+      completedFileCount: 0,
+    });
+  });
+
+  it('keeps reporting later files after one of them failed', async () => {
+    const mock = createMockSftp({ directories: ['/home/alex/project/uploads'] });
+    const service = serviceFor(mock);
+    // The first file's write is refused; the batch keeps going on purpose.
+    mock.calls.write.mockRejectedValueOnce(new Error('remote write refused'));
+    const reports: Array<{ batchBytesWritten: number; completedFileCount: number }> = [];
+
+    const staged = await service.stageAttachments({
+      directory: 'uploads',
+      scopeKey: 'mixed',
+      timestamp: '20260102-030405',
+      attachments: [
+        { name: 'broken.txt', bytes: new TextEncoder().encode('nope') },
+        { name: 'fine.txt', bytes: new TextEncoder().encode('ok') },
+      ],
+      onProgress: (progress) => {
+        reports.push({
+          batchBytesWritten: progress.batchBytesWritten,
+          completedFileCount: progress.completedFileCount,
+        });
+      },
+    });
+
+    expect(staged.failures).toHaveLength(1);
+    expect(staged.decision.attachments).toHaveLength(1);
+    // The second file still moved the bar to its own size, and the failed one
+    // never counted as completed.
+    expect(reports[reports.length - 1]).toEqual({ batchBytesWritten: 2, completedFileCount: 0 });
+  });
+
+  it('deletes a staged file, and treats a missing one as already gone', async () => {
+    const mock = createMockSftp();
+    const service = serviceFor(mock);
+    await service.writeFile('old.txt', new TextEncoder().encode('bye'));
+    expect(mock.files.has('/home/alex/project/old.txt')).toBe(true);
+
+    await service.deleteFile('old.txt');
+
+    expect(mock.files.has('/home/alex/project/old.txt')).toBe(false);
+    expect(mock.calls.remove).toHaveBeenCalledTimes(1);
+    // The pruner reads a listing first, so "already gone" is the outcome it
+    // wanted — not an error to report up the stack.
+    await expect(service.deleteFile('old.txt')).resolves.toBeUndefined();
+    expect(mock.calls.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to delete a directory through the file-only pruner', async () => {
+    const mock = createMockSftp({ directories: ['/home/alex/project/uploads'] });
+    const service = serviceFor(mock);
+
+    await expect(service.deleteFile('uploads')).rejects.toMatchObject({ code: 'not-file' });
+    expect(mock.calls.remove).not.toHaveBeenCalled();
   });
 
   it('rejects stale generations before requests and after in-flight responses', async () => {

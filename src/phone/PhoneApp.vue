@@ -61,6 +61,9 @@ import {
 } from '../session/piLive';
 import { installTerminalPty, type TerminalPty } from '../session/terminalPty';
 import { installTurnPtyOpener, type TurnPtyOpener } from '../session/turnPty';
+import { installComposerAttach, type ComposerAttachLive } from '../session/composerAttach';
+import { platformInput } from '../session/platformInput';
+import { createAndroidAttachmentPort } from '../platform/android/attachmentPort';
 import { createPiTransport } from '../pi/piTransport';
 import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
 import { projectBasename, useSessionsStore } from '../stores/sessions';
@@ -301,12 +304,14 @@ function releaseSeams(): void {
   installPiLive(null);
   installTerminalPty(null);
   installTurnPtyOpener(null);
+  installComposerAttach(null);
 }
 
 function installSeams(): void {
   installPiLive(piLiveImplementation);
   installTerminalPty(terminalPtyImplementation);
   installTurnPtyOpener(turnPtyImplementation);
+  installComposerAttach(composerAttachImplementation);
 }
 
 async function closeController(): Promise<void> {
@@ -471,7 +476,80 @@ const piLiveImplementation: PiLive = {
   },
 };
 
-/* -------------------------------------------------------------- turn PTY */
+/* ------------------------------------------------------------ attachments */
+
+function messageOf(error: unknown): string {
+  return error instanceof Error && error.message !== '' ? error.message : String(error);
+}
+
+/**
+ * The composer's attach surface (#2857): SAF pick, then SFTP staging into
+ * `~/.pocketshell/attachments/<scope>/`.
+ *
+ * `connectionRef` reads the controller's snapshot at the moment of USE, never a
+ * cached ref: the native side rejects a generation that is no longer live, so a
+ * reconnect mid-upload fails loudly instead of writing into a stale session.
+ * `home` reuses the Pi probe (`remoteContext`), which is the only place this
+ * shell already asks the host for `$HOME`; a failed probe returns null and the
+ * stager reports it rather than guessing a path.
+ */
+const attachmentPort = createAndroidAttachmentPort({
+  picker: platformInput,
+  capability: sshCapability,
+  connectionRef: () => {
+    const value = snapshot.value;
+    return value?.connectionId && value.generationId
+      ? { connectionId: value.connectionId, generationId: value.generationId }
+      : null;
+  },
+  home: async () => {
+    try {
+      const context = await piLiveImplementation.remoteContext();
+      return context.home === '' ? null : context.home;
+    } catch {
+      return null;
+    }
+  },
+});
+
+const composerAttachImplementation: ComposerAttachLive = {
+  async attach({ scopeKey, onProgress }) {
+    let handles: string[];
+    try {
+      handles = await attachmentPort.pickFiles({ multiple: true });
+    } catch (error) {
+      return { paths: [], error: messageOf(error) };
+    }
+    // A cancelled picker is not a failure: the user closed it, and an error
+    // line under an untouched draft would be noise.
+    if (handles.length === 0) return { paths: [], error: null };
+    const result = await attachmentPort.stage({
+      connectionId: snapshot.value?.connectionId ?? '',
+      scopeKey,
+      sources: handles.map((path) => ({ kind: 'file' as const, path })),
+      ...(onProgress === undefined
+        ? {}
+        : {
+            onProgress: (progress: {
+              fileName: string;
+              fileIndex: number;
+              fileCount: number;
+              batchBytesWritten: number;
+              batchBytesTotal: number;
+            }) => onProgress({
+              fileName: progress.fileName,
+              fileIndex: progress.fileIndex + 1,
+              fileCount: progress.fileCount,
+              batchBytesWritten: progress.batchBytesWritten,
+              batchBytesTotal: progress.batchBytesTotal,
+            }),
+          }),
+    });
+    return { paths: result.paths, error: result.ok ? null : result.error ?? null };
+  },
+};
+
+/* ---------------------------------------------------------- turn PTY */
 
 function decodeBase64Bytes(value: string): Uint8Array {
   const binary = atob(value);

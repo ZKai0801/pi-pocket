@@ -147,6 +147,13 @@ export const ZH = {
   'composer.steerAria': '插话：在这轮的工具调用之后改变方向',
   'composer.followUp': '排队',
   'composer.followUpAria': '排队：等这轮全部做完后再发送',
+  'composer.attach': '添加附件',
+  'composer.attachAria': '添加附件：选文件或图片，上传到主机后随消息一起发出',
+  'composer.attaching': '正在上传附件…',
+  'composer.attachingProgress': '正在上传 {index}/{count}：{done} / {total}',
+  'composer.attachments': '待发送的附件',
+  'composer.removeAttachment': '移除附件 {name}',
+  'composer.attachFailed': '附件上传失败：{detail}',
 
   /* ---- chat command sheet（+ 面板）--------------------------------- */
   'commands.title': 'Pi 功能',
@@ -447,6 +454,13 @@ export const EN: Record<MessageKey, string> = {
   'composer.steerAria': 'Steer: change direction after this turn’s tool calls',
   'composer.followUp': 'Queue',
   'composer.followUpAria': 'Queue: send after this run finishes',
+  'composer.attach': 'Attach files',
+  'composer.attachAria': 'Attach files: pick files or images, upload them to the host, then send them with the message',
+  'composer.attaching': 'Uploading attachments…',
+  'composer.attachingProgress': 'Uploading {index}/{count}: {done} / {total}',
+  'composer.attachments': 'Attachments to send',
+  'composer.removeAttachment': 'Remove {name}',
+  'composer.attachFailed': 'Attachment upload failed: {detail}',
 
   'commands.title': 'Pi actions',
   'commands.hint': 'A pick is inserted into the message box; review it, then send.',
