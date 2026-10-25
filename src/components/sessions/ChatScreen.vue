@@ -21,6 +21,7 @@ import {
 } from '../../pi/piCommandOptions';
 import { piListModelsCommand } from '../../pi/piCommands';
 import { resolvePiCommand } from '../../pi/resolvePiCommand';
+import { modelListsCache } from '../../pi/modelListCache';
 import { piLive } from '../../session/piLive';
 import { createChatCommandCatalog } from '../../session/chatCommands';
 import { createChatCommandOptions } from '../../session/chatCommandOptions';
@@ -134,10 +135,15 @@ async function listModels(project: string): Promise<ReturnType<typeof parsePiMod
 }
 
 // Options come from the app for `/thinking` and from the host for `/model`;
-// the catalog owns both so the composer never talks to the transport.
+// the catalog owns both so the composer never talks to the transport. The
+// model list is the slow probe (pi compiles its extension tree before it
+// prints), so the durable backup paints the last confirmed rows at once and
+// the probe re-confirms them in the background, keyed by host and project.
 const commandOptions = createChatCommandOptions({
   projectPath: () => store.open?.cwd ?? null,
+  hostName: () => connections.activeName,
   listModels,
+  modelListCache: modelListsCache(),
 });
 
 function loadOptions(command: PiSlashCommand): void {

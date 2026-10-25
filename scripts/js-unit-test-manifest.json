@@ -327,7 +327,14 @@
         "flags a rejection, then retries when forced",
         "keeps the host reason for the failed probe, and clears it on retry",
         "carries a non-Error rejection as text instead of losing it",
-        "does nothing without an open chat"
+        "does nothing without an open chat",
+        "paints the backup the moment the picker opens, then re-confirms in the background",
+        "asks the host once per host+project while the backup answers every open",
+        "keeps painted rows when the background refresh fails, without an error",
+        "misses the backup for another host and probes that host live",
+        "saves an empty host answer too: no credentials is an answer, not a miss",
+        "skips the backup when forced: the retry always probes",
+        "stays silent about the backup with none wired"
       ]
     },
     "tests/unit/chatCommands.test.ts": {
@@ -829,6 +836,27 @@
       "suite": "mobile control long-press hardening",
       "tests": [
         "keeps dock, launcher, dictation and Composer buttons out of text selection and the touch callout"
+      ]
+    },
+    "tests/unit/modelListCache.test.ts": {
+      "suite": "model list cache",
+      "tests": [
+        "returns the rows it saved for that host and project",
+        "keys the backup by project, so one project never shows another's rows",
+        "keys the backup by host, so one host never shows another's rows",
+        "keeps an empty list: no credentials is an answer, not a miss",
+        "treats a host-less or project-less save as a no-op instead of a shared bucket",
+        "drops an entry the TTL has expired",
+        "never throws when the storage does",
+        "sweeps the least recently confirmed entries past the cap on every save",
+        "sweeps expired entries even when the cap is not reached",
+        "truncates a list past the policy cap instead of storing it whole",
+        "selects expired and over-cap keys for eviction",
+        "discards a stored entry whose shape a newer or corrupted writer left behind",
+        "round-trips through a localStorage-shaped store and survives junk in it",
+        "ignores malformed JSON in the store rather than throwing",
+        "keeps working when localStorage itself throws",
+        "falls back to memory storage when none exists"
       ]
     },
     "tests/unit/noHostCliSurface.test.ts": {
