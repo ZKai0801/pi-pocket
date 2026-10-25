@@ -20,20 +20,22 @@ describe('pre-rewrite destination inventory', () => {
   });
 
   it('states which prior settings/support surfaces have working routes in this slice', () => {
-    const currentDestinations = ['Settings', 'TerminalSettings', 'ConnectionSettings', 'Usage', 'HostUsage', 'Ports', 'TunnelDetail', 'AddTunnel', 'Diagnostics', 'DiagnosticReport', 'About', 'ClearReports', 'Grace'];
-    for (const destination of currentDestinations) {
-      expect(DESTINATION_INVENTORY.find((entry) => entry.oldDestination === destination)?.status).toBe('available');
+    expect(DESTINATION_INVENTORY.find((entry) => entry.oldDestination === 'Settings')?.status).toBe('available');
+    // The legacy shell's usage, port-forward, files, diagnostics, about and
+    // terminal/voice/advanced settings surfaces went with the chat-only cut;
+    // only the removed status may describe them now.
+    for (const destination of ['Usage', 'HostUsage', 'Ports', 'TunnelDetail', 'AddTunnel', 'Diagnostics', 'DiagnosticReport', 'ClearReports', 'About', 'Update', 'Files', 'FileViewer', 'TerminalSettings', 'VoiceSettings', 'ConnectionSettings', 'AdvancedSettings', 'Grace']) {
+      expect(DESTINATION_INVENTORY.find((entry) => entry.oldDestination === destination)?.status, destination).toBe('removed');
     }
-    expect(DESTINATION_INVENTORY.find((entry) => entry.oldDestination === 'VoiceSettings')?.status).toBe('available');
     expect(REQUIRED_OLD_DESTINATIONS.length).toBe(DESTINATION_INVENTORY.length);
   });
 
-  it('maps the implemented file workspace as partial while Android DocumentsUI chooser interaction remains unverified', () => {
+  it('marks the file workspace routes removed with the legacy shell (the chat-only cut keeps no files route)', () => {
     for (const destination of ['Files', 'FileViewer']) {
       const mapping = DESTINATION_INVENTORY.find((entry) => entry.oldDestination === destination);
       expect(mapping?.newRoute).toBe('files');
-      expect(mapping?.status).toBe('partial');
-      expect(mapping?.note).toContain('real Android DocumentsUI chooser interaction remains unverified');
+      expect(mapping?.status).toBe('removed');
+      expect(mapping?.note).toContain('Removed with the legacy shell');
     }
   });
 

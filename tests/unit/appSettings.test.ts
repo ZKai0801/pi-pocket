@@ -105,16 +105,7 @@ describe('mobile app settings', () => {
     expect(readAppSettings(storage)).not.toHaveProperty('backgroundGraceMs');
     expect(readAppSettings(storage)).not.toHaveProperty('reconnectOnReturn');
 
-    // The phone Connections route renders core's group, not a local copy, and
-    // the Android lifecycle reads the same store.
-    const screen = source('../../src/components/SettingsScreen.vue');
-    expect(screen).toContain("import SettingsConnectionsGroup from '@ui/app/components/settings/SettingsConnectionsGroup.vue';");
-    expect(screen).toContain('<SettingsConnectionsGroup :show-title="false" />');
-    expect(screen).not.toMatch(/setting-reconnect-on-return|setting-background-grace|role="switch"/);
-    expect(source('../../src/styles.css')).not.toContain('settings-switch');
-    const app = source('../../src/App.vue');
-    expect(app).toContain('getBackgroundGraceMs: () => sharedSettings.backgroundGraceMs');
-    expect(app).toContain('getReconnectOnReturn: () => sharedSettings.reconnectOnReturn');
+    // The Android lifecycle reads the same store.
     const lifecycle = source('../../src/session/appLifecycle.ts');
     expect(lifecycle).toContain('active.returnToForeground({ reconnect: getReconnectOnReturn() })');
     expect(lifecycle).toContain('active.enterBackground(getBackgroundGraceMs())');

@@ -87,5 +87,13 @@ printf 'Running the complete Vitest suite with JSON results at %s\n' "$REPORT"
 # even when Vitest fails so CI names the failing tests (#3043).
 vitest_status=0
 "$PNPM" exec vitest run --reporter=default --reporter=json "--outputFile.json=$REPORT" || vitest_status=$?
-scripts/check-js-unit-results.py --report "$REPORT"
+# The checker's shebang is /usr/bin/python3, which does not exist on Windows
+# checkouts (the PATH `python3` there is the Microsoft Store stub, exit 49).
+# Probe for a working interpreter: python3 where it is real, python otherwise
+# (both exist on the GitHub runners).
+CHECKER_PY=python3
+if ! "$CHECKER_PY" -c 'import sys' 2>/dev/null; then
+  CHECKER_PY=python
+fi
+"$CHECKER_PY" scripts/check-js-unit-results.py --report "$REPORT"
 exit "$vitest_status"

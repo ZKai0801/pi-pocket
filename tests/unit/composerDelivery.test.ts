@@ -1,37 +1,33 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { createComposerDeliveryController } from '../../src/session/composerDelivery';
-import { useComposerDrafts } from '../../src/stores/composerDrafts';
 
-describe('composer delivery adapter and per-target drafts', () => {
+// The per-target draft store went away with the legacy shell's PromptComposer
+// (chat-only cut, 2026-10-25); the caller now owns the draft. These cases keep
+// the delivery adapter's coverage with a plain caller-owned draft variable.
+describe('composer delivery adapter', () => {
   beforeEach(() => setActivePinia(createPinia()));
 
   it('retains an ambiguous draft and does not replay it after reconnect', async () => {
-    const drafts = useComposerDrafts();
-    const targetKey = 'testuser@fixture/session-a';
-    const draft = 'café 🧪\nsecond line';
-    drafts.setDraft(targetKey, draft);
+    let draft = 'café 🧪\nsecond line';
     const writePty = vi.fn(async () => ({ ok: false, message: 'PTY write acknowledgement was lost.' }));
     const delivery = createComposerDeliveryController(writePty, async () => undefined);
     delivery.setTransportState('connected');
 
-    const result = await delivery.deliver({ operationId: 'ambiguous-send', payload: drafts.draftFor(targetKey), intent: 'submit' });
-    if (result.draftEffect === 'clear') drafts.clearDraft(targetKey);
+    const result = await delivery.deliver({ operationId: 'ambiguous-send', payload: draft, intent: 'submit' });
+    if (result.draftEffect === 'clear') draft = '';
 
     expect(result).toMatchObject({ status: 'uncertain', draftEffect: 'retain', stage: 'write' });
-    expect(drafts.draftFor(targetKey)).toBe(draft);
+    expect(draft).toBe('café 🧪\nsecond line');
 
     delivery.setTransportState('lost');
     delivery.setTransportState('connected');
-    expect(drafts.draftFor(targetKey)).toBe(draft);
+    expect(draft).toBe('café 🧪\nsecond line');
     expect(writePty).toHaveBeenCalledTimes(1);
   });
 
   it('treats an acknowledgement that arrives after transport loss as uncertain and stops the paste', async () => {
-    const drafts = useComposerDrafts();
-    const targetKey = 'testuser@fixture/session-late-ack';
-    const draft = 'first line\nsecond line';
-    drafts.setDraft(targetKey, draft);
+    let draft = 'first line\nsecond line';
 
     let resolveWrite: ((acknowledgement: { ok: boolean }) => void) | undefined;
     let markWriteStarted: (() => void) | undefined;
@@ -48,30 +44,14 @@ describe('composer delivery adapter and per-target drafts', () => {
     delivery.setTransportState('lost');
     resolveWrite?.({ ok: true });
     const result = await pending;
-    if (result.draftEffect === 'clear') drafts.clearDraft(targetKey);
+    if (result.draftEffect === 'clear') draft = '';
 
     expect(result).toMatchObject({ status: 'uncertain', reason: 'transport-lost', stage: 'write', draftEffect: 'retain', writeCount: 1 });
     expect(writePty).toHaveBeenCalledTimes(1);
-    expect(drafts.draftFor(targetKey)).toBe(draft);
+    expect(draft).toBe('first line\nsecond line');
 
     delivery.setTransportState('connected');
-    expect(drafts.draftFor(targetKey)).toBe(draft);
+    expect(draft).toBe('first line\nsecond line');
     expect(writePty).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps one session draft separate from another and clears only after acknowledged delivery', async () => {
-    const drafts = useComposerDrafts();
-    const writePty = vi.fn(async () => ({ ok: true }));
-    const delivery = createComposerDeliveryController(writePty, async () => undefined);
-    delivery.setTransportState('connected');
-    drafts.setDraft('host/session-a', 'first draft');
-    drafts.setDraft('host/session-b', 'other session');
-
-    const result = await delivery.deliver({ operationId: 'insert-a', payload: drafts.draftFor('host/session-a'), intent: 'insert' });
-    if (result.draftEffect === 'clear') drafts.clearDraft('host/session-a');
-
-    expect(result).toMatchObject({ status: 'delivered', intent: 'insert', draftEffect: 'clear' });
-    expect(drafts.draftFor('host/session-a')).toBe('');
-    expect(drafts.draftFor('host/session-b')).toBe('other session');
   });
 });

@@ -53,11 +53,29 @@ def load_manifest() -> dict[str, set[tuple[tuple[str, ...], str]]]:
         titles = details.get("tests")
         if not isinstance(suite, str) or not suite.strip():
             raise GateFailure(f"{MANIFEST}: {raw_path} must name one describe block")
-        if not isinstance(titles, list) or not titles or any(not isinstance(t, str) or not t.strip() for t in titles):
+        if not isinstance(titles, list) or not titles:
             raise GateFailure(f"{MANIFEST}: {raw_path} must register non-empty test titles")
-        if len(titles) != len(set(titles)):
+        # Each test is one describe deep. A plain string registers it under the
+        # file's describe block; an object {"suite": ..., "title": ...}
+        # registers it under another top-level describe of the same file, so a
+        # file with several describe blocks stays exactly registered.
+        keys: list[tuple[tuple[str, ...], str]] = []
+        for raw_title in titles:
+            if isinstance(raw_title, str):
+                if not raw_title.strip():
+                    raise GateFailure(f"{MANIFEST}: {raw_path} has an empty test title")
+                keys.append(((suite,), raw_title))
+            elif isinstance(raw_title, dict):
+                block = raw_title.get("suite")
+                title = raw_title.get("title")
+                if not isinstance(block, str) or not block.strip() or not isinstance(title, str) or not title.strip():
+                    raise GateFailure(f"{MANIFEST}: {raw_path} test entry must name a describe block and a title: {raw_title!r}")
+                keys.append(((block,), title))
+            else:
+                raise GateFailure(f"{MANIFEST}: {raw_path} test entry must be a title string or a suite/title object: {raw_title!r}")
+        if len(keys) != len(set(keys)):
             raise GateFailure(f"{MANIFEST}: {raw_path} has duplicate test titles")
-        expected[raw_path] = {((suite,), title) for title in titles}
+        expected[raw_path] = set(keys)
 
     if sum(map(len, expected.values())) <= 0:
         raise GateFailure(f"{MANIFEST}: registered test count must be positive")

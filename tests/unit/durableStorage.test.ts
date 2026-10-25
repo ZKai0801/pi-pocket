@@ -8,7 +8,6 @@ import {
   type DurableStorageOpenResult,
   type DurableStorageWriter,
 } from '../../src/native/durableStorage';
-import { HOST_SNIPPETS_STORAGE_KEY, HostSnippetRepository } from '../../src/stores/hostSnippets';
 import { readDiagnosticEvents } from '../../src/diagnostics';
 import { DEFAULT_APP_SETTINGS, SETTINGS_STORAGE_KEY, persistAppSettings, readAppSettings } from '../../src/stores/appSettings';
 
@@ -81,7 +80,7 @@ function harness(open: Partial<DurableStorageOpenResult> = {}) {
 describe('Android durable storage seam', () => {
   it('imports existing localStorage once and makes the native store authoritative', async () => {
     const { local, writer, dependencies } = harness({ initialized: false });
-    local.setItem(HOST_SNIPPETS_STORAGE_KEY, '{"saved":true}');
+    local.setItem('host.chips', '{"saved":true}');
     local.setItem(SETTINGS_STORAGE_KEY, '{"themeChoice":"nord"}');
 
     const status = await installDurableStorage(dependencies);
@@ -89,7 +88,7 @@ describe('Android durable storage seam', () => {
     expect(status).toEqual({ state: 'native-durable', imported: 2, restored: 0, removed: 0 });
     expect(writer.calls).toEqual(['import']);
     expect(Object.fromEntries(writer.committed)).toEqual({
-      [HOST_SNIPPETS_STORAGE_KEY]: '{"saved":true}',
+      'host.chips': '{"saved":true}',
       [SETTINGS_STORAGE_KEY]: '{"themeChoice":"nord"}',
     });
     expect(local.getItem(SETTINGS_STORAGE_KEY)).toBe('{"themeChoice":"nord"}');
@@ -99,15 +98,15 @@ describe('Android durable storage seam', () => {
     // The WebView's on-disk state lags: the deleted chip is back, a new key is missing.
     const { local, writer, dependencies } = harness({
       initialized: true,
-      entries: { [HOST_SNIPPETS_STORAGE_KEY]: '{"chips":["keep"]}', 'shared.ui.width': '320' },
+      entries: { 'host.chips': '{"keep":true}', 'shared.ui.width': '320' },
     });
-    local.setItem(HOST_SNIPPETS_STORAGE_KEY, '{"chips":["keep","deleted"]}');
+    local.setItem('host.chips', '{"keep":true,"deleted":true}');
     local.setItem('removed.before.kill', 'stale');
 
     const status = await installDurableStorage(dependencies);
 
     expect(status).toEqual({ state: 'native-durable', imported: 0, restored: 2, removed: 1 });
-    expect(local.getItem(HOST_SNIPPETS_STORAGE_KEY)).toBe('{"chips":["keep"]}');
+    expect(local.getItem('host.chips')).toBe('{"keep":true}');
     expect(local.getItem('shared.ui.width')).toBe('320');
     expect(local.getItem('removed.before.kill')).toBeNull();
     // Hydration itself never writes back to native storage.
@@ -233,29 +232,13 @@ describe('Android durable storage seam', () => {
     expect(codeBeforeWarmUp).not.toMatch(/\.(open|ping|getInfo)\(|installAndroid|await /);
   });
 
-  it('makes the real snippet and settings stores durable, and refuses to acknowledge a delete that did not commit', async () => {
+  it('makes the real settings store durable, and persisted settings read back through the durable path', async () => {
     const { local, writer, dependencies } = harness({ initialized: true, entries: {} });
     await installDurableStorage(dependencies);
-    const repository = new HostSnippetRepository(local);
-
-    expect(repository.createSnippet('me@box:22', 'keep', 'echo keep', 'command')).toBe(true);
-    expect(repository.createSnippet('me@box:22', 'drop', 'echo drop', 'command')).toBe(true);
-    const drop = repository.itemsForHost('me@box:22').find((item) => item.label === 'drop');
-    expect(drop).toBeDefined();
-    expect(repository.deleteItem('me@box:22', drop!)).toBe(true);
-    const committed = JSON.parse(writer.committed.get(HOST_SNIPPETS_STORAGE_KEY) ?? 'null');
-    expect(committed.snippets.map((item: { label: string }) => item.label)).toEqual(['keep']);
 
     persistAppSettings({ ...DEFAULT_APP_SETTINGS, themeChoice: 'gruvbox-dark', terminalFontSize: 16 }, local);
     expect(JSON.parse(writer.committed.get(SETTINGS_STORAGE_KEY) ?? '{}').themeChoice).toBe('gruvbox-dark');
     expect(readAppSettings(local).themeChoice).toBe('gruvbox-dark');
-
-    writer.failWith = 'disk error';
-    const keep = repository.itemsForHost('me@box:22').find((item) => item.label === 'keep');
-    expect(repository.deleteItem('me@box:22', keep!)).toBe(false);
-    expect(repository.error).toMatch(/could not be written/);
-    expect(repository.itemsForHost('me@box:22').map((item) => item.label)).toEqual(['keep']);
-    expect(JSON.parse(local.getItem(HOST_SNIPPETS_STORAGE_KEY) ?? 'null').snippets).toHaveLength(1);
   });
 
   it('boots the app only after durable storage is installed, because stores read saved data at import time', () => {

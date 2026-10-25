@@ -3,23 +3,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { createSSRApp, h } from 'vue';
-import { renderToString } from 'vue/server-renderer';
-import { createPinia, setActivePinia } from 'pinia';
-import AboutScreen from '../../src/components/AboutScreen.vue';
-import BuildIntegrityAlert from '../../src/components/BuildIntegrityAlert.vue';
-import { useNavigationStore } from '../../src/stores/navigation';
-import { aboutBuildLine, connectionStateLabel, terminalStateLabel } from '../../src/session/releaseLabels';
 import { createFileWorkspaceService, MAX_SFTP_FILE_BYTES, type FileEditSnapshot } from '../../src/session/files';
 import type { SshCapabilityPlugin } from '../../src/native/sshCapability';
 import viteConfig, { devBrowserModulesIn, refuseDevBrowserModules } from '../../vite.config';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-/** Every Android-owned screen template the user can reach (default shell and the shared app's Android views). */
+/** Every Android-owned screen template the user can reach (the shared app's Android views and the top-level components left). */
 function screenTemplates(): Array<{ file: string; template: string }> {
   const files = [
-    'src/App.vue',
     ...readdirSync(path.join(repoRoot, 'src/components')).filter((name) => name.endsWith('.vue')).map((name) => `src/components/${name}`),
     ...readdirSync(path.join(repoRoot, 'src/sharedApp')).filter((name) => name.endsWith('.vue')).map((name) => `src/sharedApp/${name}`),
   ];
@@ -117,8 +109,6 @@ function internalWordingMatch(text: string): RegExpMatchArray | null {
  * list cannot go stale or hide a new message.
  */
 const NOT_USER_VISIBLE: Array<{ file: string; text: string; reason: string }> = [
-  { file: 'src/App.vue', text: 'waiting for a live PTY', reason: 'hidden terminal-resize-status data-status hook' },
-  { file: 'src/App.vue', text: 'native bridge error', reason: 'hidden terminal-resize-status data-status hook' },
   { file: 'src/platform/androidDiagnostics.ts', text: 'Native crash', reason: 'crash-report category shared with core DiagnosticsPanel and the Java recorder; follow-up' },
 ];
 
@@ -225,7 +215,7 @@ function devImportsIn(file: string, source: string): string[] {
 describe('release look (#3023)', () => {
   it('renders none of the removed developer chrome on any Android screen template', () => {
     const templates = screenTemplates();
-    expect(templates.length).toBeGreaterThan(15);
+    expect(templates.length).toBeGreaterThan(5);
     const hits: string[] = [];
     for (const { file, template } of templates) {
       for (const [label, pattern] of REMOVED_CHROME) {
@@ -242,94 +232,10 @@ describe('release look (#3023)', () => {
     expect(hits).toEqual([]);
   });
 
-  it('names diagnostic events without implementation terms', () => {
-    const diagnostics = readFileSync(path.join(repoRoot, 'src/components/DiagnosticsScreen.vue'), 'utf8');
-    const titles = diagnostics.slice(diagnostics.indexOf('const titles'), diagnostics.indexOf('return titles'));
-    const labels = [...titles.matchAll(/:\s*'([^']+)'/g)].map((match) => match[1]);
-    expect(labels.length).toBeGreaterThan(8);
-    for (const label of labels) expect(label).not.toMatch(/\bbridge\b|\bnative\b|snapshot/i);
-  });
-
-  it('keeps build identity and SSH state as hidden test hooks, not visible text', () => {
-    const app = readFileSync(path.join(repoRoot, 'src/App.vue'), 'utf8');
-    for (const testId of ['build-status', 'ssh-resources', 'terminal-resize-status']) {
-      const at = app.indexOf(`data-testid="${testId}"`);
-      expect(at, testId).toBeGreaterThan(0);
-      const tag = app.slice(app.lastIndexOf('<', at), app.indexOf('>', at) + 1);
-      expect(tag, testId).toMatch(/\shidden\s/);
-    }
-    expect(app).toMatch(/data-testid="build-status"[\s\S]*?:data-state="buildStatusTone"[\s\S]*?:data-core-revision="coreSourceRevision"[\s\S]*?:data-bundle-hash="bundleHash"/);
-    expect(app).toMatch(/data-testid="terminal-resize-status" :data-status="terminalResizeStatus"/);
-    // The failure reason stays available to support, on the hook and in About.
-    expect(app).toMatch(/data-testid="build-status"[\s\S]*?:data-failure-reason="buildFailureReason"/);
-    expect(app).toMatch(/<AboutScreen[\s\S]*?:failure-reason="buildFailureReason"/);
-  });
-
-  it('names connection states in plain language', () => {
-    expect(connectionStateLabel('idle')).toBe('Not connected');
-    expect(connectionStateLabel('connecting')).toBe('Connecting…');
-    expect(connectionStateLabel('live')).toBe('Connected');
-    expect(connectionStateLabel('reconnecting')).toBe('Reconnecting…');
-    expect(connectionStateLabel('lost')).toBe('Disconnected');
-    expect(connectionStateLabel('error')).toBe('Connection failed');
-    expect(terminalStateLabel('lost')).toBe('Disconnected');
-    expect(terminalStateLabel('idle')).toBe('Disconnected');
-    expect(terminalStateLabel('reconnecting')).toBe('Reconnecting…');
-    for (const phase of ['idle', 'connecting', 'awaiting-trust', 'connected', 'listing', 'attaching', 'live', 'background', 'reconnecting', 'lost', 'error'] as const) {
-      expect(connectionStateLabel(phase)).not.toMatch(/PTY|[A-Z]{3,}|-/);
-      expect(terminalStateLabel(phase)).not.toMatch(/PTY|[A-Z]{3,}|-/);
-    }
-  });
-
-  it('puts the build identity in one plain About line', () => {
-    const core = 'abcdef0123456789abcdef0123456789abcdef01';
-    expect(aboutBuildLine('verified', core, '0.6.0')).toBe('Version 0.6.0 · build abcdef012345 · files checked');
-    expect(aboutBuildLine('checking', core, 'unknown')).toBe('build abcdef012345 · checking files…');
-    expect(aboutBuildLine('error', core, '')).toBe('build abcdef012345 · file check failed');
-    const about = readFileSync(path.join(repoRoot, 'src/components/AboutScreen.vue'), 'utf8');
-    expect(about).toMatch(/data-testid="about-build-identity"[\s\S]*?:data-core-revision="coreRevision"[\s\S]*?>\{\{ buildLine \}\}</);
-  });
-
-  it('shows a plain reinstall alert on home only when the build check fails', async () => {
-    const html = await renderToString(createSSRApp({ render: () => h(BuildIntegrityAlert) }));
-    expect(html).toContain('role="alert"');
-    expect(html).toContain('data-testid="build-integrity-error"');
-    expect(html).toContain('This copy of PocketShell looks damaged');
-    expect(html).toContain('Reinstall the app to fix this.');
-    const app = readFileSync(path.join(repoRoot, 'src/App.vue'), 'utf8');
-    expect(app).toMatch(/<BuildIntegrityAlert v-if="buildStatusTone === 'error'" \/>/);
-    expect(app.match(/<BuildIntegrityAlert\b/g)).toHaveLength(1);
-  });
-
-  it('tells About readers to reinstall, with the failure reason for support, only on a failed check', async () => {
-    const reason = 'Bundled asset hash mismatch: assets/index-abc.js';
-    const renderAbout = (buildState: 'checking' | 'verified' | 'error', failureReason = '') => {
-      const pinia = createPinia();
-      setActivePinia(pinia);
-      useNavigationStore().open('about');
-      const app = createSSRApp({
-        render: () => h(AboutScreen, { buildState, coreRevision: 'abcdef0123456789abcdef0123456789abcdef01', bundleHash: '', failureReason }),
-      });
-      app.use(pinia);
-      return renderToString(app);
-    };
-    const failed = await renderAbout('error', reason);
-    expect(failed).toMatch(/<div[^>]*role="alert"[^>]*data-testid="about-integrity-error"/);
-    expect(failed).toContain('This copy of PocketShell failed its integrity check. Reinstall the app to fix this.');
-    expect(failed).toContain(`Details for support: ${reason}`);
-    expect(failed).toContain('build abcdef012345 · file check failed');
-    for (const state of ['checking', 'verified'] as const) {
-      const html = await renderAbout(state);
-      expect(html, state).not.toContain('role="alert"');
-      expect(html, state).not.toContain('Reinstall the app');
-      expect(html, state).not.toContain('Details for support');
-    }
-  });
   it('keeps internal transport and implementation words out of user-visible script strings', () => {
     const files = sourceFiles();
     expect(files.length).toBeGreaterThan(60);
     expect(files).toContain('src/session/files.ts');
-    expect(files).toContain('src/components/FileWorkspaceScreen.vue');
     expect(files.some((file) => file.startsWith(DEV_ONLY_DIRECTORY))).toBe(true);
     const modules = moduleSources();
     expect(modules.filter((file) => file.startsWith(DEV_ONLY_DIRECTORY)).length).toBeGreaterThan(5);
@@ -402,7 +308,7 @@ describe('release look (#3023)', () => {
     const plugin = refuseDevBrowserModules();
     expect(plugin.apply).toBe('build');
     const devModule = path.join(repoRoot, 'src/dev/browser/seedHosts.ts');
-    const appModules = [path.join(repoRoot, 'src/main.ts'), path.join(repoRoot, 'src/App.vue?vue&type=script&setup=true&lang.ts'), '\0plugin-vue:export-helper', path.join(repoRoot, 'src/devices.ts')];
+    const appModules = [path.join(repoRoot, 'src/main.ts'), path.join(repoRoot, 'src/phone/PhoneApp.vue?vue&type=script&setup=true&lang.ts'), '\0plugin-vue:export-helper', path.join(repoRoot, 'src/devices.ts')];
     expect(devBrowserModulesIn([...appModules, devModule, `\0${devModule}?commonjs-proxy`])).toEqual(['src/dev/browser/seedHosts.ts', 'src/dev/browser/seedHosts.ts']);
     const buildEnd = plugin.buildEnd as (this: { getModuleIds: () => IterableIterator<string> }, error?: Error) => void;
     expect(() => buildEnd.call({ getModuleIds: () => appModules.values() })).not.toThrow();
@@ -425,7 +331,5 @@ describe('release look (#3023)', () => {
     const error = await service.saveText(snapshot, 'a'.repeat(MAX_SFTP_FILE_BYTES + 1)).catch((cause: unknown) => cause);
     expect(error).toMatchObject({ code: 'file-too-large' });
     expect((error as Error).message).toMatch(/^This file is larger than the .+ transfer limit\.$/);
-    const screen = readFileSync(path.join(repoRoot, 'src/components/FileWorkspaceScreen.vue'), 'utf8');
-    expect(screen).toContain('statusMessage.value = `This file is ${formatBytes(entry.sizeBytes)}, larger than the ${formatBytes(MAX_SFTP_FILE_BYTES)} transfer limit.`;');
   });
 });

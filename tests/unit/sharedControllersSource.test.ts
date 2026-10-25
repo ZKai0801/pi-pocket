@@ -46,13 +46,4 @@ describe('shared controllers are bound from core, never copied', () => {
     }
     expect(offenders).toEqual([]);
   });
-
-  it('the app binds usage, forwarding and the sync probe from @pocketshell/core', () => {
-    const app = readFileSync(path.join(srcRoot, 'App.vue'), 'utf8');
-    const coreImport = app.match(/import\s*\{([^}]*)\}\s*from\s*'@pocketshell\/core'/)?.[1] ?? '';
-    for (const name of ['readHostUsage', 'PortForwardController', 'runSyncRound']) {
-      expect(coreImport).toMatch(new RegExp(`\\b${name}\\b`));
-    }
-    expect(app).toMatch(/__ps2852RunSettingsSync\s*=\s*runSyncRound\b/);
-  });
 });

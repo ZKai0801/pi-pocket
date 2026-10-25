@@ -86,7 +86,7 @@ describe('piNodePathPrelude', () => {
   });
 });
 
-describe('piNodePathPrelude', () => {
+describe('piNodePathPrelude for a versioned node install', () => {
   const prelude = piNodePathPrelude('/home/projects/softwares/node-v25.2.1-linux-x64/bin/pi');
 
   it('does nothing when node is already on PATH', () => {

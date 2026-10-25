@@ -12,15 +12,19 @@ import { describe, expect, it } from 'vitest';
  */
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-/** Tokens Android sets at runtime from Capacitor/IME insets (see App.vue). */
+/** Tokens Android sets at runtime from Capacitor/IME insets (see PhoneApp.vue). */
 const RUNTIME_TOKENS = new Set([
   '--safe-area-inset-top',
   '--safe-area-inset-right',
   '--safe-area-inset-bottom',
   '--safe-area-inset-left',
-  // App.vue writes the font-size-derived minimum terminal grid height onto
-  // the document root with style.setProperty (#2884).
+  // The legacy shell wrote the font-size-derived minimum terminal grid height
+  // and the terminal-dock sizing tokens onto the terminal viewport's inline
+  // style (#2884); nothing sets them in the chat-only cut, so the terminal
+  // rules read their fallbacks until the terminal cut removes them.
   '--terminal-min-grid-height',
+  '--terminal-viewport-dock-cap',
+  '--terminal-hotkeys-dock-height',
 ]);
 
 const COLOUR_LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(/;
@@ -74,7 +78,7 @@ function vueFiles(dir: string): string[] {
 }
 
 function phoneStyleSources(): string[] {
-  return ['src/styles.css', 'src/App.vue', ...vueFiles('src/components'), ...vueFiles('src/phone')];
+  return ['src/styles.css', ...vueFiles('src/components'), ...vueFiles('src/phone')];
 }
 
 /** Named colours used as a value of a colour-bearing declaration. */
