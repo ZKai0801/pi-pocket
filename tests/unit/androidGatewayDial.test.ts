@@ -209,7 +209,9 @@ describe('Android dials the gateway behind the native capability (#3086 slice 3)
     const { native, created } = await setup();
     const result = await created.api.ssh.connect(gatewayRequest());
     if (!result.ok) throw new Error(result.error);
-    await created.hub.sessionsList(result.connectionId!);
+    // The chat-only cut (D45) removed the hub's session listing; the live
+    // listing still rides the controller directly.
+    await created.hub.controllerOf(result.connectionId!)!.refreshSessions();
     // The transport drops; the controller (the one reconnect owner) re-dials.
     native.dropTransport();
     await settle(() => native.connects.length === 2);

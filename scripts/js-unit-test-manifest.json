@@ -143,18 +143,10 @@
         "the shared connection store prompts through ssh.onTrustDecision instead of dialling accept-always",
         "abandons a waiting host-key question when the user disconnects",
         "ignores a caller-supplied standing accept: only the user's answer on the prompt trusts a key",
-        "lists sessions as shared summaries and attaches, types and resizes on the selected PTY",
-        "never drops the attach snapshot, on a first attach or a re-attach, even when it beats the shell id to the pane",
-        "re-attaches and repaints the same session after its pane closed the shell",
-        "delivers keystrokes a re-joining pane types under its retired id of the same session, never into another",
-        "a re-joining pane typing under its retired id does not flush the repaint before it adopts the new id",
-        "caps output held for an unclaimed shell id, keeping the newest bytes",
-        "delivers held output after a fallback when the pane never calls on its new shell id",
-        "keeps the first session's shell id live when another session is attached",
         "keeps one logical connection id and reports reconnecting, not lost, while the controller re-dials",
         "maps controller phases onto the shared connection states",
-        "connects a saved host with its session key and serves bootstrap, usage and home over the controller",
-        "refuses unimplemented work by name instead of pretending",
+        "connects a saved host with its session key and serves bootstrap and home over the controller",
+        "refuses unimplemented and removed work by name instead of pretending",
         "reports a saved host with no key-vault handle as a dial failure",
         "drives the controller grace from Android lifecycle and never feeds the shared resume probe",
         "mounts the shared app by default unless the launch opted into legacy screens",
@@ -831,22 +823,6 @@
       "suite": "mobile control long-press hardening",
       "tests": [
         "keeps dock, launcher, dictation and Composer buttons out of text selection and the touch callout"
-      ]
-    },
-    "tests/unit/multiPtyHub.test.ts": {
-      "suite": "Android hub keeps one PTY per attached session (#2955)",
-      "tests": [
-        "keeps every attached session live, routing each one's bytes and keystrokes to its own shell id",
-        "closes only the PTY of the shell the pane gave up",
-        "re-attaches every open session exactly once after a drop, under the same shell ids",
-        "retires only the shell whose session ended",
-        "retires the shell of a PTY whose read failed and re-attaches it on re-selection, leaving the other tab live",
-        "evicts the least recently focused tab past the PTY bound; it re-attaches when looked at again",
-        "evicts the tab the user has not touched, not the one shown again and typed into, when a new tab opens past the bound",
-        "counts a redraw (the tab shown again) alone as focus for eviction",
-        "counts a geometry push alone as focus for eviction",
-        "counts typing alone as focus for eviction",
-        "states the native per-connection channel budget to core, so the controller keeps exec headroom"
       ]
     },
     "tests/unit/pendingTurns.test.ts": {
@@ -1879,10 +1855,9 @@
       "tests": [
         "advertises controller-owned recovery on the Android ssh group",
         "recovers a dropped link with one ladder when an attempt inside it fails",
-        "runs no second ladder after the controller gives up, and Retry re-attaches through ssh.reconnect",
+        "runs no second ladder after the controller gives up, and Retry recovers through ssh.reconnect",
         "words the lost-link banner from the controller ladder and its give-up reason",
-        "leaves the OS-resume probe to the controller when it owns recovery",
-        "lets the pane ask its client-exit verdict on a dying link without a second ladder (#3039)"
+        "leaves the OS-resume probe to the controller when it owns recovery"
       ]
     },
     "tests/unit/speechRecognition.test.ts": {
@@ -2020,6 +1995,12 @@
         "runs a draft command on the sessionless runner and keeps it for the first turn",
         "refuses a command claimed for another chat",
         "serialises a command behind the turn in flight"
+      ]
+    },
+    "tests/unit/ptyChannelBudget.test.ts": {
+      "suite": "Android native PTY channel budget",
+      "tests": [
+        "states the native per-connection channel budget to core, so the controller keeps exec headroom"
       ]
     }
   }

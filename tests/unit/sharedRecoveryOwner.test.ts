@@ -8,6 +8,13 @@
  * `ConnectionController` — over a physical-effects fake of the native plugin,
  * and count dials at the native boundary. Two ladders racing show up there as
  * extra `connect` calls and a new logical connection id.
+ *
+ * Chat-only cut (D45, controller ruling dwfq-454cea75-1): the hub's
+ * attach/session-listing machinery is removed from this repo, so these cases
+ * no longer drive the shell/helper attach and listing members. The
+ * recovery-ownership cases survive, re-driven over the surviving exec
+ * channel; the #3039 probe case — its subject WAS the removed listing
+ * probe — is deleted with the surface it covered.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
@@ -76,14 +83,12 @@ function setup() {
   return { native, hosts, controllers, store, seenStates, seenRetries, journal };
 }
 
-/** Connect through the shared store and attach `main`, the way the workspace does. */
-async function connectAndAttach(ctx: ReturnType<typeof setup>) {
+/** Connect through the shared store, the way the chat-only app dials. */
+async function connectOnly(ctx: ReturnType<typeof setup>) {
   const [host] = await platform!.api.ssh.listConfigHosts();
   expect(await ctx.store.connect(host!)).toBe(true);
   const connectionId = ctx.store.connectionId!;
-  await platform!.api.helper.sessionsList(connectionId);
-  await platform!.api.shell.attachSession({ connectionId, sessionName: 'main', aplexerId: 'main-id' });
-  await until(() => ctx.controllers.at(-1)!.getSnapshot().phase === 'live');
+  await until(() => ctx.controllers.at(-1)!.getSnapshot().phase === 'connected');
   return connectionId;
 }
 
@@ -110,9 +115,8 @@ describe('Shared store delegates recovery to the ConnectionController', () => {
 
   it('recovers a dropped link with one ladder when an attempt inside it fails', async () => {
     const ctx = setup();
-    const connectionId = await connectAndAttach(ctx);
+    const connectionId = await connectOnly(ctx);
     const dialsBefore = ctx.native.connects.length;
-    const ptysBefore = ctx.native.opened.length;
     const journalAtDrop = ctx.journal.length;
 
     // The first re-dial is refused (the host is still coming back), the
@@ -123,14 +127,12 @@ describe('Shared store delegates recovery to the ConnectionController', () => {
     ctx.native.dropTransport();
     await until(() => ctx.native.connects.length === dialsBefore + 1);
     ctx.native.refuseDials = false;
-    await until(() => ctx.controllers.at(-1)!.getSnapshot().phase === 'live' && ctx.native.opened.length === ptysBefore + 1);
+    await until(() => ctx.controllers.at(-1)!.getSnapshot().phase === 'connected');
 
     // Give any second ladder every chance to fire.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
 
     expect(ctx.native.connects.length - dialsBefore).toBe(2);
-    expect(ctx.native.opened.length - ptysBefore).toBe(1);
-    expect(ctx.native.opened.at(-1)!.command).toContain("sessions attach -- '/home/u/git/demo:main'");
     expect(ctx.controllers).toHaveLength(1);
     expect(ctx.store.connectionId).toBe(connectionId);
     expect(ctx.store.state).toBe('connected');
@@ -145,12 +147,15 @@ describe('Shared store delegates recovery to the ConnectionController', () => {
     const afterDrop = ctx.journal.slice(journalAtDrop);
     expect(afterDrop.filter((entry) => entry.phase === 'reconnecting' && entry.retryAttempt === 0)).toHaveLength(1);
     expect(new Set(afterDrop.map((entry) => entry.connectionId))).toEqual(new Set([connectionId]));
-    expect(afterDrop.at(-1)).toMatchObject({ phase: 'live', selectedId: 'main-id', selectedTag: 'main' });
+    expect(afterDrop.at(-1)).toMatchObject({ phase: 'connected' });
+    // The recovered link carries traffic over the surviving exec channel.
+    await expect(platform!.api.ssh.exec(connectionId, 'printf %s "$HOME"'))
+      .resolves.toEqual({ exitCode: 0, stdout: '/home/u', stderr: '' });
   });
 
-  it('runs no second ladder after the controller gives up, and Retry re-attaches through ssh.reconnect', async () => {
+  it('runs no second ladder after the controller gives up, and Retry recovers through ssh.reconnect', async () => {
     const ctx = setup();
-    const connectionId = await connectAndAttach(ctx);
+    const connectionId = await connectOnly(ctx);
     const dialsBefore = ctx.native.connects.length;
 
     ctx.native.refuseDials = true;
@@ -166,27 +171,27 @@ describe('Shared store delegates recovery to the ConnectionController', () => {
     expect(ctx.store.autoRetry).toBeNull();
     expect(ctx.store.state).toBe('lost');
 
-    // Retry: one controller recovery, the same logical id, `main` re-attached.
-    // A second press while it is on the wire joins it rather than dialling again.
+    // Retry: one controller recovery, the same logical id. A second press
+    // while it is on the wire joins it rather than dialling again.
     ctx.native.refuseDials = false;
-    const ptysBefore = ctx.native.opened.length;
     const first = ctx.store.reconnect();
     const second = ctx.store.retryNow();
-    await until(() => ctx.controllers[0]!.getSnapshot().phase === 'live');
+    await until(() => ctx.controllers[0]!.getSnapshot().phase === 'connected');
     expect(await first).toBe(true);
     await second;
     expect(ctx.native.connects.length - dialsBefore).toBe(RETRY_DELAYS_MS.length + 1);
-    expect(ctx.native.opened.length - ptysBefore).toBe(1);
-    expect(ctx.native.opened.at(-1)!.command).toContain("sessions attach -- '/home/u/git/demo:main'");
     expect(ctx.controllers).toHaveLength(1);
     expect(ctx.store.connectionId).toBe(connectionId);
     expect(ctx.store.state).toBe('connected');
     expect(ctx.store.error).toBeNull();
+    // The recovered link carries traffic over the surviving exec channel.
+    await expect(platform!.api.ssh.exec(connectionId, 'printf %s "$HOME"'))
+      .resolves.toEqual({ exitCode: 0, stdout: '/home/u', stderr: '' });
   });
 
   it('words the lost-link banner from the controller ladder and its give-up reason', async () => {
     const ctx = setup();
-    await connectAndAttach(ctx);
+    await connectOnly(ctx);
     ctx.native.refuseDials = true;
     ctx.native.dropTransport();
     await until(() => (ctx.store.transportRetry?.attempt ?? 0) === 2);
@@ -203,54 +208,12 @@ describe('Shared store delegates recovery to the ConnectionController', () => {
 
   it('leaves the OS-resume probe to the controller when it owns recovery', async () => {
     const ctx = setup();
-    await connectAndAttach(ctx);
+    await connectOnly(ctx);
     const execsBefore = ctx.native.execs.length;
     const dialsBefore = ctx.native.connects.length;
     await ctx.store.onOsResume();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(ctx.native.execs.slice(execsBefore)).not.toContain('true');
     expect(ctx.native.connects.length).toBe(dialsBefore);
-  });
-
-  it('lets the pane ask its client-exit verdict on a dying link without a second ladder (#3039)', async () => {
-    // #3039 review B2: the pane's verdict listing used helper.sessionsList,
-    // whose failure on a dead transport starts the controller's reconnect AND
-    // writes a second retry-0 `reconnecting` snapshot — doubling the #2954
-    // abrupt-drop ladder. The pane's probe is inert: no journal entry, no dial.
-    const ctx = setup();
-    const connectionId = await connectAndAttach(ctx);
-    expect(typeof platform!.api.helper.sessionsProbe).toBe('function');
-    const lost = () => Object.assign(new Error('SSH connection is no longer available.'), { code: 'CONNECTION_LOST' });
-    const journalAt = ctx.journal.length;
-    const dialsAt = ctx.native.connects.length;
-
-    ctx.native.sessionListFailures.push(lost());
-    await expect(platform!.api.helper.sessionsProbe!(connectionId)).rejects.toThrow(/no longer available/);
-    await vi.advanceTimersByTimeAsync(10_000);
-
-    expect(ctx.journal.slice(journalAt), 'the verdict probe wrote connection state').toEqual([]);
-    expect(ctx.native.connects.length - dialsAt).toBe(0);
-    expect(ctx.store.state).toBe('connected');
-    expect(ctx.seenStates).not.toContain('reconnecting');
-
-    // While the controller recovers, the probe does not touch the link at all.
-    ctx.native.refuseDials = true;
-    ctx.native.dropTransport();
-    await until(() => ctx.store.state === 'reconnecting');
-    const execsAt = ctx.native.execs.length;
-    await expect(platform!.api.helper.sessionsProbe!(connectionId)).rejects.toThrow();
-    expect(ctx.native.execs.length).toBe(execsAt);
-    ctx.native.refuseDials = false;
-    await until(() => ctx.controllers.at(-1)!.getSnapshot().phase === 'live');
-    expect(await platform!.api.helper.sessionsProbe!(connectionId)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: 'main' })]),
-    );
-
-    // Liveness of the injected failure: the ordinary listing reads the very
-    // same failure as a lost link and recovers it.
-    const dialsBeforeList = ctx.native.connects.length;
-    ctx.native.sessionListFailures.push(lost());
-    await expect(platform!.api.helper.sessionsList(connectionId)).rejects.toThrow();
-    await until(() => ctx.native.connects.length === dialsBeforeList + 1);
   });
 });

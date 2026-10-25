@@ -6,11 +6,16 @@
  *
  * Groups and what backs them:
  *
- *   ssh / shell / helper — {@link AndroidConnectionHub}: one core
- *              ConnectionController per logical connection over the native
- *              `SshCapability` plugin (sshj). The controller owns dial, trust,
- *              listing, attach, reconnect and grace (D28); `ssh.reconnect`
- *              advertises that, so the shared store never re-dials (#2954);
+ *   ssh — {@link AndroidConnectionHub}: one core ConnectionController per
+ *              logical connection over the native `SshCapability` plugin
+ *              (sshj). The controller owns dial, trust, reconnect and grace
+ *              (D28); `ssh.reconnect` advertises that, so the shared store
+ *              never re-dials (#2954);
+ *   shell / helper sessions+usage — removed by the chat-only cut (D45): the
+ *              phone opens no session PTYs through the shared app's shell
+ *              group (the chat's turn PTY rides the native
+ *              `sshCapability.openPty` directly), so every member the frozen
+ *              `PocketShellApi` type still requires fails honestly, by name;
  *   hosts    — {@link AndroidHostStore}: hosts added on the phone plus the
  *              0.5.x import;
  *   sync     — the Android settings-sync adapter (src/sync/androidSync.ts,
@@ -30,7 +35,6 @@
 import type { PocketShellApi } from '@ui/app/api';
 import {
   hasGatewayMarker,
-  readHostUsage,
   runHostBootstrap,
   unsupportedTransport,
   type ConnectionController,
@@ -46,9 +50,6 @@ import { declinedAccountHostMessage, type AccountHostKeys } from './accountHosts
 import { insecureGatewayMessage, resolveGatewayTarget, type GatewayConnectRequest, type GatewayPairings } from './gatewayTarget';
 import type { AndroidVault, GatewayAuthPolicy } from '@/vault/androidVault';
 
-/** The generation the hub's controller-backed exec answers for (the controller owns the real one). */
-const CONTROLLER_GENERATION = 'controller';
-
 export class UnsupportedCapability extends Error {
   constructor(method: string) {
     super(`Android does not implement ${method} yet`);
@@ -58,6 +59,21 @@ export class UnsupportedCapability extends Error {
 
 const unsupported = (method: string) => (): Promise<never> =>
   Promise.reject(new UnsupportedCapability(method));
+
+/**
+ * A surface the chat-only cut removed (D45). The frozen `PocketShellApi`
+ * type still requires some of these members, so they stay present and fail
+ * honestly, by name — nothing rides them and nothing can pretend to.
+ */
+export class RemovedCapability extends Error {
+  constructor(method: string) {
+    super(`Android removed ${method} in the chat-only cut (D45)`);
+    this.name = 'RemovedCapability';
+  }
+}
+
+const removed = (method: string) => (): Promise<never> =>
+  Promise.reject(new RemovedCapability(method));
 
 /**
  * What this phone's native transport reported it can dial beyond direct SSH
@@ -388,37 +404,30 @@ export function createAndroidPlatform(deps: AndroidApiDeps): AndroidPlatform {
       emptyAction: { label: 'Add a host', route: deps.addHostRoute },
     },
 
+    // The chat-only cut (D45): no session PTYs through the shared app's
+    // shell group — the chat's turn PTY rides the native `sshCapability`
+    // openPty/readPty/writePty/closePty verbs directly (src/phone/PhoneApp.vue).
+    // Every member the frozen `PocketShellApi` type still requires fails
+    // honestly, by name.
     shell: {
-      open: () => hub.open(),
-      attachSession: (payload) => hub.attachSession(payload),
-      input: (shellId, data, sessionName, workspace) => hub.input(shellId, data, sessionName, workspace),
-      resize: (shellId, cols, rows) => hub.resize(shellId, cols, rows),
-      redraw: (shellId) => hub.redraw(shellId),
-      // One PTY per controller, sized by the pane; no tmux geometry to probe.
-      windowSize: async () => ({ kind: 'bare' as const }),
-      close: (shellId) => hub.closeShell(shellId),
-      onData: (handler) => hub.onData(handler),
-      onExited: (handler) => hub.onExited(handler),
+      open: removed('shell.open'),
+      attachSession: removed('shell.attachSession'),
+      input: removed('shell.input'),
+      resize: removed('shell.resize'),
+      redraw: removed('shell.redraw'),
+      windowSize: removed('shell.windowSize'),
+      close: removed('shell.close'),
+      onData: () => () => undefined,
+      onExited: () => () => undefined,
     },
 
     helper: {
       bootstrap: (connectionId) => runHostBootstrap((command) => exec(connectionId, command)),
-      sessionsList: (connectionId) => hub.sessionsList(connectionId),
-      sessionsProbe: (connectionId) => hub.sessionsProbe(connectionId),
+      sessionsList: removed('helper.sessionsList'),
       sessionsCreate: unsupported('helper.sessionsCreate'),
-      // Core's usage source (#2937). Its exec goes through the controller,
-      // which owns the transport generation; the controller has already
-      // checked the request/generation echo the source re-checks here.
-      usage: (connectionId) =>
-        readHostUsage(
-          {
-            exec: async (options) => {
-              const outcome = await hub.hostCommand(connectionId, options.command, options.timeoutMs);
-              return { ...options, exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr, timedOut: outcome.timedOut ?? false };
-            },
-          },
-          { connectionId, generationId: CONTROLLER_GENERATION },
-        ),
+      // The usage panel is a desktop/web surface (D45); the phone's provider
+      // quotas no longer ride the host CLI (`quse`) through this seam.
+      usage: removed('helper.usage'),
       // Crash/OOM warnings ride HostCliCore's warnings verbs (stage S3).
       warnings: async () => [],
       ackWarnings: unsupported('helper.ackWarnings'),
