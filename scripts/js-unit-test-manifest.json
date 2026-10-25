@@ -1838,8 +1838,7 @@
         "picks the interface language from the same screen and applies it live",
         "keeps every locale complete: an English entry for every Chinese one",
         "applies the resolved theme live and follows it with the system-bar icons",
-        "paints the saved theme before the shell chunk loads, so the first frame has no dark flash",
-        "resolves the terminal palette from the live theme instead of the shipped default"
+        "paints the saved theme before the shell chunk loads, so the first frame has no dark flash"
       ]
     },
     "tests/unit/sftpChunkWriter.test.ts": {
@@ -1950,31 +1949,6 @@
         "refuses malformed envelopes and bounds the blob-controlled iteration count before deriving"
       ]
     },
-    "tests/unit/terminal-geometry.test.ts": {
-      "suite": "terminal geometry resize reporting",
-      "tests": [
-        "coalesces repeated unchanged fits while retaining the first usable grid",
-        "reports changed geometry, including when returning to a previous size",
-        "releases a rejected unchanged live grid so a later fit can retry it",
-        "does not let an old failure reopen a newer geometry request",
-        "does not report unmeasurable geometry"
-      ]
-    },
-    "tests/unit/terminal-viewport-resize.test.ts": {
-      "suite": "TerminalViewport resize failure across a route remount",
-      "tests": [
-        "keeps delayed resize failures isolated after home → Settings → home and retries only after the current request fails"
-      ]
-    },
-    "tests/unit/terminalFocus.test.ts": {
-      "suite": "terminal focus after attach",
-      "tests": [
-        "keeps a composer focus acquired while attach focus is waiting for its update",
-        "does not steal focus when a composer tap precedes WebView activeElement",
-        "scopes composer pointer intent to the pending focus request",
-        "still gives the terminal focus when no composer has claimed it"
-      ]
-    },
     "tests/unit/terminalImeInput.test.ts": {
       "suite": "Android terminal IME input (#2952)",
       "tests": [
@@ -1999,34 +1973,6 @@
         "deletes inside a word away from the end",
         "turns a predicted space the keyboard removes before punctuation into one DEL",
         "sends one DEL per code point when a multi-code-point emoji is deleted"
-      ]
-    },
-    "tests/unit/terminalLogicalLines.test.ts": {
-      "suite": "terminal logical-line matcher",
-      "tests": [
-        "matches an exactly full-width line that is not wrapped (4-digit run id, RANDOM=8)",
-        "matches a soft-wrapped line (5-digit run id) and a wrapped line sharing the prompt row",
-        "matches a short line on a terminal whose widest row is not a wrap",
-        "stays red for a line that is not there: wrong token, prefix only, or only the echoed command",
-        "does not join a row shorter than the widest row (a hard newline) to the next",
-        "does not glue a full-width row to the prompt after it"
-      ]
-    },
-    "tests/unit/terminalScreenWiring.test.ts": {
-      "suite": "terminal screen",
-      "tests": [
-        "reuses TerminalViewport rather than a new emulator",
-        "attaches through the core host-CLI session command",
-        "drives the PTY through the shell-owned seam, not a controller"
-      ]
-    },
-    "tests/unit/terminalUtf8.test.ts": {
-      "suite": "phone terminal UTF-8 stream",
-      "tests": [
-        "reassembles a three-byte codepoint split across two PTY chunks",
-        "reassembles a four-byte codepoint split 2+2 across PTY chunks",
-        "keeps a multibyte character intact between ASCII chunks",
-        "drops a half-decoded codepoint when the stream resets for a new session"
       ]
     },
     "tests/unit/turnReadiness.test.ts": {

@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import phoneAppSource from '../../src/phone/PhoneApp.vue?raw';
 import tabBarSource from '../../src/components/shell/AppTabBar.vue?raw';
 import settingsTabSource from '../../src/components/settings/SettingsTab.vue?raw';
-import terminalScreenSource from '../../src/components/terminal/TerminalScreen.vue?raw';
 
 /** The entry keeps its reads in .ts files; everything here is shell wiring. */
 function tsSource(relative: string): string {
@@ -73,10 +72,5 @@ describe('settings tab and live theme', () => {
     expect(main).toContain('readAppSettings()');
     expect(main).toContain('applySharedUiDefaults(document.documentElement, saved.themeChoice)');
     expect(main).toContain('applyUiLanguage(document.documentElement, normalizeUiLanguage(saved.uiLanguage))');
-  });
-
-  it('resolves the terminal palette from the live theme instead of the shipped default', () => {
-    expect(terminalScreenSource).toContain('resolveTheme(settings.themeChoice).terminal');
-    expect(terminalScreenSource).not.toContain('mobileTheme.terminal');
   });
 });

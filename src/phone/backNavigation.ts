@@ -1,6 +1,6 @@
 /**
  * The Android Back seam for the phone shell (spec §8.1). Shaped like the
- * existing `terminalPty`/`connectionPort` seams: the shell installs the owner
+ * existing `connectionPort` seam: the shell installs the owner
  * that consumes a Back press, and `@capacitor/app`'s `backButton` listener
  * drives it through {@link backNavigation}. Tabs are peer roots, so each keeps
  * its own stack; Back pops the active tab's stack and, at that tab's root,

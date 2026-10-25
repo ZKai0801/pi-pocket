@@ -2,12 +2,11 @@
 /**
  * The single phone shell (#2936, D42): one root mounted by `src/main.ts`.
  *
- * It owns the active tab, the three tab views, the live connection, and the
- * terminal secondary screen. The connection itself is the repo-local
- * `ConnectionController` bound to the Capacitor SSH capability; this shell
- * hands it to the rest of the app only through the narrow seams the stores and
- * the terminal screen consume (`installConnectionPort`, `installPiLive`,
- * `installTerminalPty`) and takes them back on disconnect/unmount.
+ * It owns the active tab, the tab views, and the live connection. The
+ * connection itself is the repo-local `ConnectionController` bound to the
+ * Capacitor SSH capability; this shell hands it to the rest of the app only
+ * through the narrow seams the stores consume (`installConnectionPort`,
+ * `installPiLive`) and takes them back on disconnect/unmount.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Capacitor } from '@capacitor/core';
@@ -16,7 +15,6 @@ import { useSettingsStore } from '@ui/app/stores/settings';
 import {
   type ConnectionSnapshot,
   type HostKeyTrustChoice,
-  type SessionRow,
   type SshHostTarget,
   isSshResponseFor,
 } from '@pocketshell/core';
@@ -27,7 +25,6 @@ import ProjectsList from '../components/projects/ProjectsList.vue';
 import SessionList from '../components/sessions/SessionList.vue';
 import ChatScreen from '../components/sessions/ChatScreen.vue';
 import SettingsTab from '../components/settings/SettingsTab.vue';
-import TerminalScreen from '../components/terminal/TerminalScreen.vue';
 import { installThemeSync } from './themeSync';
 import { installLocaleSync } from './localeSync';
 import {
@@ -59,14 +56,13 @@ import {
   type PiLive,
   type PiRemoteContext,
 } from '../session/piLive';
-import { installTerminalPty, type TerminalPty } from '../session/terminalPty';
 import { installTurnPtyOpener, type TurnPtyOpener } from '../session/turnPty';
 import { installComposerAttach, type ComposerAttachLive } from '../session/composerAttach';
 import { platformInput } from '../session/platformInput';
 import { createAndroidAttachmentPort } from '../platform/android/attachmentPort';
 import { createPiTransport } from '../pi/piTransport';
 import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
-import { projectBasename, useSessionsStore } from '../stores/sessions';
+import { useSessionsStore } from '../stores/sessions';
 import { useConnectionsStore } from '../stores/connections';
 import { useProjectsStore } from '../stores/projects';
 import { sshCapability, type SftpReadWithOffsetOptions } from '../native/sshCapability';
@@ -74,7 +70,6 @@ import { keyboardInsets, type KeyboardInsetsState } from '../native/keyboardInse
 import { createKeyboardInsetsStateSync } from '../native/keyboardInsetsState';
 import { createLocalTrustStore } from '../platform/android/trustStore';
 import { createTerminalTextDecoder } from './terminalText';
-import type { TerminalGeometry } from '../terminalGeometry';
 
 const EXEC_TIMEOUT_MS = 15_000;
 const TURN_PTY_MAX_BYTES = 32_768;
@@ -116,12 +111,8 @@ function setChatCommandsOpen(open: boolean): void {
   chatCommandsOpen.value = open;
 }
 
-/** Topmost overlay/sheet wins: the terminal, then the chat's command sheet, then the 会话 tick list, then the Projects directory sheet. */
+/** Topmost overlay/sheet wins: the chat's command sheet, then the 会话 tick list, then the Projects directory sheet. */
 function closeTopmostOverlay(): boolean {
-  if (terminalTarget.value !== null) {
-    terminalTarget.value = null;
-    return true;
-  }
   if (chatCommandsOpen.value) {
     chatCommandsOpen.value = false;
     return true;
@@ -240,25 +231,18 @@ watch(
 );
 const keyboardVisible = ref(false);
 const connectionMessage = ref('');
-const terminalTarget = ref<{ name: string; title: string } | null>(null);
 
 let controller: ConnectionController | null = null;
 let dialedTarget: SshHostTarget | null = null;
 let removeControllerSnapshot: (() => void) | undefined;
-let removeTerminalOutput: (() => void) | undefined;
 let removeBackButton: (() => void) | undefined;
 let stopLaunchReconnectWatch: (() => void) | undefined;
 let disposeAppStateLifecycle: (() => void) | undefined;
 let stopThemeSync: (() => void) | undefined;
 let stopLocaleSync: (() => void) | undefined;
-let terminalDataHandler: ((data: string) => void) | null = null;
-/** Output that landed between `attach()` and the screen's `onData()` registration. */
-let pendingTerminalOutput = '';
-let attachedSession: SessionRow | null = null;
 let activePassphrase: string | undefined;
 let requestSequence = 0;
 
-const decoder = createTerminalTextDecoder();
 const encoder = new TextEncoder();
 
 /* ------------------------------------------------------------------ trust */
@@ -283,39 +267,20 @@ const trustCard = computed(() => (
 
 /* ------------------------------------------------------- connection owner */
 
-function sameSessionRow(left: SessionRow, right: SessionRow): boolean {
-  if (left.id && right.id) return left.id === right.id;
-  return left.name === right.name && left.workspace === right.workspace;
-}
-
-function findSessionRow(rows: readonly SessionRow[], name: string): SessionRow | null {
-  return rows.find((row) => row.name === name) ?? null;
-}
-
 function bindController(next: ConnectionController): void {
   removeControllerSnapshot?.();
-  removeTerminalOutput?.();
   controller = next;
   removeControllerSnapshot = next.subscribe(forwardSnapshot);
-  removeTerminalOutput = next.subscribeTerminalOutput((session, bytes) => {
-    // The terminal screen shows one PTY: only the attached session's bytes.
-    if (!attachedSession || !sameSessionRow(attachedSession, session)) return;
-    const chunk = decoder.decode(bytes);
-    if (terminalDataHandler) terminalDataHandler(chunk);
-    else pendingTerminalOutput += chunk;
-  });
 }
 
 function releaseSeams(): void {
   installPiLive(null);
-  installTerminalPty(null);
   installTurnPtyOpener(null);
   installComposerAttach(null);
 }
 
 function installSeams(): void {
   installPiLive(piLiveImplementation);
-  installTerminalPty(terminalPtyImplementation);
   installTurnPtyOpener(turnPtyImplementation);
   installComposerAttach(composerAttachImplementation);
 }
@@ -323,17 +288,10 @@ function installSeams(): void {
 async function closeController(): Promise<void> {
   removeControllerSnapshot?.();
   removeControllerSnapshot = undefined;
-  removeTerminalOutput?.();
-  removeTerminalOutput = undefined;
   const active = controller;
   controller = null;
   dialedTarget = null;
-  attachedSession = null;
-  terminalDataHandler = null;
-  pendingTerminalOutput = '';
-  decoder.reset();
   snapshot.value = null;
-  terminalTarget.value = null;
   sessions.disposeTurnRunner();
   releaseSeams();
   if (active) await active.close().catch(() => undefined);
@@ -672,59 +630,6 @@ const turnPtyImplementation: TurnPtyOpener = {
   },
 };
 
-/* ---------------------------------------------------------- terminal seam */
-
-const terminalPtyImplementation: TerminalPty = {
-  async attach(sessionName, geometry: TerminalGeometry) {
-    const active = controller;
-    if (!active) return { ok: false, error: '请先连接' };
-    let row = findSessionRow(active.getSnapshot().sessions, sessionName);
-    if (!row) {
-      const listing = await active.refreshSessions();
-      if (!listing.ok) return { ok: false, error: listing.message };
-      row = findSessionRow(active.getSnapshot().sessions, sessionName);
-    }
-    if (!row) return { ok: false, error: `找不到会话「${sessionName}」` };
-    const result = await active.attachSession(row, geometry);
-    if (!result.ok) return { ok: false, error: result.message };
-    attachedSession = result.value;
-    pendingTerminalOutput = '';
-    // A new session starts a new byte stream: never inherit the previous
-    // session's half-decoded codepoint.
-    decoder.reset();
-    return { ok: true };
-  },
-  onData(callback) {
-    terminalDataHandler = callback;
-    // The PTY may have painted before the screen registered its pump; hand
-    // that first output over now rather than dropping the attach banner.
-    if (pendingTerminalOutput.length > 0) {
-      const chunk = pendingTerminalOutput;
-      pendingTerminalOutput = '';
-      callback(chunk);
-    }
-  },
-  async write(data) {
-    if (!controller || !attachedSession) return;
-    const result = await controller.writeTerminalBytes(attachedSession, encoder.encode(data));
-    if (!result.ok) throw new Error(result.message);
-  },
-  async resize(cols, rows) {
-    if (!controller || !attachedSession) return;
-    const result = await controller.resizeTerminal(attachedSession, cols, rows);
-    if (!result.ok) throw new Error(result.message);
-  },
-  async detach() {
-    const active = controller;
-    const row = attachedSession;
-    attachedSession = null;
-    terminalDataHandler = null;
-    pendingTerminalOutput = '';
-    decoder.reset();
-    if (active && row) await active.detachSession(row).catch(() => undefined);
-  },
-};
-
 /* --------------------------------------------------------- trust answers */
 
 /**
@@ -766,50 +671,6 @@ async function decideHostKey(choice: HostKeyTrustChoice): Promise<void> {
   installSeams();
   await active.refreshSessions().catch(() => null);
   await markStoreConnected();
-}
-
-/* -------------------------------------------------------- terminal screen */
-
-/** Trailing slashes off, so `/home/a/git/x` and `/home/a/git/x/` are one path. */
-function normalizeDir(value: string): string {
-  const trimmed = value.replace(/\/+$/, '');
-  return trimmed.length === 0 ? '/' : trimmed;
-}
-
-/**
- * The aplexer session 打开终端 attaches to for a project folder.
- *
- * The v1 mapping guessed the session name from the folder's basename, which
- * only holds while aplexer names its sessions after the workspace. The live
- * session list is authoritative: take the row whose workspace IS this folder,
- * else a row named after the basename, and only then fall back to the v1
- * guess (which the terminal screen reports as 找不到会话 if the host
- * disagrees). An empty list is re-listed once before giving up, so a terminal
- * opened straight after a connect still resolves.
- */
-async function resolveTerminalSession(path: string): Promise<string | null> {
-  const fallback = projectBasename(path);
-  if (fallback.length === 0) return null;
-  const active = controller;
-  if (!active) return fallback;
-  let rows = active.getSnapshot().sessions;
-  if (rows.length === 0) {
-    const listing = await active.refreshSessions().catch(() => null);
-    if (listing?.ok) rows = active.getSnapshot().sessions;
-  }
-  const wanted = normalizeDir(path);
-  const byWorkspace = rows.find(
-    (row) => row.workspace !== null && normalizeDir(row.workspace) === wanted,
-  );
-  if (byWorkspace) return byWorkspace.name;
-  const byName = rows.find((row) => row.name === fallback);
-  return byName?.name ?? fallback;
-}
-
-async function openTerminal(path: string): Promise<void> {
-  const name = await resolveTerminalSession(path);
-  if (name === null || name.length === 0) return;
-  terminalTarget.value = { name, title: name };
 }
 
 /* ------------------------------------------------- keyboard / safe areas */
@@ -983,7 +844,6 @@ onBeforeUnmount(() => {
         v-show="activeTab === 'sessions' && sessions.open !== null"
         :commands-open="chatCommandsOpen"
         @update:commands-open="setChatCommandsOpen"
-        @open-terminal="openTerminal"
       />
       <SessionList v-show="activeTab === 'sessions' && sessions.open === null" />
     </div>
@@ -998,14 +858,6 @@ onBeforeUnmount(() => {
         :request="trustCard.request"
         :trusted-fingerprint-sha256="trustCard.trustedFingerprintSha256"
         @decide="decideHostKey"
-      />
-    </div>
-
-    <div v-if="terminalTarget" class="phone-shell__terminal">
-      <TerminalScreen
-        :session-name="terminalTarget.name"
-        :title="terminalTarget.title"
-        @close="terminalTarget = null"
       />
     </div>
   </div>
@@ -1060,12 +912,5 @@ onBeforeUnmount(() => {
   justify-content: center;
   background: var(--scrim);
   padding: var(--sp-4);
-}
-
-.phone-shell__terminal {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  background: var(--bg);
 }
 </style>

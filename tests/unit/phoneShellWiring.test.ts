@@ -17,7 +17,6 @@ describe('phone shell wiring', () => {
     expect(phoneAppSource).toContain('createShellBackNavigation(');
     expect(phoneAppSource).toContain('closeOverlay: closeTopmostOverlay');
     expect(phoneAppSource).toContain('closeTopmostOverlay');
-    expect(phoneAppSource).toContain('terminalTarget.value = null');
     expect(phoneAppSource).toContain('projects.closeBrowse()');
     expect(phoneAppSource).toContain("hasLiveConnection: () => connections.status === 'connected'");
   });

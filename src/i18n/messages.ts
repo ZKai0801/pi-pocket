@@ -228,14 +228,6 @@ export const ZH = {
   'commands.desc.trust': '保存当前项目的信任决定。',
   'commands.desc.changelog': '查看 pi 的更新日志。',
 
-  /* ---- terminal ---------------------------------------------------- */
-  'terminal.connectFirst': '请先连接',
-  'terminal.openFailed': '无法打开终端',
-  'terminal.closeAria': '关闭',
-  'terminal.session': '会话：',
-  'terminal.close': '关闭',
-  'terminal.opening': '正在打开终端…',
-
   /* ---- key vault (SshKeysScreen) ----------------------------------- */
   'keys.title': '密钥',
   'keys.intro': '私钥只保存在本机加密存储中，这里只显示标签、指纹和公钥。',
@@ -551,13 +543,6 @@ export const EN: Record<MessageKey, string> = {
   'commands.desc.hotkeys': 'Show the active keyboard shortcuts.',
   'commands.desc.trust': 'Save a project-trust decision.',
   'commands.desc.changelog': 'Show the changelog.',
-
-  'terminal.connectFirst': 'Connect first',
-  'terminal.openFailed': 'Could not open the terminal',
-  'terminal.closeAria': 'Close',
-  'terminal.session': 'Session: ',
-  'terminal.close': 'Close',
-  'terminal.opening': 'Opening terminal…',
 
   'keys.title': 'Keys',
   'keys.intro': "Private keys stay in this device's encrypted storage; only labels, fingerprints and public keys are shown here.",
