@@ -39,7 +39,6 @@ const props = withDefaults(defineProps<{
 });
 
 const emit = defineEmits<{
-  'open-terminal': [path: string];
   'update:commands-open': [open: boolean];
 }>();
 
@@ -167,9 +166,6 @@ const currentModel = computed(() => {
   return last !== null ? last.to : store.open?.model ?? null;
 });
 
-/** The chat's own project: the folder whose terminal the header opens. */
-const terminalPath = computed(() => store.lastProject?.path ?? null);
-
 /**
  * Where this chat's attachments land: `~/.pocketshell/attachments/<scope>/`.
  * The scope nests the workspace's basename with the session's own name, so one
@@ -181,11 +177,6 @@ const attachmentScope = computed(() => attachmentScopeKey(
   store.open?.name ?? 'draft',
   store.open?.cwd ?? store.lastProject?.path ?? null,
 ));
-
-function openTerminal(): void {
-  const path = terminalPath.value;
-  if (path !== null) emit('open-terminal', path);
-}
 
 interface ChatRow {
   key: string;
@@ -384,16 +375,6 @@ function goBack(): void {
              which one that is: small, under the name, never in its way. -->
         <p v-if="currentModel !== null" class="chat__model-name" data-testid="chat-model-name">{{ currentModel }}</p>
       </div>
-      <button
-        type="button"
-        class="chat__terminal"
-        :aria-label="t('chat.openTerminal')"
-        data-testid="chat-open-terminal"
-        :disabled="terminalPath === null"
-        @click="openTerminal"
-      >
-        <AppIcon name="terminal" />
-      </button>
     </header>
 
     <div
@@ -520,31 +501,9 @@ function goBack(): void {
 }
 
 .chat__back:focus-visible,
-.chat__retry:focus-visible,
-.chat__terminal:focus-visible {
+.chat__retry:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
-}
-
-.chat__terminal {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--accent);
-}
-
-.chat__terminal:active {
-  background: var(--state-hover);
-}
-
-.chat__terminal:disabled {
-  opacity: var(--disabled-opacity);
 }
 
 /* The title and the model name stack in the header's middle column, which is

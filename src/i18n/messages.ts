@@ -148,7 +148,6 @@ export const ZH = {
   /* ---- 会话 chat --------------------------------------------------- */
   'chat.title': '会话',
   'chat.backAria': '返回列表',
-  'chat.openTerminal': '打开终端',
   'chat.opening': '正在打开会话…',
   'chat.running': '正在运行…',
   'chat.queued': '已排队，这轮全部做完后发送',
@@ -466,7 +465,6 @@ export const EN: Record<MessageKey, string> = {
 
   'chat.title': 'Session',
   'chat.backAria': 'Back to list',
-  'chat.openTerminal': 'Open terminal',
   'chat.opening': 'Opening session…',
   'chat.running': 'Running…',
   'chat.queued': 'Queued — sent when this run finishes',
