@@ -117,6 +117,7 @@ function answeredRunner(sessionFile: string): PiTurnRunner {
       begun('/root/new.jsonl', Promise.resolve({ ok: true as const, session: SESSION_A })),
     ),
     runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
+    answerDialog: vi.fn(async () => ({ ok: true as const, settled: true, newLines: [] })),
     queue: vi.fn(async () => ({ ok: true as const })),
     rebind: vi.fn(),
     isBusy: vi.fn(() => false),

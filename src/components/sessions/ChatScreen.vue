@@ -216,6 +216,13 @@ function formatTime(ms: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${hh}:${mm}`;
 }
 
+// The dialog card's message: pi's paragraphs with their layout blanks dropped.
+// The null-normalising pending dialog is the template's one source: a store
+// stub without the field must read as "no dialog", never as undefined.
+const pendingDialog = computed(() => store.pendingDialog ?? null);
+const dialogMessage = computed<string[]>(() =>
+  (store.pendingDialog?.dialog.message ?? []).filter((line) => line.trim() !== ''));
+
 const rows = computed<ChatRow[]>(() => {
   const turns = store.open?.turns ?? [];
   // Pi appends a `model_change` entry per switch, so the dividers are the
@@ -443,6 +450,51 @@ function goBack(): void {
     </div>
 
     <footer class="chat__composer">
+      <!-- A selection dialog a delivered `/command` left waiting on the turn's
+           pane: pi drew it where this chat cannot render, Enter would answer
+           its highlighted option, so it is answered here instead — natively. -->
+      <section
+        v-if="pendingDialog !== null"
+        class="chat__dialog"
+        data-testid="chat-dialog"
+        role="alertdialog"
+        :aria-label="t('chat.dialogHeading')"
+      >
+        <h3 class="chat__dialog-title">{{ pendingDialog.dialog.title }}</h3>
+        <p
+          v-for="(line, index) in dialogMessage"
+          :key="index"
+          class="chat__dialog-line"
+        >{{ line }}</p>
+        <p class="chat__dialog-options" data-testid="chat-dialog-options">
+          <span
+            v-for="(option, index) in pendingDialog.dialog.options"
+            :key="option"
+            class="chat__dialog-option"
+            :data-selected="index === pendingDialog.dialog.selected"
+          >{{ index === pendingDialog.dialog.selected ? '→ ' : '' }}{{ option }}</span>
+        </p>
+        <div class="chat__dialog-actions">
+          <button
+            type="button"
+            class="chat__dialog-cancel"
+            :disabled="store.dialogAnswering"
+            data-testid="chat-dialog-cancel"
+            @click="void store.answerPendingDialog('cancel')"
+          >
+            {{ t('chat.dialogCancel') }}
+          </button>
+          <button
+            type="button"
+            class="chat__dialog-confirm"
+            :disabled="store.dialogAnswering"
+            data-testid="chat-dialog-confirm"
+            @click="void store.answerPendingDialog('confirm')"
+          >
+            {{ t('chat.dialogConfirm') }}
+          </button>
+        </div>
+      </section>
       <ChatComposer
         :send="store.send"
         :sending="store.sending"
@@ -678,6 +730,83 @@ function goBack(): void {
   line-height: 1.45;
   text-align: center;
   overflow-wrap: anywhere;
+}
+
+/* The native twin of the dialog a `/command` left on the turn's pane: above
+   the composer, because nothing may be sent past it. */
+.chat__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0 0 var(--sp-2);
+  border: 1px solid var(--warning);
+  border-radius: var(--r-md);
+  background: var(--warning-soft);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.chat__dialog-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-300);
+  font-weight: var(--fw-semibold);
+  overflow-wrap: anywhere;
+}
+
+.chat__dialog-line {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--fs-200);
+  line-height: var(--lh-200);
+  overflow-wrap: anywhere;
+}
+
+.chat__dialog-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: var(--sp-1) 0 0;
+  color: var(--fg);
+  font: var(--fs-200) var(--font-mono);
+}
+
+.chat__dialog-option[data-selected='true'] {
+  color: var(--warning);
+  font-weight: var(--fw-semibold);
+}
+
+.chat__dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.chat__dialog-cancel,
+.chat__dialog-confirm {
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 0 var(--sp-3);
+  background: var(--surface);
+  color: var(--fg);
+  font: var(--fw-semibold) var(--fs-200) var(--font-ui);
+}
+
+.chat__dialog-confirm {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.chat__dialog-cancel:disabled,
+.chat__dialog-confirm:disabled {
+  opacity: 0.5;
+}
+
+.chat__dialog-cancel:focus-visible,
+.chat__dialog-confirm:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* Not yet on the server: the bubble is the user's, but dimmed, so a queued

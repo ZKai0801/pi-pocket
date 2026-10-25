@@ -35,6 +35,7 @@ function fakeRunner(overrides: Partial<PiTurnRunner> = {}): PiTurnRunner {
       session,
     })),
     runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
+    answerDialog: vi.fn(async () => ({ ok: true as const, settled: true, newLines: [] })),
     beginSend: vi.fn(async () => begunLater(Promise.resolve({ ok: true as const, session }), '/r/a.jsonl')),
     beginStartNew: vi.fn(async () => begunLater(Promise.resolve({ ok: true as const, session }))),
     queue: vi.fn(async () => ({ ok: true as const })),

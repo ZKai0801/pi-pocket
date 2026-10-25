@@ -8,6 +8,13 @@ import type { TurnPtyGeometry, TurnPtyHandle } from '../session/turnPty';
 import { countAssistantTurns, isRunAnswered } from './pendingTurns';
 import { parseSlashLine, takesOverTerminal } from './piInteractivity';
 import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, toTurnLine, turnSessionName } from './piTurn';
+import {
+  dialogAnswerKeys,
+  newPaneLines,
+  parseScreenDialog,
+  type PiScreenDialog,
+  type PiScreenDialogEvent,
+} from './piDialog';
 import { createConsoleTracker, isPiReady } from './turnReadiness';
 import type { ParsedPiSession } from './types';
 
@@ -44,6 +51,9 @@ const SUBMIT_DELAY_MS = 250;
  * keeps steering never times out underneath them.
  */
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
+
+/** The pause pi gets between Enter and a dialog being readable on the pane. */
+const DIALOG_SETTLE_MS = 1500;
 
 const DISPOSED = Symbol('disposed');
 const TURN_DEADLINE = Symbol('turn deadline');
@@ -96,12 +106,27 @@ export interface PiTurnRunnerDeps {
    * keeps its record for the sweep.
    */
   forgetTurn?(sessionName: string): void;
+  /**
+   * Read a turn session's screen as plain text (`tmux capture-pane`). Supplied
+   * by the store through the live transport; absent in tests that do not
+   * exercise dialogs, which disables the feature entirely.
+   */
+  capturePane?(sessionName: string): Promise<string | null>;
+  /** Feed keystrokes to a turn session (`tmux send-keys`). */
+  sendKeys?(sessionName: string, keys: readonly string[]): Promise<void>;
+  /**
+   * A delivered `/command` left a selection dialog waiting on screen. Fired
+   * from a background check after delivery, never on the send's own path.
+   */
+  onDialog?(event: PiScreenDialogEvent): void;
   sleep?(ms: number): Promise<void>;
   now?(): number;
   readyTimeoutMs?: number;
   turnTimeoutMs?: number;
   pollIntervalMs?: number;
   submitDelayMs?: number;
+  /** How long a dialog is given to draw before the screen is read (tests: 0). */
+  dialogSettleMs?: number;
 }
 
 export type PiTurnSendResult =
@@ -157,6 +182,15 @@ export interface PiTurnRunner {
    * command picked before the first message does not create a session.
    */
   runCommand(sessionFile: string | null, command: string): Promise<PiCommandRunResult>;
+  /**
+   * Answer a dialog this runner reported through `onDialog`. `settled` false
+   * means the dialog survived the keystroke and is still waiting.
+   */
+  answerDialog(
+    dialog: PiScreenDialog,
+    choice: 'confirm' | 'cancel',
+    beforePane: string,
+  ): Promise<{ ok: boolean; settled: boolean; newLines: string[] }>;
   /**
    * Deliver `message` and resolve as soon as the line is written (plus, for a
    * draft, as soon as Pi's new session file is adopted). The reply is awaited
@@ -232,6 +266,9 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   let openSessionFile: string | null = null;
   // The tmux session behind the open PTY, as created/attached at open time.
   let openName: string | null = null;
+  // The session a reported dialog is pending in. Lives past `dropTurn`: the
+  // dialog sits in the server-side tmux session, not in this PTY handle.
+  let dialogSession: string | null = null;
   let activeUnsubscribe: (() => void) | null = null;
   let wakeCurrentWait: (() => void) | null = null;
   let nextOperationId = 0;
@@ -707,6 +744,13 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
    * assistant poll would report its 120 s timeout over work that already ran.
    * The contract is "pi accepted the bytes" — the ack from the PTY write — and
    * nothing more.
+   *
+   * One thing does follow the delivery, off the send's own path: an extension
+   * command may leave a selection dialog waiting on the pane (`/nix` asks
+   * before deleting a session). The screen is read once after a settle delay
+   * and, when a dialog is found, reported through `onDialog` — the chat shows
+   * it with native buttons, because the next line the runner delivers would
+   * otherwise answer the dialog's highlighted option (for `confirm`, Yes).
    */
   async function runCommand(
     sessionFile: string | null,
@@ -734,11 +778,65 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
 
       const hiddenUi = !disposed && takesOverTerminal(slash);
       if (hiddenUi) state.restartPending = true;
+      if (!hiddenUi) void checkForDialog();
       return { ok: true, hiddenUi };
     } finally {
       unsubscribeActive();
       busy = false;
     }
+  }
+
+  /**
+   * Read the pane once after the settle delay and report a waiting selection
+   * dialog. Every failure is silence: a screen this cannot read changes
+   * nothing about the delivery that already succeeded.
+   */
+  async function checkForDialog(): Promise<void> {
+    const capture = deps.capturePane;
+    if (disposed || capture === undefined || openName === null) return;
+    const sessionName = openName;
+    await sleep(deps.dialogSettleMs ?? DIALOG_SETTLE_MS);
+    if (disposed) return;
+    const pane = await capture(sessionName).catch(() => null);
+    if (pane === null || openName !== sessionName) return;
+    const dialog = parseScreenDialog(pane);
+    if (dialog !== null) {
+      dialogSession = sessionName;
+      deps.onDialog?.({ dialog, pane, sessionName });
+    }
+  }
+
+  /**
+   * Answer the dialog this runner reported: send the keystrokes, wait for pi
+   * to settle, and diff the screen so the chat can show the line the command's
+   * handler printed (` /nix cancelled.`). `settled` false means the dialog is
+   * still on screen — the answer keystroke did not land, so the caller keeps
+   * the dialog up rather than reporting a result pi never saw.
+   */
+  async function answerDialog(
+    dialog: PiScreenDialog,
+    choice: 'confirm' | 'cancel',
+    beforePane: string,
+  ): Promise<{ ok: boolean; settled: boolean; newLines: string[] }> {
+    const send = deps.sendKeys;
+    const capture = deps.capturePane;
+    // The detection set the target; a re-attached runner falls back to its
+    // open PTY's session — same conversation, same pane.
+    const target = dialogSession ?? openName;
+    if (disposed || send === undefined || capture === undefined || target === null) {
+      return { ok: false, settled: true, newLines: [] };
+    }
+    try {
+      await send(target, dialogAnswerKeys(dialog, choice));
+    } catch (error) {
+      return { ok: false, settled: true, newLines: [messageOf(error)] };
+    }
+    await sleep(deps.dialogSettleMs ?? DIALOG_SETTLE_MS);
+    const after = await capture(target).catch(() => null);
+    if (after === null) return { ok: true, settled: false, newLines: [] };
+    const settled = parseScreenDialog(after) === null;
+    if (settled) dialogSession = null;
+    return { ok: true, settled, newLines: newPaneLines(beforePane, after) };
   }
 
   /**
@@ -878,6 +976,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     open = null;
     openSessionFile = null;
     openName = null;
+    dialogSession = null;
     run = null;
     unsubscribeActive();
     if (state) {
@@ -891,5 +990,5 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     wakeCurrentWait?.();
   }
 
-  return { send, startNew, runCommand, beginSend, beginStartNew, queue, rebind, isBusy, dispose };
+  return { send, startNew, runCommand, answerDialog, beginSend, beginStartNew, queue, rebind, isBusy, dispose };
 }

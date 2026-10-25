@@ -21,6 +21,7 @@ function stubRunner(): StubRunner {
     send: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     startNew: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     runCommand: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
+    answerDialog: vi.fn(async () => ({ ok: false as const, settled: true, newLines: [] })),
     beginSend: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     beginStartNew: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     queue: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
@@ -32,9 +33,9 @@ function stubRunner(): StubRunner {
 
 function cacheWith(overrides: Partial<TurnRunnerCacheDeps> = {}) {
   const built: StubRunner[] = [];
-  const build = vi.fn((command: string, projectPath: string) => {
+  const build = vi.fn((command: string, projectPath: string, sessionFile: string) => {
     const runner = overrides.build
-      ? (overrides.build(command, projectPath) as StubRunner)
+      ? (overrides.build(command, projectPath, sessionFile) as StubRunner)
       : stubRunner();
     built.push(runner);
     return runner;
@@ -112,7 +113,7 @@ describe('turn runner cache', () => {
     expect(build).not.toHaveBeenCalled();
 
     await cache.runnerFor('/r/b.jsonl');
-    expect(build).toHaveBeenLastCalledWith('/usr/bin/pi', '/p/b');
+    expect(build).toHaveBeenLastCalledWith('/usr/bin/pi', '/p/b', '/r/b.jsonl');
   });
 
   it('refuses and does not cache a build whose host was disposed while the probe ran', async () => {
@@ -210,7 +211,7 @@ describe('turn runner cache', () => {
 
     expect(second).toBe(first);
     expect(build).toHaveBeenCalledTimes(1);
-    expect(build).toHaveBeenCalledWith('/usr/bin/pi', '/p/a');
+    expect(build).toHaveBeenCalledWith('/usr/bin/pi', '/p/a', '');
     expect(built[0]?.dispose).not.toHaveBeenCalled();
   });
 
@@ -225,7 +226,7 @@ describe('turn runner cache', () => {
     expect(second).not.toBe(first);
     expect(build).toHaveBeenCalledTimes(2);
     expect(built[0]?.dispose).not.toHaveBeenCalled();
-    expect(build).toHaveBeenLastCalledWith('/usr/bin/pi', '/p/b');
+    expect(build).toHaveBeenLastCalledWith('/usr/bin/pi', '/p/b', '');
   });
 
   it('leaves a runner that is still running its turn alone when released', async () => {

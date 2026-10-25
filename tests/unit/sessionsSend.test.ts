@@ -56,6 +56,7 @@ function runnerWith(
     beginSend: vi.fn(async (path: string) => begun(path, Promise.resolve({ ok: true as const, session }))),
     beginStartNew: vi.fn(async () => begun('/r/new.jsonl', Promise.resolve({ ok: true as const, session }))),
     runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
+    answerDialog: vi.fn(async () => ({ ok: true as const, settled: true, newLines: [] })),
     queue: vi.fn(async () => ({ ok: true as const })),
     rebind: vi.fn(),
     isBusy: vi.fn(() => busy),

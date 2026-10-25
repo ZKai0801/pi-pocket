@@ -1057,6 +1057,55 @@
         "keeps quoting the path even when it carries a quote"
       ]
     },
+    "tests/unit/piDialog.test.ts": {
+      "suite": "parseScreenDialog",
+      "tests": [
+        {
+          "suite": "parseScreenDialog",
+          "title": "reads the real /nix confirm: title, message, options, selection"
+        },
+        {
+          "suite": "parseScreenDialog",
+          "title": "returns null for an idle prompt and for plain command output"
+        },
+        {
+          "suite": "parseScreenDialog",
+          "title": "returns null when no option is marked selected"
+        },
+        {
+          "suite": "dialogAnswerKeys",
+          "title": "cancel is Escape, the footer promise"
+        },
+        {
+          "suite": "dialogAnswerKeys",
+          "title": "confirm presses Enter when the affirmative option is highlighted"
+        },
+        {
+          "suite": "dialogAnswerKeys",
+          "title": "confirm walks to the affirmative option first when it is not highlighted"
+        },
+        {
+          "suite": "dialogAnswerKeys",
+          "title": "falls back to the highlighted option when none reads affirmative"
+        },
+        {
+          "suite": "capture and send commands",
+          "title": "target the app-owned tmux socket and the quoted session"
+        },
+        {
+          "suite": "capture and send commands",
+          "title": "refuses keystrokes outside the answer vocabulary"
+        },
+        {
+          "suite": "newPaneLines",
+          "title": "finds the notify line an answered dialog leaves behind"
+        },
+        {
+          "suite": "newPaneLines",
+          "title": "drops rules, footers and repeats"
+        }
+      ]
+    },
     "tests/unit/piInteractivity.test.ts": {
       "suite": "parseSlashLine",
       "tests": [
@@ -1112,12 +1161,15 @@
         "returns an empty result for empty input",
         "previews the last assistant turn",
         "separates assistant text fragments across tool round-trips with a newline",
+        "records one segment per assistant message, the run's loop iterations",
         "settled: is false while the last assistant message still owes tool work",
         "settled: is false while a tool result is the last message entry",
         "settled: is false when a user message is the last entry",
         "settled: is true when the last message is an assistant answer without tool calls",
         "settled: is true for a thinking-only final message, as nothing is left to run",
         "settled: ignores non-message entries after the final answer",
+        "stopReason: is why the last assistant message stopped, as pi recorded it",
+        "entryCount: counts every entry a watcher can compare between reads",
         "settled: tracks the tail across a multi-round run",
         "records a model_change as a switch between the turns it belongs between",
         "carries the previous switch into the next one as its \"from\"",
@@ -1342,6 +1394,9 @@
         "refuses to queue when no turn is running",
         "tears the conversation session down once the reply has landed",
         "does not settle — or kill the session — while the reply still owes tool work",
+        "does not settle while the file says pi will ask the model again",
+        "keeps waiting while a run that may continue keeps appending entries",
+        "settles a tail that stopped for good once the file stops growing",
         "refuses the send when the baseline read never succeeds",
         "writes the turn down so a connection arriving later can close it",
         "raises the recorded target when another message joins the run",
@@ -1351,6 +1406,39 @@
         "drops the dead PTY on a reconnect and keeps the run",
         "re-attaches to the same session and delivers the line after a reconnect",
         "re-attaches a draft to its own session, which its adopted file cannot name"
+      ]
+    },
+    "tests/unit/piTurnRunnerDialog.test.ts": {
+      "suite": "dialog detection after a /command",
+      "tests": [
+        {
+          "suite": "dialog detection after a /command",
+          "title": "reports a dialog found on the pane, after the send itself settled"
+        },
+        {
+          "suite": "dialog detection after a /command",
+          "title": "stays silent on an idle pane"
+        },
+        {
+          "suite": "dialog detection after a /command",
+          "title": "does not read the pane for a command that took the terminal over"
+        },
+        {
+          "suite": "answerDialog",
+          "title": "cancels with Escape and reports the notify line"
+        },
+        {
+          "suite": "answerDialog",
+          "title": "confirm presses Enter on the highlighted affirmative option"
+        },
+        {
+          "suite": "answerDialog",
+          "title": "keeps the dialog pending when the answer did not settle it"
+        },
+        {
+          "suite": "answerDialog",
+          "title": "cannot answer when the feature is not wired"
+        }
       ]
     },
     "tests/unit/platformInput.test.ts": {
@@ -1598,6 +1686,31 @@
         "a host switch drops the ticks with the host that owned them",
         "re-saves the list backup without the deleted rows",
         "a failed sweep leaves the backup alone"
+      ]
+    },
+    "tests/unit/sessionsDialog.test.ts": {
+      "suite": "pending dialog gate",
+      "tests": [
+        {
+          "suite": "pending dialog gate",
+          "title": "refuses any send while a dialog is waiting, naming the dialog"
+        },
+        {
+          "suite": "pending dialog gate",
+          "title": "clears with the host switch: the old host's pane is unreachable"
+        },
+        {
+          "suite": "answerPendingDialog",
+          "title": "routes to the conversation's own runner and reports the notify line"
+        },
+        {
+          "suite": "answerPendingDialog",
+          "title": "keeps the dialog up when the answer did not settle it"
+        },
+        {
+          "suite": "answerPendingDialog",
+          "title": "does not double-answer while an answer is in flight"
+        }
       ]
     },
     "tests/unit/sessionsProjectSwitch.test.ts": {

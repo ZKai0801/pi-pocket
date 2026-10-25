@@ -58,6 +58,11 @@ import {
 } from '../pi/piTurnRunner';
 import { parseSlashLine } from '../pi/piInteractivity';
 import { buildPiCloseCommand, toTurnLine } from '../pi/piTurn';
+import {
+  capturePaneCommand,
+  sendKeysCommand,
+  type PiScreenDialog,
+} from '../pi/piDialog';
 import { pendingTurns, sweepAnsweredTurns } from '../pi/pendingTurns';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
@@ -171,6 +176,24 @@ export interface SessionsStoreState {
    * painted session that overtakes them.
    */
   modelNotes: ModelSwitchNote[];
+  /**
+   * A selection dialog a delivered `/command` left waiting on the turn's pane
+   * (`ctx.ui.confirm`): rendered natively with answer buttons, and the one
+   * thing that may hold a send — the next delivered line would otherwise
+   * answer the dialog's highlighted option (Enter = the default = often Yes).
+   */
+  pendingDialog: PendingDialog | null;
+  /** An answer keystroke is in flight; the dialog card shows its busy state. */
+  dialogAnswering: boolean;
+}
+
+/** A dialog awaiting the user's answer, as parsed off the pane. */
+export interface PendingDialog {
+  /** The conversation the command ran in: null while it is still a draft. */
+  sessionFile: string | null;
+  dialog: PiScreenDialog;
+  /** The pane the dialog was read from, for the answered-screen diff. */
+  pane: string;
 }
 
 export interface SessionsStore extends SessionsStoreState {
@@ -229,6 +252,13 @@ export interface SessionsStore extends SessionsStoreState {
    * itself instead of spinning until the answer.
    */
   send(text: string, intent?: TurnQueueKind): Promise<'sent' | 'busy' | 'error'>;
+  /**
+   * Answer the pending dialog with the user's tap: sends the keystrokes to
+   * the pane it waits in, then reports pi's own follow-up line (or a plain
+   * confirmed/cancelled notice) through `sendNotice`. `'conflict'` means the
+   * dialog outlived the keystroke and is still up — it stays pending.
+   */
+  answerPendingDialog(choice: 'confirm' | 'cancel'): Promise<'answered' | 'busy' | 'conflict' | 'error'>;
   /**
    * Invalidates every in-flight run (D8): their results settle into dropped
    * writes, and nothing may join them any more. The wrapper's host-switch
@@ -304,6 +334,12 @@ export interface SessionsStoreDeps {
    * existing tests) keep compiling; `send` refuses without one.
    */
   runner?: PiTurnRunner;
+  /**
+   * The runner that owns a given conversation's pane — how a pending dialog's
+   * answer reaches the conversation it waits in, whatever chat is open now.
+   * `null` means the draft's runner. Absent in tests that use `runner` only.
+   */
+  runnerForDialog?: (sessionFile: string | null) => Promise<PiTurnRunner>;
   /** Pause used by the post-`/model` re-read; injectable so tests need not wait. */
   sleep?: (ms: number) => Promise<void>;
 }
@@ -424,6 +460,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     running: [],
     pending: [],
     modelNotes: [],
+    pendingDialog: null,
+    dialogAnswering: false,
   });
 
   // The active host, re-read at write time (D8): a run captured on one host
@@ -506,6 +544,10 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.startingNew = false;
       state.pending = [];
       state.modelNotes = [];
+      // The dialog belonged to the old chat's pane; the runner that reported
+      // it is dropped with the switch, so nothing could answer it any more.
+      state.pendingDialog = null;
+      state.dialogAnswering = false;
       // The last project's rows go with it; the backup paints the next
       // project's rows over the empty list instead of leaving them behind.
       state.sessions = [];
@@ -982,6 +1024,49 @@ function rememberSession(
   }
 
   /**
+   * Answer the pending dialog from its native card: the runner that reported
+   * it sends the keystrokes into the pane (Enter on the affirmative option, or
+   * Escape), waits out pi's settle, and diffs the screen so the chat can show
+   * the line the command's handler printed. A dialog that survives its answer
+   * stays pending — reporting it answered would lie about pi's state.
+   */
+  async function answerPendingDialog(
+    choice: 'confirm' | 'cancel',
+  ): Promise<'answered' | 'busy' | 'conflict' | 'error'> {
+    const pending = state.pendingDialog;
+    if (pending === null || state.dialogAnswering || !deps.runner) return 'busy';
+    state.dialogAnswering = true;
+    state.sendError = null;
+    try {
+      // The conversation's own runner — the one whose pane holds the dialog —
+      // not whatever chat happens to be open now. Falls back to the facade in
+      // tests that never wire the cache.
+      const runner: PiTurnRunner = deps.runnerForDialog !== undefined
+        ? await deps.runnerForDialog(pending.sessionFile)
+        : deps.runner;
+      const result = await runner.answerDialog(pending.dialog, choice, pending.pane);
+      if (!result.ok) {
+        state.sendError = result.newLines[0] ?? t('store.dialogAnswerFailed');
+        return 'error';
+      }
+      if (!result.settled) {
+        state.sendNotice = t('store.dialogStillOpen');
+        return 'conflict';
+      }
+      state.pendingDialog = null;
+      state.sendNotice = result.newLines.length > 0
+        ? result.newLines.join(' ')
+        : t(choice === 'confirm' ? 'store.dialogConfirmed' : 'store.dialogCancelled');
+      return 'answered';
+    } catch (error) {
+      state.sendError = errorMessage(error);
+      return 'error';
+    } finally {
+      state.dialogAnswering = false;
+    }
+  }
+
+  /**
    * Type one more line into the run that is already in flight. No new turn and
    * no new claim: the runner writes it into the live PTY as steering (Enter,
    * delivered at the next turn boundary) or as a follow-up (Alt+Enter, queued
@@ -1092,6 +1177,13 @@ function rememberSession(
     if (state.sending) return 'busy';
     if (text.trim() === '') {
       state.sendError = t('store.emptyMessage');
+      return 'error';
+    }
+    // A pending dialog owns the pane it sits in: the next delivered line would
+    // answer its highlighted option (Enter selects the default, which for a
+    // confirm is Yes), so nothing is delivered anywhere until it is answered.
+    if (state.pendingDialog !== null) {
+      state.sendError = t('store.dialogPending');
       return 'error';
     }
     const slash = parseSlashLine(text);
@@ -1259,6 +1351,10 @@ function rememberSession(
     state.running = [];
     state.pending = [];
     state.modelNotes = [];
+    // The old host's pane is unreachable from this one: its dialog can be
+    // neither shown nor answered, and the runner bound to it is gone.
+    state.pendingDialog = null;
+    state.dialogAnswering = false;
     // The ticks named files on the old host; deleting over the new host's
     // connection would remove files this host never listed.
     state.selecting = false;
@@ -1315,6 +1411,10 @@ function rememberSession(
     set running(value: string[]) { state.running = value; },
     get pending() { return state.pending; },
     set pending(value: PendingTurn[]) { state.pending = value; },
+    get pendingDialog() { return state.pendingDialog; },
+    set pendingDialog(value: PendingDialog | null) { state.pendingDialog = value; },
+    get dialogAnswering() { return state.dialogAnswering; },
+    set dialogAnswering(value: boolean) { state.dialogAnswering = value; },
     /** The open chat's conversation still has a turn in flight. */
     get openRunning() {
       return state.openPath !== null && state.running.includes(state.openPath);
@@ -1326,6 +1426,7 @@ function rememberSession(
     refresh,
     closeChat,
     send,
+    answerPendingDialog,
     hostChanged,
     startSelection,
     toggleSelected,
@@ -1435,8 +1536,12 @@ export interface TurnRunnerCacheDeps {
   projectPath: () => string | null;
   /** Resolve the Pi command for the active host; this probes the shell. */
   resolveCommand: () => Promise<{ ok: true; command: string } | { ok: false; error: string }>;
-  /** Build one runner for a resolved command and the claimed project directory. */
-  build: (command: string, projectPath: string) => PiTurnRunner;
+  /**
+   * Build one runner for a resolved command and the claimed project directory.
+   * `sessionFile` is the cache key this build serves (`''` = a draft), so
+   * builder-side callbacks can attribute their events to the conversation.
+   */
+  build: (command: string, projectPath: string, sessionFile: string) => PiTurnRunner;
 }
 
 export interface TurnRunnerCache {
@@ -1561,7 +1666,7 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     if (!claimed(started, host, projectPath)) throw new Error(STALE_TURN_ERROR);
     if (!command.ok) throw new Error(command.error);
 
-    const runner = deps.build(command.command, projectPath);
+    const runner = deps.build(command.command, projectPath, sessionFile);
     if (!claimed(started, host, projectPath)) {
       runner.dispose();
       throw new Error(STALE_TURN_ERROR);
@@ -1780,10 +1885,29 @@ export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner
     })();
   }
 
+  /**
+   * Answer a dialog on the conversation's own runner. Not claimed like a
+   * command: answering never types into the pane, so it cannot race a turn.
+   */
+  async function answerDialog(
+    dialog: PiScreenDialog,
+    choice: 'confirm' | 'cancel',
+    beforePane: string,
+  ): Promise<{ ok: boolean; settled: boolean; newLines: string[] }> {
+    const key = deps.startingNew() ? '' : deps.openPath() ?? '';
+    try {
+      const runner = await deps.runnerFor(key);
+      return await runner.answerDialog(dialog, choice, beforePane);
+    } catch (error) {
+      return { ok: false, settled: true, newLines: [failure(error).error] };
+    }
+  }
+
   return {
     send,
     startNew,
     runCommand,
+    answerDialog,
     beginSend,
     beginStartNew,
     queue,
@@ -1812,7 +1936,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         override && override.length > 0 ? override : undefined,
       );
     },
-    build: (command, projectPath) =>
+    build: (command, projectPath, sessionFile) =>
       createPiTurnRunner({
         openPty: (commandLine, geometry) => turnPtyOpener().open(commandLine, geometry),
         piCommand: command,
@@ -1830,6 +1954,21 @@ export const useSessionsStore = defineStore('sessions', () => {
         },
         forgetTurn: (sessionName) => {
           void pendingTurns().forget(connections.activeName, sessionName);
+        },
+        // The dialog surface: tmux reads the pane and feeds it keystrokes
+        // over the live transport (D45's contract — SSH + pi + tmux). A
+        // dialog found after a `/command` becomes the open chat's native
+        // card; the conversation it belongs to is this build's own key.
+        capturePane: async (sessionName) => {
+          const result = await piLive().transport().exec(capturePaneCommand(sessionName), 15_000);
+          return result.exitCode === 0 ? result.stdout : null;
+        },
+        sendKeys: async (sessionName, keys) => {
+          const result = await piLive().transport().exec(sendKeysCommand(sessionName, keys), 15_000);
+          if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'tmux send-keys failed');
+        },
+        onDialog: ({ dialog, pane }) => {
+          store.pendingDialog = { sessionFile: sessionFile === '' ? null : sessionFile, dialog, pane };
         },
         pollIntervalMs: clampTurnPollInterval(TURN_POLL_INTERVAL_MS),
       }),
@@ -1933,6 +2072,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     // so a run captured on one host cannot write under another.
     hostId: () => connections.activeName,
     runner: runnerFacade,
+    // A dialog's answer must reach the conversation that owns its pane, not
+    // whatever chat is open when the button is tapped.
+    runnerForDialog: (sessionFile) => turnRunners.runnerFor(sessionFile ?? ''),
   });
 
   // Host switch (D8): the previous host's list and chat are stale the moment
@@ -2029,6 +2171,8 @@ export const useSessionsStore = defineStore('sessions', () => {
     pending: toRef(store, 'pending'),
     modelNotes: toRef(store, 'modelNotes'),
     running: toRef(store, 'running'),
+    pendingDialog: toRef(store, 'pendingDialog'),
+    dialogAnswering: toRef(store, 'dialogAnswering'),
     openRunning: computed(() => store.openRunning),
     loadRecents: store.loadRecents,
     load: store.load,
@@ -2037,6 +2181,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     refresh: store.refresh,
     closeChat,
     send: store.send,
+    answerPendingDialog: store.answerPendingDialog,
     startSelection: store.startSelection,
     toggleSelected: store.toggleSelected,
     setAllSelected: store.setAllSelected,
