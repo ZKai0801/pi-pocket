@@ -93,6 +93,40 @@ describe('pending turns', () => {
     expect(isRunAnswered(finished, 2)).toBe(false);
   });
 
+  it('isRunAnswered: keeps a run whose last message says pi will ask again', () => {
+    // The tail is exactly what a finished run leaves — an assistant message
+    // with nothing left to run — and the count is reached. Pi's loop keeps
+    // going for every stop reason but a final one: `toolUse` still owes the
+    // tool calls, and a truncated or failed response is recovered by a retry,
+    // a compaction or a continuation. Only the reason separates them, and
+    // settling on the tail alone is what killed turns mid-flight.
+    const withReason = (reason: string): ParsedPiSession =>
+      parsePiSession([
+        '{"type":"session","version":3,"id":"a"}',
+        '{"type":"message","message":{"role":"user","content":"run the tests"}}',
+        `{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"on it"}],"stopReason":"${reason}"}}`,
+      ].join('\n'));
+
+    for (const reason of ['toolUse', 'length', 'error', 'pending', 'deferred']) {
+      const parsed = withReason(reason);
+      expect(parsed.settled).toBe(true);
+      expect(isRunAnswered(parsed, 1)).toBe(false);
+    }
+    expect(isRunAnswered(withReason('stop'), 1)).toBe(true);
+    expect(isRunAnswered(withReason('aborted'), 1)).toBe(true);
+  });
+
+  it('isRunAnswered: reads a file that records no stop reason by its tail', () => {
+    // Nothing to contradict the tail: the run is judged the way it always was.
+    const jsonl = [
+      '{"type":"session","version":3,"id":"a"}',
+      '{"type":"message","message":{"role":"user","content":"hi"}}',
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}',
+    ].join('\n');
+
+    expect(isRunAnswered(parsePiSession(jsonl), 1)).toBe(true);
+  });
+
   it('PendingTurns: remembers a turn for the host it runs on and no other', async () => {
     const store = storeWith([]);
 

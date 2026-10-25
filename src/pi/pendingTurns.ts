@@ -76,18 +76,53 @@ export const DEFAULT_PENDING_TURN_POLICY: PendingTurnPolicy = {
 };
 
 /**
+ * The stop reasons that end a pi run.
+ *
+ * Pi records on every assistant message why the model stopped, and its agent
+ * loop asks for one more response for all but these: `toolUse` means the tool
+ * calls in that very message still have to run, and `length`/`error` are
+ * recovered by a retry, a compaction, or a continuation. `pending`/`deferred`
+ * are not finished responses at all. So a tail that looks finished is not
+ * proof: a narrating model's text is in the file seconds into a run, and an
+ * errored turn's is in it while pi waits to retry — settling there is what
+ * killed turns mid-flight.
+ */
+const TERMINAL_STOP_REASONS: ReadonlySet<string> = new Set(['stop', 'aborted']);
+
+/**
+ * Whether pi's loop asks the model for another response after this message —
+ * the reading a watcher has to make before it calls a run over.
+ *
+ * `undefined` (a file whose assistant messages record no reason, or a parse
+ * from before the field existed) is read the way the tail alone always was:
+ * the file does not say, so the tail is the only evidence there is.
+ */
+export function isFinalStopReason(stopReason: string | undefined): boolean {
+  return stopReason === undefined || TERMINAL_STOP_REASONS.has(stopReason);
+}
+
+/**
  * Whether a run has actually been answered: the assistant-turn count the run
  * itself settled on, AND a session file whose last message entry is an
- * assistant message with no outstanding tool calls (`settled`).
+ * assistant message with no outstanding tool calls (`settled`), AND a last
+ * assistant message that stopped for good.
  *
  * The count alone is not enough: pi appends each assistant message the moment
  * it is produced — its text lands in the file before the tool calls in that
  * same message run — so a narrating model reaches the target count seconds
  * into a run that is still working. Reading the count as "answered" there is
  * what killed turns mid-flight.
+ *
+ * Nor is the tail alone: the same file shape — an assistant message with
+ * nothing left to run — is what a turn that failed leaves while pi waits out
+ * its retry backoff and asks again.
  */
 export function isRunAnswered(session: ParsedPiSession, target: number): boolean {
-  return countAssistantTurns(session) >= target && session.settled === true;
+  return (
+    countAssistantTurns(session) >= target &&
+    session.settled === true &&
+    isFinalStopReason(session.stopReason)
+  );
 }
 
 /**

@@ -794,6 +794,105 @@ describe('createPiTurnRunner', () => {
     expect(h.forgetTurn).toHaveBeenCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
   });
 
+  it('does not settle while the file says pi will ask the model again', async () => {
+    // The count is reached and the tail is exactly what a finished run leaves
+    // — an assistant message with nothing left to run — but the message says
+    // why it stopped, and pi's loop continues for a truncated or failed
+    // response. Settling here would paint the half-run as the reply and kill
+    // the session the retry is about to run in.
+    const willContinue: ParsedPiSession = {
+      version: 3,
+      id: 'a',
+      cwd: '/home/kai/project',
+      name: null,
+      turns: [
+        { role: 'user', text: 'run the build', timestampMs: 1 },
+        { role: 'assistant', text: 'on it', timestampMs: 2 },
+      ],
+      settled: true,
+      stopReason: 'length',
+      entryCount: 7,
+    };
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), willContinue],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'run the build');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+    await flushMicrotasks();
+
+    expect(h.runner.isBusy()).toBe(true);
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+  });
+
+  it('settles a tail that stopped for good once the file stops growing', async () => {
+    // The same non-final reason as above, but pi never appends the entry it
+    // writes before a retry: a file that has not moved is a run that gave up,
+    // so the turn settles instead of reporting running until the deadline and
+    // leaving its session for a sweep that cannot tell either.
+    const gaveUp: ParsedPiSession = {
+      version: 3,
+      id: 'a',
+      cwd: '/home/kai/project',
+      name: null,
+      turns: [
+        { role: 'user', text: 'run the build', timestampMs: 1 },
+        { role: 'assistant', text: 'on it', timestampMs: 2 },
+      ],
+      settled: true,
+      stopReason: 'error',
+      entryCount: 7,
+    };
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), gaveUp],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'run the build');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(begun.completed).resolves.toMatchObject({ ok: true, session: gaveUp });
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps waiting while a run that may continue keeps appending entries', async () => {
+    // Pi's retry appends a `context_edit` before it waits: the file growing is
+    // the sign a run is not over, so the run is still busy when it happens and
+    // settles on the reply the retry finally wrote.
+    const tail = (stopReason: string, entryCount: number): ParsedPiSession => ({
+      version: 3,
+      id: 'a',
+      cwd: '/home/kai/project',
+      name: null,
+      turns: [
+        { role: 'user', text: 'run the build', timestampMs: 1 },
+        { role: 'assistant', text: 'on it', timestampMs: 2 },
+      ],
+      settled: true,
+      stopReason,
+      entryCount,
+    });
+    const answered = tail('stop', 9);
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), tail('error', 7), tail('error', 8), answered],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'run the build');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(begun.completed).resolves.toMatchObject({ ok: true, session: answered });
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses the send when the baseline read never succeeds', async () => {
     // A baseline that silently defaulted to zero would let the poll see the
     // conversation's previous idle tail as this run's answer and tear the

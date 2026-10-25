@@ -69,6 +69,7 @@ describe('parsePiSession', () => {
       modelSwitches: [],
       model: null,
       settled: false,
+      entryCount: 0,
     });
   });
 
@@ -131,6 +132,27 @@ describe('parsePiSession', () => {
   it('settled: ignores non-message entries after the final answer', () => {
     const parsed = parsePiSession([header, user, assistantText, sessionInfo].join('\n'));
     expect(parsed.settled).toBe(true);
+  });
+
+  it('stopReason: is why the last assistant message stopped, as pi recorded it', () => {
+    // Pi's agent loop decides from this whether to ask the model again, so a
+    // tail that looks finished is only proof the run is over when it says so.
+    const stopped = '{"type":"message","id":"a2","parentId":"t1","message":{"role":"assistant","content":[{"type":"text","text":"ninfer is busy."}],"stopReason":"stop"}}';
+    const toolUse = '{"type":"message","id":"a3","parentId":"a2","message":{"role":"assistant","content":[{"type":"text","text":"one more thing"},{"type":"toolCall","id":"c2","name":"bash","arguments":{}}],"stopReason":"toolUse"}}';
+
+    expect(parsePiSession([header, user, stopped].join('\n')).stopReason).toBe('stop');
+    expect(parsePiSession([header, user, stopped, toolUse].join('\n')).stopReason).toBe('toolUse');
+    // A file whose assistant messages record no reason leaves it unsaid.
+    expect(parsePiSession([header, user, assistantText].join('\n')).stopReason).toBeUndefined();
+  });
+
+  it('entryCount: counts every entry a watcher can compare between reads', () => {
+    const parsed = parsePiSession([header, user, assistantText, sessionInfo].join('\n'));
+    expect(parsed.entryCount).toBe(4);
+    // A bookkeeping entry moves the count too: it is what pi appends before it
+    // waits to retry, which is how a watcher tells a retry from a give-up.
+    const edited = '{"type":"context_edit","id":"e1","parentId":"a2","targetId":"a2","replacement":null}';
+    expect(parsePiSession([header, user, assistantText, edited].join('\n')).entryCount).toBe(4);
   });
 
   it('settled: tracks the tail across a multi-round run', () => {

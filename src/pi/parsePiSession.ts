@@ -16,6 +16,12 @@ interface PiMessage {
   /** The model that produced an assistant message, as pi names it. */
   model?: string;
   provider?: string;
+  /**
+   * Why the model stopped producing this message (`stop`, `toolUse`, `length`,
+   * `error`, `aborted`). Pi's own loop decides from it whether to ask again,
+   * so it is the one field that says whether a run is over.
+   */
+  stopReason?: string;
 }
 
 interface PiEntry {
@@ -75,6 +81,11 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
   // message, which is the one the session began with. It is what the NEXT
   // `model_change` switched away from, and what the walk ends on: `parsed.model`.
   let currentModel: string | null = null;
+  // Why the model stopped, from the last assistant message that says: pi's
+  // agent loop keeps asking for responses for every reason but a final one, so
+  // a tail that looks finished is not proof the run is over.
+  let lastStopReason: string | undefined;
+  let entryCount = 0;
 
   const flushAssistant = (): void => {
     if (pendingAssistant && pendingAssistant.text.trim()) parsed.turns.push(pendingAssistant);
@@ -91,6 +102,7 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
       continue;
     }
     if (!entry || typeof entry !== 'object') continue;
+    entryCount += 1;
 
     if (entry.type === 'session') {
       parsed.version = typeof entry.version === 'number' ? entry.version : null;
@@ -136,6 +148,7 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
         parsed.turns.push({ role: 'user', text, timestampMs: messageTimestamp(entry.message, entry) });
       }
     } else {
+      if (typeof entry.message.stopReason === 'string') lastStopReason = entry.message.stopReason;
       // The first assistant message that names its model says which model the
       // session began with — the only "from" a first switch can have. Later
       // ones are already covered by the `model_change` entries themselves.
@@ -159,6 +172,8 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
   parsed.modelSwitches = modelSwitches;
   parsed.model = currentModel;
   parsed.settled = tail !== null && tail.role === 'assistant' && !tail.toolCall;
+  parsed.stopReason = lastStopReason;
+  parsed.entryCount = entryCount;
   return parsed;
 }
 

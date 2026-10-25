@@ -67,4 +67,22 @@ export interface ParsedPiSession {
    * field existed) must be read as "not settled".
    */
   settled?: boolean;
+  /**
+   * Why the model stopped, as pi recorded it on the file's last assistant
+   * message (`stop`, `toolUse`, `length`, `error`, `aborted`, ...). Pi's agent
+   * loop asks the model for one more response for every reason but the ones
+   * that end a run, so a settled tail is only proof the run is over when this
+   * says it stopped for good. `undefined` — a file whose assistant messages
+   * record no reason, or a parse from before this field existed — must be read
+   * as "the file does not say", which leaves the tail as the only evidence.
+   */
+  stopReason?: string;
+  /**
+   * How many entries the parse read, of every type. A reader that watches the
+   * file compares this between reads: pi appends an entry before it waits to
+   * continue a run (the `context_edit` that omits the attempt it is about to
+   * retry), so a count that has not moved is how a watcher tells "pi gave up"
+   * from "pi is working up to the next entry".
+   */
+  entryCount?: number;
 }

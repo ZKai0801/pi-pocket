@@ -52,6 +52,20 @@ const SUBMIT_DELAY_MS = 250;
  */
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * How long a tail that looks finished — the assistant-turn count reached, no
+ * tool work outstanding — is waited on when the file's last assistant message
+ * says pi may still continue (`length`, `error`, or a reason this app does not
+ * know). Pi appends an entry the moment it decides to continue (the
+ * `context_edit` that omits the attempt it is about to retry), so a file that
+ * has not grown for this long is a run that gave up: its answer is already in
+ * the file and nothing more is coming. Bounding the wait here keeps a turn
+ * that failed for good from reporting "running" for the whole turn deadline —
+ * and from leaving its session for the sweep, which has no watch of its own
+ * and must not guess.
+ */
+const NON_FINAL_TAIL_GRACE_MS = 20_000;
+
 /** The pause pi gets between Enter and a dialog being readable on the pane. */
 const DIALOG_SETTLE_MS = 1500;
 
@@ -462,6 +476,10 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
   }
 
   async function pollForReplies(active: ActiveRun): Promise<PiTurnSendResult> {
+    // The watch behind NON_FINAL_TAIL_GRACE_MS: when the file last looked
+    // finished, and how many entries it held then.
+    let settledSinceMs = now();
+    let settledEntryCount: number | undefined;
     while (true) {
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
       try {
@@ -469,11 +487,25 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         const session = await readAbortable(active.sessionFile, active.deadline);
         if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
         if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
-        // The settle test is the count AND a settled tail: pi writes an
-        // assistant's text before the tool calls in that same message run, so
-        // the count alone is reached seconds into a run that narrates before
-        // it works — settling there is what used to kill turns mid-flight.
+        // The settle test is the count AND a settled tail AND a final stop
+        // reason: pi writes an assistant's text before the tool calls in that
+        // same message run, so the count alone is reached seconds into a run
+        // that narrates before it works — settling there is what used to kill
+        // turns mid-flight.
         if (isRunAnswered(session, active.target)) return { ok: true, session };
+        // Only a tail that has stopped for good gets here. The same shape is
+        // what a failed turn leaves while pi waits out a retry backoff, so
+        // give pi the entry it appends before it continues to appear: a file
+        // that has not grown since is a run that is over after all.
+        const settled =
+          session.settled === true && countAssistantTurns(session) >= active.target;
+        if (!settled || session.entryCount !== settledEntryCount) {
+          settledEntryCount = session.entryCount;
+          settledSinceMs = now();
+        }
+        if (settled && now() - settledSinceMs >= NON_FINAL_TAIL_GRACE_MS) {
+          return { ok: true, session };
+        }
       } catch {
         // A transient read failure is retried until the deadline.
       }
