@@ -411,6 +411,13 @@
         "sits between the time separators a switch falls between"
       ]
     },
+    "tests/unit/chatSegmentBubbles.test.ts": {
+      "suite": "chat segment bubbles",
+      "tests": [
+        "renders one bubble per segment of a run, not one for the whole run",
+        "keeps one bubble for a turn without segments — a user line, or a cached parse"
+      ]
+    },
     "tests/unit/composerDelivery.test.ts": {
       "suite": "composer delivery adapter",
       "tests": [

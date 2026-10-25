@@ -223,6 +223,18 @@ const pendingDialog = computed(() => store.pendingDialog ?? null);
 const dialogMessage = computed<string[]>(() =>
   (store.pendingDialog?.dialog.message ?? []).filter((line) => line.trim() !== ''));
 
+/**
+ * One bubble per loop iteration: an assistant turn's `segments` are the run's
+ * separate replies, and rendering them together in one bubble is what made a
+ * long run unreadable. A turn without segments (a user message, a cached parse
+ * from before the field existed) is one bubble of its whole text.
+ */
+function bubbleTexts(turn: PiTurn): string[] {
+  const segments = turn.segments;
+  if (segments !== undefined && segments.length > 0) return segments;
+  return [turn.text];
+}
+
 const rows = computed<ChatRow[]>(() => {
   const turns = store.open?.turns ?? [];
   // Pi appends a `model_change` entry per switch, so the dividers are the
@@ -420,7 +432,14 @@ function goBack(): void {
         <div class="chat__turns">
           <template v-for="row in rows" :key="row.key">
             <p v-if="row.kind === 'separator' && row.time !== undefined" class="chat__time">{{ row.time }}</p>
-            <ChatBubble v-else-if="row.kind === 'bubble' && row.turn !== undefined" :role="row.turn.role" :text="row.turn.text" />
+            <template v-else-if="row.kind === 'bubble' && row.turn !== undefined">
+              <ChatBubble
+                v-for="(segment, segmentIndex) in bubbleTexts(row.turn)"
+                :key="`${row.key}-${segmentIndex}`"
+                :role="row.turn.role"
+                :text="segment"
+              />
+            </template>
             <p v-else-if="row.kind === 'model' && row.text !== undefined" class="chat__model" data-testid="chat-model-switch">
               {{ row.text }}
             </p>

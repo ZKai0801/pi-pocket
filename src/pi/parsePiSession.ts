@@ -147,9 +147,10 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
       const timestampMs = messageTimestamp(entry.message, entry);
       if (pendingAssistant) {
         pendingAssistant.text += pendingAssistant.text ? `\n${text}` : text;
+        pendingAssistant.segments?.push(text);
         pendingAssistant.timestampMs = timestampMs;
       } else {
-        pendingAssistant = { role: 'assistant', text, timestampMs };
+        pendingAssistant = { role: 'assistant', text, timestampMs, segments: [text] };
       }
     }
   }

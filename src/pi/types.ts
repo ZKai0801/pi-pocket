@@ -2,6 +2,16 @@ export interface PiTurn {
   role: 'user' | 'assistant';
   text: string;
   timestampMs: number;
+  /**
+   * The run's assistant replies, one per loop iteration, in file order: pi
+   * writes each response the moment it is produced, so a run that narrates,
+   * works, and answers leaves several. One bubble per segment is what keeps a
+   * reader able to tell the iterations apart; `text` stays the whole run
+   * joined (preview, counts, and every other consumer keep their merged
+   * meaning). Absent on user turns and on parses from before the field
+   * existed — read both as "one bubble, all of `text`".
+   */
+  segments?: string[];
 }
 
 /**

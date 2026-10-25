@@ -95,7 +95,7 @@ describe('pi repository', () => {
     const parsed = await new PiRepository(t, ROOT).readSession(`${DIR}/big.jsonl`);
     expect(parsed.turns).toEqual([
       { role: 'user', text: 'hi', timestampMs: 1792288352007 },
-      { role: 'assistant', text: 'done', timestampMs: 1792288360896 },
+      { role: 'assistant', text: 'done', timestampMs: 1792288360896, segments: ['done'] },
     ]);
     // The read really paged past the old truncation point.
     expect(calls.length).toBeGreaterThan(1);

@@ -20,8 +20,27 @@ describe('parsePiSession', () => {
     const parsed = parsePiSession([header, user, assistantThinking, toolResult, assistantText].join('\n'));
     expect(parsed.turns).toEqual([
       { role: 'user', text: 'look at ninfer', timestampMs: 1792288352007 },
-      { role: 'assistant', text: 'ninfer is busy.', timestampMs: 1792288356896 },
+      { role: 'assistant', text: 'ninfer is busy.', timestampMs: 1792288356896, segments: ['ninfer is busy.'] },
     ]);
+  });
+
+  it('records one segment per assistant message, the run\'s loop iterations', () => {
+    // A run that narrates, works, and answers leaves three assistant messages
+    // in the file; the bubbles have to tell them apart.
+    const narrate = '{"type":"message","id":"s1","parentId":"u1","timestamp":"2026-10-18T02:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I\'ll check."}],"timestamp":1792288401001}}';
+    const narrateTool = '{"type":"message","id":"s2","parentId":"s1","timestamp":"2026-10-18T02:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c9","name":"bash","arguments":{}}],"timestamp":1792288402001}}';
+    const midAnswer = '{"type":"message","id":"s3","parentId":"s2","timestamp":"2026-10-18T02:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"It\'s busy."}],"timestamp":1792288404001}}';
+    const midTool = '{"type":"message","id":"s4","parentId":"s3","timestamp":"2026-10-18T02:00:05.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c10","name":"bash","arguments":{}}],"timestamp":1792288405001}}';
+    const midResult = '{"type":"message","id":"s5","parentId":"s4","timestamp":"2026-10-18T02:00:06.000Z","message":{"role":"toolResult","toolCallId":"c10","toolName":"bash","content":[{"type":"text","text":"ok"}],"isError":false}}';
+    const final = '{"type":"message","id":"s6","parentId":"s5","timestamp":"2026-10-18T02:00:07.000Z","message":{"role":"assistant","content":[{"type":"text","text":"All done."}],"timestamp":1792288407001}}';
+
+    const parsed = parsePiSession([header, user, narrate, narrateTool, midAnswer, midTool, midResult, final].join('\n'));
+    const assistant = parsed.turns.find((turn) => turn.role === 'assistant');
+    expect(assistant?.segments).toEqual(["I'll check.", "It's busy.", 'All done.']);
+    // The merged text keeps its old meaning for preview and counts.
+    expect(assistant?.text).toBe("I'll check.\nIt's busy.\nAll done.");
+    // Tool-only messages leave no bubble, so no empty segment either.
+    expect(assistant?.segments?.every((segment) => segment.trim() !== '')).toBe(true);
   });
 
   it('drops a thinking/tool-only assistant turn', () => {
