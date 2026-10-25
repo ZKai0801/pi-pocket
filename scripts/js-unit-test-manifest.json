@@ -824,6 +824,12 @@
         "keeps dock, launcher, dictation and Composer buttons out of text selection and the touch callout"
       ]
     },
+    "tests/unit/noHostCliSurface.test.ts": {
+      "suite": "no host-CLI surface in the phone app",
+      "tests": [
+        "src/ builds no a/pocketshell commands and uses no host-CLI modules"
+      ]
+    },
     "tests/unit/pendingTurns.test.ts": {
       "suite": "pending turns",
       "tests": [

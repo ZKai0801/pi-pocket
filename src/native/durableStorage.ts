@@ -17,7 +17,7 @@ import { appendDiagnosticEvent, type DiagnosticStorage } from '../diagnostics';
  *  - the first time, the WebView's existing localStorage is imported once and
  *    the native store becomes authoritative;
  *  - afterwards localStorage is reconciled to the committed entries at launch,
- *    so a write or removal the WebView lost to a kill is restored;
+ *    so a write or removal the WebView lost to a process kill is restored;
  *  - `setItem`/`removeItem`/`clear` on `localStorage` (not `sessionStorage`)
  *    then also commit synchronously to native storage before returning.
  *    A failed commit rolls the localStorage change back and throws, so a write
