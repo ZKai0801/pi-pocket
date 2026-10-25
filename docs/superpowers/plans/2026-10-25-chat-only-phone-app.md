@@ -16,6 +16,7 @@
 - **D22 hard cut:** no flag, no hidden path, no "keep for now" dead code. If a file's only consumers are deleted, the file goes in the same task.
 - **The core submodule is frozen:** never edit `vendor/pocketshell-core/**`. The phone app simply stops importing the surfaces it no longer needs.
 - **Unit gate:** `scripts/run-js-unit-gate.sh` must be green at the end of every task. **Typecheck:** `pnpm typecheck` likewise.
+- **Test manifest (G9):** the gate fails unless every file and test title registered in `scripts/js-unit-test-manifest.json` actually ran. Every task that deletes or trims a test file must remove its entries from that manifest in the SAME task; Task 4 registers its new test there.
 - **Chat is untouchable:** `src/pi/**`, `src/stores/sessions.ts`, `src/stores/projects.ts`, the turn runner seam (`src/session/turnPty.ts`, PhoneApp's `sshCapability.openPty` call at `src/phone/PhoneApp.vue:584`), `src/session/composerDelivery.ts` — none of these files is deleted or behaviorally changed by this plan. If a task seems to require touching them, stop and report instead.
 - Docs are English. User-facing strings stay in the existing i18n shape (`src/i18n/messages.ts`).
 - Build the APK with `scripts/build-android-debug.ps1` (Windows box), after `git submodule update --init --recursive` and `pnpm install --frozen-lockfile`.
@@ -60,7 +61,11 @@ Delete `src/App.vue`, `src/legacyMain.ts`, and the legacy-exclusive files Step 1
 
 For each entry whose `oldDestination`/`newRoute` belonged only to the legacy shell (at least the `usage` routes at lines 23-24), set `status: 'removed'` and `note: 'Removed with the legacy shell and the chat-only cut (2026-10-25 spec).'`. Keep entries for routes that still exist.
 
-- [ ] **Step 5: Verify**
+- [ ] **Step 5: Remove deleted tests from the manifest**
+
+Delete the manifest entries for every test file removed in Steps 2-3 (certainly `usageDockerFixture.test.ts`, plus any legacy-shell test file) from `scripts/js-unit-test-manifest.json`.
+
+- [ ] **Step 6: Verify**
 
 ```bash
 pnpm typecheck && scripts/run-js-unit-gate.sh
@@ -112,7 +117,11 @@ grep -rln "TerminalScreen\|terminalPty\|TerminalViewport" tests/unit/
 
 For each hit (expected: `phoneShellWiring.test.ts`, `phoneShellSingleEntry.test.ts`, possibly `releaseChrome.test.ts`, `mobileHotkeys.test.ts`, `backNavigation.test.ts`): delete the terminal-specific cases; keep every chat/connections/settings case. A test file whose entire subject was the terminal screen goes entirely.
 
-- [ ] **Step 6: Verify**
+- [ ] **Step 6: Remove deleted tests from the manifest**
+
+Remove the entries for the nine terminal test files (and `sessionAgentMetadata.test.ts` if deleted, and any shell test file removed wholesale) from `scripts/js-unit-test-manifest.json`. For shell tests you trimmed rather than deleted, remove only the deleted test titles.
+
+- [ ] **Step 7: Verify**
 
 ```bash
 pnpm typecheck && scripts/run-js-unit-gate.sh
@@ -249,12 +258,11 @@ Expected: PASS (Tasks 1-3 removed everything). If it fails, the hit list is left
 
 - [ ] **Step 3: Confirm gate registration and run the full gate**
 
+Register the new test in `scripts/js-unit-test-manifest.json` (add `tests/unit/noHostCliSurface.test.ts` and its test title exactly as written — the gate fails unless every registered title ran). Then:
+
 ```bash
-grep -n "noHostCliSurface\|tests/unit" scripts/run-js-unit-gate.sh | head
 pnpm typecheck && scripts/run-js-unit-gate.sh
 ```
-
-If the gate script enumerates suites, add `tests/unit/noHostCliSurface.test.ts` to it; if it runs the registered Vitest project, note that no edit was needed.
 
 ---
 
@@ -278,7 +286,7 @@ In `mockHost.ts`: remove `MockSession`, the five-session fixture and `sessionsLi
 grep -rln "MockSession\|sessionsListing" src/ tests/
 ```
 
-Adapt each hit (`devBrowserCapacitor.test.ts` likely among them) to the trimmed mock; a case that existed to serve aplexer-session mock data is deleted.
+Adapt each hit (`devBrowserCapacitor.test.ts` likely among them) to the trimmed mock; a case that existed to serve aplexer-session mock data is deleted. Remove deleted files/titles from `scripts/js-unit-test-manifest.json` in the same step.
 
 - [ ] **Step 3: Update `docs/browser-dev-mode.md`**
 
