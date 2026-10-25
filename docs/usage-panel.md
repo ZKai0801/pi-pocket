@@ -1,5 +1,7 @@
 # Usage Panel
 
+> Scope: desktop/web clients (shared core) and `release/0.5.x`. The phone app dropped these surfaces at D45.
+
 This document records the broader Android Compose usage design and host-side
 producer contract. The current JS-first Android route, its direct-refresh
 behavior, and its Docker journey are described in

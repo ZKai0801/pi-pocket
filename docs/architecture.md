@@ -10,9 +10,10 @@ vendor/pocketshell-core/    pinned submodule: shared TypeScript contract layer
                             (HostCliCore, ConnectionController, SshCapability,
                             composer, sync, usage/ports policy) and packages/ui
                             (shared tokens, themes, AppIcon, ComposerControls)
-src/                        Vue app: App.vue, screens in components/, session/,
-                            policy/, stores/, sync/, migration/, and native/
-                            (TypeScript wrappers for the Capacitor plugins)
+src/                        Vue app: chat components (components/, sessions/,
+                            shell), pi/, session/, stores/, sync/, migration/,
+                            and native/ (TypeScript wrappers for the
+                            Capacitor plugins)
 android/                    Capacitor host: MainActivity and the native plugins
                             (SshCapabilityPlugin, KeyboardInsetsPlugin,
                             SpeechRecognitionPlugin, DocumentContentPlugin,
@@ -24,7 +25,11 @@ tests/docker/               disposable SSH and aplexer fixtures
 The native SSH plugin implements core's `SshCapability`. Core's
 `ConnectionController` owns host-key verdicts, host CLI calls, session
 switching, reconnect and grace. The plugin moves bytes and reports transport
-state. See [js-first-rewrite-foundation.md](js-first-rewrite-foundation.md),
+state. The phone app is chat-only (D45): it keeps exec/SFTP/PTY/forwards over
+`SshCapability` and consumes no host-CLI surface (guard:
+`tests/unit/noHostCliSurface.test.ts`). Host contract: SSH + `pi`; tmux
+recommended (D44 degradation). See
+[js-first-rewrite-foundation.md](js-first-rewrite-foundation.md),
 [js-first-rewrite-inventory.md](js-first-rewrite-inventory.md) and
 [design-system.md](design-system.md).
 

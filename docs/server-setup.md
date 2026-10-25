@@ -1,7 +1,25 @@
-# Server-side setup (the `pocketshell` CLI)
+# Server-side setup
 
-The PocketShell Android app drives a small server-side CLI over SSH for several
-features:
+The phone app is a chat-only client (D45): its host contract is an SSH account
+with key auth and `pi` on PATH. tmux is recommended — without it a chat turn
+degrades to a bare `exec pi` and dies when the connection drops (D44).
+
+Verify (the same path the app uses):
+
+```bash
+ssh <host> 'command -v pi && command -v tmux'
+```
+
+The app no longer consumes the `pocketshell` CLI or aplexer on the phone; those
+surfaces live in the shared core and serve the desktop and web clients, and
+`release/0.5.x`.
+
+## Only for 0.5.x / desktop: the `pocketshell` CLI
+
+Everything below applies to the desktop and web clients (via the shared
+`pocketshell-core`) and to `release/0.5.x` — not to the phone app (D45).
+
+The app drives a small server-side CLI over SSH for several features:
 
 - **Usage panel** → `pocketshell usage --json` (provider quota/limits)
 - **Sessions** → `pocketshell sessions ...` through the bundled aplexer runtime
@@ -11,7 +29,7 @@ If the CLI isn't reachable over a **non-interactive** SSH command, the app shows
 e.g. **"<host>: pocketshell not installed — server-side usage tracking
 unavailable"**. Almost always this is a **PATH** problem, not a missing install.
 
-## 1. Install the CLI on the server
+### 1. Install the CLI on the server
 
 The CLI is published to PyPI as [`pocketshell`](https://pypi.org/project/pocketshell/).
 Install it per-user (preferred: `uv`):
@@ -28,7 +46,7 @@ Pin the version to match the app's release when it matters:
 uv tool install 'pocketshell==0.3.21'
 ```
 
-## 2. CRITICAL — put `~/.local/bin` on PATH for *non-interactive* SSH
+### 2. CRITICAL — put `~/.local/bin` on PATH for *non-interactive* SSH
 
 This is the gotcha that makes a correctly-installed CLI look "not installed".
 
@@ -59,7 +77,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Always back up first: `cp ~/.bashrc ~/.bashrc.bak`.
 
-## 3. Verify (the same path the app uses)
+### 3. Verify (the same path the desktop/web clients use)
 
 ```bash
 ssh <host> 'command -v pocketshell && command -v a && command -v aplexer && pocketshell sessions list --json'
@@ -75,7 +93,7 @@ pocketshell`.
 > `goz not on PATH`) if that provider's helper tool isn't installed — that's
 > independent of the `pocketshell` PATH issue and only affects that one provider.
 
-## 4. Update
+### 4. Update
 
 ```bash
 uv tool upgrade pocketshell          # or: pipx upgrade pocketshell
@@ -85,7 +103,7 @@ uv tool upgrade pocketshell          # or: pipx upgrade pocketshell
 Keep the server CLI version in step with the app release (the app and the PyPI
 package are bumped in lockstep on each release tag).
 
-## 5. Troubleshooting
+### 5. Troubleshooting
 
 | Symptom (in app) | Cause | Fix |
 |---|---|---|

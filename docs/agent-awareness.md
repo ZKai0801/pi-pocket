@@ -1,5 +1,7 @@
 # Agent awareness
 
+> Scope: desktop/web clients (shared core) and `release/0.5.x`. The phone app dropped these surfaces at D45.
+
 PocketShell reports the coding workload associated with the active aplexer
 session. It does not inspect a separate terminal manager or infer an agent from
 a display name.

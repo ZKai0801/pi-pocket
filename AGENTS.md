@@ -1,6 +1,6 @@
 # PocketShell
 
-Voice-first, agent-aware Android SSH client with aplexer-backed sessions.
+Voice-first Pi chat client over SSH (D45): conversations ride pi session files; turns survive disconnects in a private tmux server (D44). The repo's Android app no longer ships a terminal screen or consumes aplexer/the host CLI — those remain core/desktop/web and 0.5.x surfaces.
 
 PocketShell is in active development and daily use as the maintainer's primary way of working on a dev box from a phone.
 
