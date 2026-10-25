@@ -1,11 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  HostCliCore,
   parseHostEnginesList,
   parseHostProfilesList,
-  parseHostSessionsList,
   parseHostWorkspaces,
-  parseUsageNdjson,
   runHostBootstrap,
   scanRemotePorts,
 } from '@pocketshell/core';
@@ -33,36 +30,22 @@ const decode = (base64: string) => new TextDecoder().decode(Uint8Array.from(atob
 const encode = (text: string) => btoa(text);
 
 describe('browser dev mock host', () => {
-  it('answers the pocketshell CLI verbs in the shapes pocketshell-core parses', () => {
+  it('answers the kept pocketshell CLI verbs in the shapes pocketshell-core parses', () => {
     const host = new MockHost({ now: () => Date.UTC(2026, 9, 2, 12) });
-    const sessions = parseHostSessionsList(host.exec('pocketshell sessions list --json').stdout);
-    expect(sessions.errors).toEqual([]);
-    expect(sessions.sessions.map((session) => session.name)).toEqual([
-      'pocketshell:claude-main', 'pocketshell:codex-review', 'pocketshell:shell', 'pocketshell-site:dev-server', 'notes:scratch',
-    ]);
-    expect(new Set(sessions.sessions.map((session) => session.workspace)).size).toBe(3);
-    expect(sessions.sessions[0]).toMatchObject({ agent: 'claude', agentState: 'working', agentStateSource: 'reported' });
     expect(parseHostWorkspaces(host.exec("pocketshell workspaces list --host 'devbox' --json").stdout).workspaces).toHaveLength(3);
     expect(parseHostEnginesList(host.exec('pocketshell engines list --json').stdout).map((engine) => engine.id)).toEqual(['claude', 'codex', 'shell']);
     expect(parseHostProfilesList(host.exec('pocketshell profiles list --json').stdout).length).toBeGreaterThan(0);
-    const usage = parseUsageNdjson(host.exec('pocketshell usage --json').stdout);
-    expect(usage.map((row) => row.provider)).toEqual(['claude', 'codex', 'copilot', 'gemini']);
-    expect(host.exec('pocketshell sessions warnings --json')).toMatchObject({ exitCode: 0, stdout: '[]\n' });
+    expect(host.exec('pocketshell workspaces add /srv/app --json').exitCode).toBe(0);
+    expect(parseHostWorkspaces(host.exec('pocketshell workspaces list --json').stdout).workspaces)
+      .toEqual(expect.arrayContaining([{ path: '/srv/app', displayPath: '/srv/app' }]));
+    expect(host.exec('pocketshell workspaces remove /srv/app --json').exitCode).toBe(0);
+    // The aplexer-session surfaces are gone from the chat-only cut: the mock
+    // no longer answers them, so a stale caller fails loudly instead of
+    // rendering a deleted screen.
+    expect(host.exec('pocketshell sessions list --json').exitCode).not.toBe(0);
+    expect(host.exec('pocketshell usage --json').exitCode).not.toBe(0);
     const unknown = host.exec('pocketshell frobnicate');
     expect(unknown.exitCode).not.toBe(0);
-  });
-
-  it('creates and kills sessions through the real HostCliCore contract', async () => {
-    const host = new MockHost();
-    const cli = new HostCliCore({ exec: async (command) => host.exec(command) });
-    await expect(cli.createSession('feature-x', { cwd: `${MOCK_HOME}/notes`, engine: 'claude' })).resolves.toMatchObject({ name: 'notes:feature-x', created: true });
-    await expect(cli.createSession('feature-x', { cwd: `${MOCK_HOME}/notes` })).resolves.toMatchObject({ created: false });
-    expect((await cli.listSessions()).sessions[0]).toMatchObject({ name: 'notes:feature-x', agent: 'claude' });
-    await cli.killSession('notes:feature-x');
-    expect((await cli.listSessions()).sessions.some((session) => session.name === 'notes:feature-x')).toBe(false);
-    await expect(cli.killSession('nope:missing')).rejects.toThrow(/failed on the host/u);
-    await expect(cli.addWorkspace('devbox', '/srv/app')).resolves.toMatchObject({ workspaces: expect.arrayContaining([{ path: '/srv/app', displayPath: '/srv/app' }]) });
-    await expect(cli.removeWorkspace('devbox', '/srv/app')).resolves.toMatchObject({ workspaces: expect.not.arrayContaining([{ path: '/srv/app', displayPath: '/srv/app' }]) });
   });
 
   it('passes the shared host bootstrap probe and the listener scan with process directories', async () => {
@@ -72,10 +55,14 @@ describe('browser dev mock host', () => {
       const result = await call('exec', { ...ref, requestId: 'b', command, timeoutMs: 1000 }) as { exitCode: number; stdout: string; stderr: string };
       return result;
     });
-    expect(bootstrap).toMatchObject({
-      pocketshell: { installed: true }, tmux: { installed: true }, tmuxctl: { installed: true }, aplexer: { installed: true },
-      installer: 'uv', daemonRunning: true, daemonEnabled: true,
-    });
+    // The chat-only cut's box carries the CLI (bundled `a`/aplexer) but no
+    // tmux: the tmux surfaces the mock used to model were removed with the
+    // terminal screen.
+    expect(bootstrap.pocketshell).toMatchObject({ installed: true });
+    expect(bootstrap.tmux).toMatchObject({ installed: false });
+    expect(bootstrap.tmuxctl).toMatchObject({ installed: false });
+    expect(bootstrap.aplexer).toMatchObject({ installed: true });
+    expect(bootstrap).toMatchObject({ installer: 'uv', daemonRunning: true, daemonEnabled: true });
     const scan = await scanRemotePorts(capability, ref, { createRequestId: (() => { let n = 0; return () => `p${n++}`; })() });
     expect(scan.ok).toBe(true);
     expect(scan.ports.map((port) => port.port)).toEqual(expect.arrayContaining([22, 3000, 5173, 5432, 8000]));
@@ -93,9 +80,9 @@ describe('browser dev mock host', () => {
     await expect(call('connect', { ...base, hostname: 'fail.mock', expectedHostKey: null })).rejects.toMatchObject({ code: 'CONNECTION_FAILED' });
   });
 
-  it('runs an echoing line-editing shell behind each session PTY with Android sequence rules', async () => {
+  it('runs an echoing line-editing shell behind each PTY with Android sequence rules', async () => {
     const { call, ref, bridge, plugin } = await connected();
-    const pty = await call('openPty', { ...ref, requestId: 'o', command: "exec pocketshell sessions attach -- 'pocketshell:shell'", cols: 80, rows: 24 }) as { channelId: string };
+    const pty = await call('openPty', { ...ref, requestId: 'o', command: 'exec pi --session ~/git/pocketshell/.pi/s.jsonl', cols: 80, rows: 24 }) as { channelId: string };
     const read = async (sequence: number) => call('readPty', { ...ref, channelId: pty.channelId, requestId: 'r', sequence, waitMs: 50 }) as Promise<{ sequence: number; dataBase64: string; eof: boolean }>;
     const banner = await read(0);
     expect(banner.sequence).toBe(1);
@@ -106,7 +93,6 @@ describe('browser dev mock host', () => {
     const echoed = await read(1);
     expect(decode(echoed.dataBase64)).toContain('echo hello mockx\b \b\r\nhello mock\r\n');
     await call('resizePty', { ...ref, channelId: pty.channelId, requestId: 'z', sequence: 2, cols: 40, rows: 10 });
-    await expect(call('openPty', { ...ref, requestId: 'o2', command: "exec pocketshell sessions attach -- 'no:such'", cols: 80, rows: 24 })).rejects.toMatchObject({ code: 'CHANNEL_OPEN_FAILED' });
     await call('writePty', { ...ref, channelId: pty.channelId, requestId: 'w', sequence: 3, dataBase64: encode('exit\r') });
     let last = await read(2);
     while (!last.eof) last = await read(last.sequence);
@@ -140,12 +126,12 @@ describe('browser dev mock host', () => {
   });
 
   it('splits shell words and peels the path-aware command wrapper', () => {
-    expect(shellWords(`pocketshell sessions attach -- 'a b' "c\\"d" e\\ f`)).toEqual(['pocketshell', 'sessions', 'attach', '--', 'a b', 'c"d', 'e f']);
-    expect(unwrapCommand(`/bin/sh -lc 'export PATH="$HOME/.local/bin:$PATH"; command -v tmux'`)).toBe('command -v tmux');
+    expect(shellWords(`exec pi --session 'a b' "c\\"d" e\\ f`)).toEqual(['exec', 'pi', '--session', 'a b', 'c"d', 'e f']);
+    expect(unwrapCommand(`/bin/sh -lc 'export PATH="$HOME/.local/bin:$PATH"; command -v pocketshell'`)).toBe('command -v pocketshell');
     expect(unwrapCommand(`/bin/sh -lc 'export PATH="x"; export A=1 B=2; systemctl --user is-active x'`)).toBe('systemctl --user is-active x');
     const host = new MockHost();
     const output: string[] = [];
-    const shell = new MockShell(host, null, (text) => output.push(text));
+    const shell = new MockShell(host, (text) => output.push(text));
     shell.input('cd ~/git\rls\rcat pocketshell/README.md\rnope\r\x1b[A\x03');
     const text = output.join('');
     expect(text).toContain('pocketshell/  pocketshell-site/');

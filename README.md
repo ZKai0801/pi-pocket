@@ -145,12 +145,6 @@ Open <http://localhost:5173/>, then switch Chrome DevTools to a phone viewport
 plugins: [docs/browser-dev-mode.md](docs/browser-dev-mode.md). None of this
 ships in the APK.
 
-The preserved Docker agents fixture can be checked with:
-
-```sh
-scripts/test-agents-fixture-aplexer.sh --docker
-```
-
 The local acceptance emulator is driven by `scripts/start-emulator.ps1`, not by
 CI.
 

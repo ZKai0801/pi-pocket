@@ -187,14 +187,3 @@ jobs:
       - name: Stop Docker agents fixture
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
-
-  docker-agents-fixture:
-    name: Docker agents fixture contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Exercise pinned CLI/aplexer fixture
-        run: scripts/test-agents-fixture-aplexer.sh --docker

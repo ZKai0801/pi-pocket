@@ -601,17 +601,16 @@
       "suite": "browser dev mode through Capacitor",
       "tests": [
         "selects the android platform and answers the bridge warm-up and key vault through the plugin proxy",
-        "connects, asks for host-key trust, lists sessions, attaches and echoes typed input via the shared controller"
+        "connects, asks for host-key trust and runs a host command via the shared controller"
       ]
     },
     "tests/unit/devBrowserMockHost.test.ts": {
       "suite": "browser dev mock host",
       "tests": [
-        "answers the pocketshell CLI verbs in the shapes pocketshell-core parses",
-        "creates and kills sessions through the real HostCliCore contract",
+        "answers the kept pocketshell CLI verbs in the shapes pocketshell-core parses",
         "passes the shared host bootstrap probe and the listener scan with process directories",
         "refuses an untrusted host key with the presented key, like the Android plugin",
-        "runs an echoing line-editing shell behind each session PTY with Android sequence rules",
+        "runs an echoing line-editing shell behind each PTY with Android sequence rules",
         "keeps an in-memory SFTP tree with root containment and write-if-unchanged conflicts",
         "splits shell words and peels the path-aware command wrapper"
       ]

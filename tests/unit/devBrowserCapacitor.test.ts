@@ -9,7 +9,7 @@ import { createKeyVaultPlugin, createMockKeyVaultBackend, MOCK_SEED_KEY } from '
  * fake Android bridge is installed before @capacitor/core first loads (as
  * install.ts does in the page), then the app's own modules register their
  * plugins and the shared ConnectionController drives connect → host-key
- * trust → sessions → attach → type → echo against the mock host.
+ * trust → a host command against the mock host.
  *
  * Every app/Capacitor import below is dynamic so it evaluates after the
  * bridge is installed; a static import would hoist above it.
@@ -42,7 +42,7 @@ describe('browser dev mode through Capacitor', () => {
     await expect(listSshKeys()).resolves.toEqual([MOCK_SEED_KEY]);
   });
 
-  it('connects, asks for host-key trust, lists sessions, attaches and echoes typed input via the shared controller', async () => {
+  it('connects, asks for host-key trust and runs a host command via the shared controller', async () => {
     const { ConnectionController } = await import('../../src/session/connectionController');
     const pins = new Map<string, unknown>();
     const controller = new ConnectionController({
@@ -61,25 +61,11 @@ describe('browser dev mode through Capacitor', () => {
     await expect(controller.acceptPresentedHostKey()).resolves.toMatchObject({ ok: true });
     expect(pins.size).toBe(1);
 
-    const listed = await controller.refreshSessions();
-    if (!listed.ok) throw new Error(listed.message);
-    expect(listed.value.sessions).toHaveLength(5);
-    const session = listed.value.sessions.find((row) => row.name === 'pocketshell:shell');
-    if (!session) throw new Error('mock session missing');
-
-    let output = '';
-    controller.subscribeTerminalOutput((_row, bytes) => { output += new TextDecoder().decode(bytes); });
-    await expect(controller.attachSession(session, { cols: 80, rows: 24 })).resolves.toMatchObject({ ok: true });
-    const deadline = async (predicate: () => boolean) => {
-      const until = Date.now() + 5000;
-      while (!predicate() && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
-      return predicate();
-    };
-    expect(await deadline(() => output.includes('dev@devbox'))).toBe(true);
-    await expect(controller.writeTerminalBytes(session, new TextEncoder().encode('echo through-capacitor\r'))).resolves.toMatchObject({ ok: true });
-    expect(await deadline(() => output.includes('through-capacitor\r\n'))).toBe(true);
+    const outcome = await controller.runHostCommand('echo through-capacitor', 5_000);
+    if (!outcome.ok) throw new Error(outcome.message);
+    expect(outcome.value.stdout).toContain('through-capacitor');
     const resources = await controller.getResourceSnapshot();
-    expect(resources).toMatchObject({ connections: 1, ptys: 1 });
+    expect(resources).toMatchObject({ connections: 1 });
     await controller.close();
   });
 });

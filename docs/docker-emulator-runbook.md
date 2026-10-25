@@ -73,8 +73,6 @@ helper, and run the fixture self-check. The self-check performs create, list,
 attach-shape, kill, and gone checks against a real session registry.
 
 ```bash
-scripts/test-agents-fixture-aplexer.sh
-scripts/test-agents-fixture-aplexer.sh --docker
 docker compose -f tests/docker/docker-compose.yml build agents agents-old-cli agents-daemon
 docker compose -f tests/docker/docker-compose.yml up -d agents
 ssh -i tests/docker/test_key -p 2222 \

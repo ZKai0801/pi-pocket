@@ -2,8 +2,8 @@
 
 Since #2934, `main` is the JS-first 0.6.0 development line: the product is
 the Vue/Capacitor app. Run its checks with `scripts/run-js-unit-gate.sh`,
-`pnpm typecheck`, `scripts/assemble-debug.sh`, the JS-first connected lanes
-below, and `scripts/test-agents-fixture-aplexer.sh --docker`. The later app2
+`pnpm typecheck`, `scripts/assemble-debug.sh`, and the JS-first connected lanes
+below. The later app2
 journey inventory ("Legacy app2 ..." sections) describes the Kotlin contract
 that now lives only on `release/0.5.x`. `main` is not a complete 0.6.0
 release gate: its full feature suite and D36/D37 verdicts are #2863's work,
@@ -201,16 +201,15 @@ exact report under `js-files/<run-id>/instrumentation-results`. J1 only proves
 dispatch of the existing packaged tests; it does not qualify the separate
 24-class feature inventory or complete the 0.6.0 release gates.
 
-For a session-runtime change, also run the focused fixture contract checks:
+The Docker fixture's own build-time self-check
+(`tests/docker/agents-aplexer-selfcheck.py`) still exercises the pinned CLI's
+create/list/kill lifecycle inside every fixture build. Rebuild and probe the
+fixture after changing it:
 
 ```bash
-scripts/test-agents-fixture-aplexer.sh
-scripts/test-agents-fixture-aplexer.sh --docker
+docker compose -f tests/docker/docker-compose.yml build agents
+docker compose -f tests/docker/docker-compose.yml up -d agents
 ```
-
-The first command statically checks the image, shims, and journey sources. The
-Docker mode builds the image, runs the bundled-aplexer lifecycle self-check, and
-probes create → list → attach → kill against an actual container.
 
 ### Android input preflight (#2946)
 

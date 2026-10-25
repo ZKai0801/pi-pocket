@@ -113,7 +113,6 @@ infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
    - `pnpm typecheck`
    - `scripts/assemble-debug.sh` for the debug APK / compile check (see `process.md` § Local debug APK); there is no root `./gradlew` on `main`
    - the result-guard self-tests the diff touches (`scripts/check-js-*-results.py --self-test`). The J1 dispatch check is **retired** in this fork — there is no packaged lane left for it to check, its entry point now exits 3 with a retirement notice rather than running, and `docs/fork-gate-posture.md` records why — so it is not a gate to require. `scripts/check-test-validity.sh` itself scans no test source on this checkout (no `.kt` tree), so its exit 0 is not evidence either.
-   - `scripts/test-agents-fixture-aplexer.sh --docker` when host/fixture behaviour is involved
    - Capture exit codes and the last 15–20 lines of output
    - On `release/0.5.x` only: `./gradlew :module:test` / `:module:check`, with that branch's `scripts/assemble-debug.sh`.
    - Check architecture against D42 (`docs/decisions.md`): shared functionality belongs in the pinned `pocketshell-core` (logic, controllers, the single session/reconnect owner, shared app UI), and this repo holds only Android/mobile-only code plugged into the shared app's extension points plus the Android `PocketShellApi`. An Android re-implementation of shared functionality, or platform code in core, is a `CHANGES REQUESTED`.

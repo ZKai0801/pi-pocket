@@ -22,7 +22,7 @@ In Chrome or Edge open DevTools (F12), toggle the device toolbar
 (Ctrl+Shift+M / Cmd+Shift+M) and pick a phone such as "Pixel 7" or set
 412 × 915. Firefox: Responsive Design Mode (Ctrl+Shift+M). The page then has a
 phone viewport and touch emulation; a desktop keyboard still types into the
-terminal.
+page.
 
 ## `pnpm dev:mock`
 
@@ -32,20 +32,21 @@ A believable fake dev box lives in the page:
   key; the phone shell's connections tab lists it;
 - the first connect shows the real host-key trust prompt (the mock host has a
   fixed ed25519 key);
-- five sessions in three workspaces, two with mock agents (Claude working,
-  Codex waiting);
-- each session's terminal is a small scripted shell: it echoes keystrokes and
-  understands `help`, `echo`, `pwd`, `cd`, `ls`, `cat`, `seq`, `clear`,
-  `exit` and Ctrl-C;
-- files (SFTP) over an in-memory tree under `/home/dev`, provider usage for
-  four providers, and listening ports 3000/5173/5432/8000 for the port screen;
+- three workspaces (`~/git/pocketshell`, `~/git/pocketshell-site`, `~/notes`)
+  and the pi probes the chat composer rides (slash-command discovery, the
+  `/model` picker);
+- the shell behind each turn PTY is a small scripted shell: it echoes
+  keystrokes and understands `help`, `echo`, `pwd`, `cd`, `ls`, `cat`, `seq`,
+  `clear`, `exit` and Ctrl-C;
+- files (SFTP) over an in-memory tree under `/home/dev`, and listening ports
+  3000/5173/5432/8000 for the ports screen;
 - host names containing `fail` or `denied` simulate a refused connection or a
   rejected login.
 
-The phone shell at this stage has connections, projects and sessions tabs but
-no session-list, terminal, composer, settings or usage screen yet, so the mock
-host's sessions, terminal, usage and ports are only reachable once those
-screens land (Plan 3/Plan 5). The plugins themselves are ready.
+The mock covers connections, projects, conversations, files and ports — the
+chat-only phone shell. It answers none of the removed aplexer-session verbs:
+`pocketshell sessions …` and `pocketshell usage` fail on the mock host, so a
+stale caller fails loudly instead of rendering a deleted screen.
 
 The mock Vite server listens on all interfaces like `pnpm dev`, so a phone on
 the same network can open it too; nothing secret crosses a mock page.

@@ -8,7 +8,7 @@ import { DevPluginError } from './nativeBridge';
 import type { SeedHost } from './liveBridge';
 import { MOCK_SEED_KEY } from './keyVaultPlugin';
 import { base64ToBytes, bytesToBase64, randomId } from './bytes';
-import { MockHost, MockShell, normalizePath, shellWords } from './mockHost';
+import { MockHost, MockShell, normalizePath } from './mockHost';
 
 export const MOCK_SEED_HOST: SeedHost = {
   name: 'mock-devbox',
@@ -225,17 +225,9 @@ export function createMockSshPlugin(options: MockSshOptions): MockSshPlugin {
     },
     async openPty(request) {
       const connection = requireConnection(request);
-      const command = requireString(request, 'command');
+      requireString(request, 'command');
       acquireChannel(connection);
       await delay();
-      const words = shellWords(command);
-      const attach = words.indexOf('attach');
-      const sessionName = attach >= 0 && words[attach + 1] === '--' ? words[attach + 2] : null;
-      const session = sessionName ? host.findSession(sessionName) ?? null : null;
-      if (sessionName && !session) {
-        connection.channels -= 1;
-        fail('CHANNEL_OPEN_FAILED', `mock host: no session named ${sessionName}`);
-      }
       const pty: MockPty = {
         channelId: randomId(),
         connection,
@@ -247,7 +239,7 @@ export function createMockSshPlugin(options: MockSshOptions): MockSshPlugin {
         operationSequence: 0,
         waiters: new Set(),
       };
-      pty.shell = new MockShell(host, session, (text) => {
+      pty.shell = new MockShell(host, (text) => {
         const bytes = encoder.encode(text);
         pty.buffer.push(bytes);
         pty.bufferedBytes += bytes.length;
