@@ -25,11 +25,6 @@ export default defineConfig({
     // Keep server-only unit helpers in Node while compiling this SFC as a
     // client render function so its actual template event bindings are tested.
     testTransformMode: { web: [
-      '**/tests/unit/mobileHotkeys.test.ts',
-      '**/tests/unit/composerDictationCancellation.test.ts',
-      '**/tests/unit/composerDictationKeepsText.test.ts',
-      '**/tests/unit/composerNoSpeechWarning.test.ts',
-      '**/tests/unit/inlineDictationNoSpeech.test.ts',
       '**/tests/unit/chatComposer.test.ts',
       '**/tests/unit/connectionEditorAuth.test.ts',
       '**/tests/unit/sessionListNewChat.test.ts',
