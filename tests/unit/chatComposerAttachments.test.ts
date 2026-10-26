@@ -13,14 +13,17 @@ type SendResult = 'sent' | 'busy' | 'error';
 interface Mounted {
   app: App;
   root: HTMLElement;
-  state: { sending: boolean; attachmentScope: string };
+  state: { sending: boolean; attachmentScope: string; sheetOpen: boolean };
   sent: { text: string; intent?: 'steer' | 'follow-up' }[];
   input(): HTMLTextAreaElement;
-  attachButton(): HTMLButtonElement | null;
+  /** The permanent “+” beside the draft; the sheet is where 上传 lives now. */
+  moreButton(): HTMLButtonElement;
+  /** The sheet's upload row (teleported to <body>). */
+  attachRow(): HTMLButtonElement | null;
   chips(): string[];
   removeButtons(): HTMLButtonElement[];
   attachError(): string | null;
-  sendButton(): HTMLButtonElement;
+  sendButton(): HTMLButtonElement | null;
 }
 
 let mounted: Mounted | null = null;
@@ -32,6 +35,7 @@ function mountComposer(
   const state = reactive({
     sending: options.sending ?? false,
     attachmentScope: options.attachmentScope ?? 'dtc-site/main',
+    sheetOpen: false,
   });
   const sent: { text: string; intent?: 'steer' | 'follow-up' }[] = [];
   const Host = defineComponent({
@@ -45,7 +49,8 @@ function mountComposer(
       commands: [],
       commandsState: 'ready',
       commandOptions: null,
-      sheetOpen: false,
+      sheetOpen: state.sheetOpen,
+      'onUpdate:sheetOpen': (open: boolean) => { state.sheetOpen = open; },
       attachmentScope: state.attachmentScope,
     }),
   });
@@ -60,11 +65,12 @@ function mountComposer(
     state,
     sent,
     input: () => root.querySelector('[data-testid="chat-composer-input"]') as HTMLTextAreaElement,
-    attachButton: () => root.querySelector('[data-testid="chat-composer-attach"]'),
+    moreButton: () => root.querySelector('[data-testid="chat-composer-more"]') as HTMLButtonElement,
+    attachRow: () => document.querySelector('[data-testid="chat-command-attach"]'),
     chips: () => Array.from(root.querySelectorAll('.composer__chip-name')).map((node) => node.textContent ?? ''),
     removeButtons: () => Array.from(root.querySelectorAll('[data-testid="chat-composer-attachment-remove"]')),
     attachError: () => root.querySelector('[data-testid="chat-composer-attach-error"]')?.textContent?.trim() ?? null,
-    sendButton: () => root.querySelector('[data-testid="chat-composer-send"]') as HTMLButtonElement,
+    sendButton: () => root.querySelector('[data-testid="chat-composer-send"]'),
   };
   mounted = harness;
   return harness;
@@ -86,7 +92,20 @@ function installAttach(outcome: ComposerAttachOutcome | (() => Promise<ComposerA
 }
 
 async function settle(): Promise<void> {
-  for (let index = 0; index < 4; index += 1) await nextTick();
+  for (let index = 0; index < 6; index += 1) await nextTick();
+}
+
+/**
+ * The one route to an upload now: “+” → the sheet's first row. The sheet is
+ * closed by the tap (the picker owns the screen until it returns).
+ */
+async function attachThroughSheet(ui: Mounted): Promise<void> {
+  ui.moreButton().click();
+  await settle();
+  const row = ui.attachRow();
+  if (row === null) throw new Error('the sheet has no upload row');
+  row.click();
+  await settle();
 }
 
 afterEach(() => {
@@ -104,8 +123,7 @@ describe('chat composer attachments', () => {
     ui.input().dispatchEvent(new Event('input'));
     await settle();
 
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
     // The scope the chat computed reaches the stager unchanged.
     expect(attach.calls).toEqual([{ scopeKey: 'dtc-site/main' }]);
@@ -127,10 +145,9 @@ describe('chat composer attachments', () => {
     ui.input().value = 'compare these';
     ui.input().dispatchEvent(new Event('input'));
     await settle();
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
-    ui.sendButton().click();
+    ui.sendButton()?.click();
     await settle();
 
     expect(ui.sent).toHaveLength(1);
@@ -146,12 +163,11 @@ describe('chat composer attachments', () => {
   it('allows an attachment-only send, where the block IS the message', async () => {
     installAttach({ paths: ['~/.pocketshell/attachments/dtc-site/main/20260824-101500-01-shot.png'], error: null });
     const ui = mountComposer(async () => 'sent');
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
-    // A staged file is something to send, so the button left “+” on its own.
-    expect(ui.sendButton().dataset.mode).toBe('send');
-    ui.sendButton().click();
+    // A staged file is something to send, so 发送 appeared on its own.
+    expect(ui.sendButton()).not.toBeNull();
+    ui.sendButton()?.click();
     await settle();
 
     expect(ui.sent).toHaveLength(1);
@@ -166,8 +182,7 @@ describe('chat composer attachments', () => {
       error: 'Attachment upload failed: holiday.mp4: This file is larger than the upload limit.',
     });
     const ui = mountComposer(async () => 'sent');
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
     expect(ui.chips()).toEqual(['20260824-101500-01-ok.png']);
     expect(ui.attachError()).toContain('holiday.mp4');
@@ -176,20 +191,20 @@ describe('chat composer attachments', () => {
   it('treats a cancelled pick as nothing at all', async () => {
     installAttach({ paths: [], error: null });
     const ui = mountComposer(async () => 'sent');
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
     expect(ui.chips()).toEqual([]);
     expect(ui.attachError()).toBeNull();
-    // Nothing was typed and nothing was staged: the button stays “+”.
-    expect(ui.sendButton().dataset.mode).toBe('more');
+    // Nothing was typed and nothing was staged: there is still nothing to
+    // send, so only “+” is left in the row.
+    expect(ui.sendButton()).toBeNull();
+    expect(ui.moreButton()).not.toBeNull();
   });
 
   it('reports a missing connection owner instead of throwing at the tap', async () => {
     // No installComposerAttach: the seam is empty, as it is before a connect.
     const ui = mountComposer(async () => 'sent');
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
     expect(ui.chips()).toEqual([]);
     expect(ui.attachError()).toContain('No live connection owner is installed yet.');
@@ -204,14 +219,13 @@ describe('chat composer attachments', () => {
       error: null,
     });
     const ui = mountComposer(async () => 'sent');
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
     ui.removeButtons()[0].click();
     await settle();
     expect(ui.chips()).toEqual(['20260824-101500-02-notes.txt']);
 
-    ui.sendButton().click();
+    ui.sendButton()?.click();
     await settle();
     expect(ui.sent[0].text).toBe(
       'Attached files:\n- ~/.pocketshell/attachments/dtc-site/main/20260824-101500-02-notes.txt',
@@ -224,21 +238,47 @@ describe('chat composer attachments', () => {
     ui.input().value = 'try me';
     ui.input().dispatchEvent(new Event('input'));
     await settle();
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
-    ui.sendButton().click();
+    ui.sendButton()?.click();
     await settle();
 
     expect(ui.chips()).toEqual(['20260824-101500-01-shot.png']);
     expect(ui.input().value).toBe('try me');
   });
 
-  it('hides the paperclip when there is no session to stage into', async () => {
+  it('offers no upload row when there is no session to stage into', async () => {
     installAttach({ paths: [], error: null });
     const ui = mountComposer(async () => 'sent', { attachmentScope: '' });
     await settle();
-    expect(ui.attachButton()).toBeNull();
+    // “+” still opens the sheet — the commands are there — but the upload
+    // section is not: a file with nowhere to go is not an offer to make.
+    ui.moreButton().click();
+    await settle();
+    expect(document.querySelector('[data-testid="chat-command-sheet"]')).not.toBeNull();
+    expect(ui.attachRow()).toBeNull();
+  });
+
+  it('puts the upload row above the command filter and closes the sheet on tap', async () => {
+    const attach = installAttach({ paths: [], error: null });
+    const ui = mountComposer(async () => 'sent');
+    ui.moreButton().click();
+    await settle();
+
+    // First in the panel: before the filter, and before every /command.
+    const panel = document.querySelector('[data-testid="chat-command-sheet"]') as HTMLElement;
+    const attachRow = ui.attachRow() as HTMLElement;
+    const filter = document.querySelector('[data-testid="chat-command-filter"]') as HTMLElement;
+    expect(attachRow.compareDocumentPosition(filter) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panel.contains(attachRow)).toBe(true);
+    expect(attachRow.textContent).toContain('上传文件或图片');
+
+    attachRow.click();
+    await settle();
+
+    // The picker takes the screen; the sheet must not still be over the chat.
+    expect(document.querySelector('[data-testid="chat-command-sheet"]')).toBeNull();
+    expect(attach.calls).toEqual([{ scopeKey: 'dtc-site/main' }]);
   });
 
   it('shows the acknowledged byte count while the batch is in flight', async () => {
@@ -258,8 +298,7 @@ describe('chat composer attachments', () => {
       },
     });
     const ui = mountComposer(async () => 'sent');
-    ui.attachButton()?.click();
-    await settle();
+    await attachThroughSheet(ui);
 
     const progress = ui.root.querySelector('[data-testid="chat-composer-attach-progress"]');
     expect(progress?.textContent).toContain('2/3');

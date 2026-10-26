@@ -15,7 +15,9 @@ interface Mounted {
   requests: () => number;
   optionRequests: () => number;
   input(): HTMLTextAreaElement;
-  button(): HTMLButtonElement;
+  button(): HTMLButtonElement | null;
+  /** The permanent “+”: the only way into the sheet, draft or no draft. */
+  more(): HTMLButtonElement;
   followUp(): HTMLButtonElement | null;
   sheet(): HTMLElement | null;
   rows(): HTMLButtonElement[];
@@ -84,7 +86,8 @@ function mountComposer(
     requests: () => requests,
     optionRequests: () => optionRequests,
     input: () => root.querySelector('[data-testid="chat-composer-input"]') as HTMLTextAreaElement,
-    button: () => root.querySelector('[data-testid="chat-composer-send"]') as HTMLButtonElement,
+    button: () => root.querySelector('[data-testid="chat-composer-send"]'),
+    more: () => root.querySelector('[data-testid="chat-composer-more"]') as HTMLButtonElement,
     sheet: () => document.querySelector('[data-testid="chat-command-sheet"]') as HTMLElement | null,
     rows: () => Array.from(document.querySelectorAll('[data-testid="chat-command-option"]')) as HTMLButtonElement[],
     optionsSheet: () => document.querySelector('[data-testid="chat-command-options"]') as HTMLElement | null,
@@ -124,17 +127,17 @@ describe('chat composer', () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const), { sending: true });
     await type(composer.input(), 'hello');
 
-    expect(composer.button().disabled).toBe(true);
+    expect(composer.button()?.disabled).toBe(true);
     expect(composer.input().disabled).toBe(false);
     expect(composer.root.querySelector('[data-testid="chat-composer-spinner"]')).not.toBeNull();
-    expect(composer.button().getAttribute('aria-label')).toBe('发送');
+    expect(composer.button()?.getAttribute('aria-label')).toBe('发送');
   });
 
   it('clears the text only when the send reports sent', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const));
     await type(composer.input(), 'hello');
 
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     expect(composer.input().value).toBe('');
@@ -144,7 +147,7 @@ describe('chat composer', () => {
     const composer = mountComposer(vi.fn(async () => 'error' as const));
     await type(composer.input(), 'hello');
 
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     expect(composer.input().value).toBe('hello');
@@ -154,7 +157,7 @@ describe('chat composer', () => {
     const composer = mountComposer(vi.fn(async () => 'busy' as const));
     await type(composer.input(), 'hello');
 
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     expect(composer.input().value).toBe('hello');
@@ -169,25 +172,28 @@ describe('chat composer', () => {
     expect(alert?.textContent).toBe('等待回复超时，请重试。');
   });
 
-  it('turns the action into “+” only while the draft is empty', async () => {
+  it('keeps “+” beside the draft and shows 发送 only once there is something to send', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const));
-    expect(composer.button().dataset.mode).toBe('more');
-    expect(composer.button().disabled).toBe(false);
-    expect(composer.button().getAttribute('aria-label')).toBe('更多功能');
+    expect(composer.more()).not.toBeNull();
+    expect(composer.more().getAttribute('aria-label')).toBe('更多功能');
+    // Nothing to send yet, so there is no commit button to press.
+    expect(composer.button()).toBeNull();
 
     await type(composer.input(), '   ');
-    expect(composer.button().dataset.mode).toBe('send');
-    expect(composer.button().disabled).toBe(true);
+    expect(composer.button()).not.toBeNull();
+    expect(composer.button()?.disabled).toBe(true);
+    // “+” stays: a file is usually added to a half-written message.
+    expect(composer.more()).not.toBeNull();
 
     await type(composer.input(), 'hello');
-    expect(composer.button().dataset.mode).toBe('send');
-    expect(composer.button().disabled).toBe(false);
+    expect(composer.button()?.disabled).toBe(false);
+    expect(composer.more()).not.toBeNull();
   });
 
   it('opens the command sheet from “+” and asks the shell for commands', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const));
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
 
     expect(composer.state.sheetOpen).toBe(true);
@@ -200,7 +206,7 @@ describe('chat composer', () => {
     const send = vi.fn(async () => 'sent' as const);
     const composer = mountComposer(send);
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/model').click();
     await nextTick();
@@ -209,15 +215,15 @@ describe('chat composer', () => {
     expect(composer.input().value).toBe('/model ');
     expect(composer.state.sheetOpen).toBe(false);
     expect(send).not.toHaveBeenCalled();
-    // The draft is no longer empty, so the action is 发送 again.
-    expect(composer.button().dataset.mode).toBe('send');
-    expect(composer.button().getAttribute('aria-label')).toBe('发送');
+    // The draft is no longer empty, so 发送 is back beside “+”.
+    expect(composer.button()).not.toBeNull();
+    expect(composer.button()?.getAttribute('aria-label')).toBe('发送');
   });
 
   it('inserts the colon form of /skill: without a separator', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const));
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/skill:').click();
     await nextTick();
@@ -227,7 +233,7 @@ describe('chat composer', () => {
 
   it('filters the sheet by command, description or source', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const));
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     const filter = document.querySelector('[data-testid="chat-command-filter"]') as HTMLInputElement;
 
@@ -251,7 +257,7 @@ describe('chat composer', () => {
   it('keeps the built-ins and shows the host notice when discovery failed', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const), { commandsState: 'error' });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
 
     const notice = document.querySelector('[data-testid="chat-command-notice"]');
@@ -265,7 +271,7 @@ describe('chat composer', () => {
       commandOptions: catalogWith(),
     });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/thinking').click();
     await settle();
@@ -284,7 +290,7 @@ describe('chat composer', () => {
     const send = vi.fn(async () => 'sent' as const);
     const composer = mountComposer(send, { commandOptions: catalogWith() });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/thinking').click();
     await settle();
@@ -296,7 +302,7 @@ describe('chat composer', () => {
     expect(composer.state.sheetOpen).toBe(false);
     expect(composer.optionsSheet()).toBeNull();
     expect(send).not.toHaveBeenCalled();
-    expect(composer.button().dataset.mode).toBe('send');
+    expect(composer.button()).not.toBeNull();
   });
 
   it('asks the shell for the model list when /model is picked', async () => {
@@ -306,7 +312,7 @@ describe('chat composer', () => {
     ]);
     const composer = mountComposer(vi.fn(async () => 'sent' as const), { commandOptions });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/model').click();
     await settle();
@@ -328,7 +334,7 @@ describe('chat composer', () => {
     });
     const composer = mountComposer(vi.fn(async () => 'sent' as const), { commandOptions });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/model').click();
     await settle();
@@ -343,7 +349,7 @@ describe('chat composer', () => {
       commandOptions: catalogWith(),
     });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/thinking').click();
     await settle();
@@ -360,7 +366,7 @@ describe('chat composer', () => {
       commandOptions: catalogWith(),
     });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/thinking').click();
     await settle();
@@ -377,7 +383,7 @@ describe('chat composer', () => {
       commandOptions: catalogWith(),
     });
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/name').click();
     await settle();
@@ -390,7 +396,7 @@ describe('chat composer', () => {
   it('inserts /model directly when no picker catalog is installed', async () => {
     const composer = mountComposer(vi.fn(async () => 'sent' as const));
 
-    composer.button().click();
+    composer.more().click();
     await nextTick();
     rowFor('/model').click();
     await settle();
@@ -418,7 +424,7 @@ describe('chat composer', () => {
     });
 
     await type(composer.input(), '/model');
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     // Delivering the bare form would open pi's own picker inside the turn PTY.
@@ -438,7 +444,7 @@ describe('chat composer', () => {
     const composer = mountComposer(send, { commandOptions: catalogWith() });
 
     await type(composer.input(), '/model openai/gpt-5-codex');
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     expect(send).toHaveBeenCalledWith('/model openai/gpt-5-codex', undefined);
@@ -450,7 +456,7 @@ describe('chat composer', () => {
     const composer = mountComposer(send);
 
     await type(composer.input(), '/model');
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     expect(send).toHaveBeenCalledWith('/model', undefined);
@@ -462,11 +468,11 @@ describe('chat composer', () => {
     const composer = mountComposer(send, { running: true });
     await type(composer.input(), 'stop, use ripgrep');
 
-    expect(composer.button().textContent?.trim()).toBe('插话');
-    expect(composer.button().getAttribute('data-intent')).toBe('steer');
+    expect(composer.button()?.textContent?.trim()).toBe('插话');
+    expect(composer.button()?.getAttribute('data-intent')).toBe('steer');
     expect(composer.followUp()?.textContent?.trim()).toBe('排队');
 
-    composer.button().click();
+    composer.button()?.click();
     await settle();
 
     // The primary button steers: it joins the run already under way.
@@ -493,8 +499,8 @@ describe('chat composer', () => {
     expect(composer.followUp()).toBeNull();
 
     await type(composer.input(), 'hello');
-    expect(composer.button().textContent?.trim()).toBe('发送');
-    composer.button().click();
+    expect(composer.button()?.textContent?.trim()).toBe('发送');
+    composer.button()?.click();
     await settle();
 
     expect(send).toHaveBeenCalledWith('hello', undefined);

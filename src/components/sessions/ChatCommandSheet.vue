@@ -1,11 +1,16 @@
 <script setup lang="ts">
 /**
- * The chat composer's command sheet (spec §42/§43 “sheet” surface): the pi
- * vocabulary the message box cannot make discoverable on a phone keyboard.
+ * The chat composer's “+” sheet (spec §42/§43 “sheet” surface): the things a
+ * message can be given that the keyboard cannot offer — an upload first, then
+ * the pi vocabulary the message box cannot make discoverable on a phone.
  *
  * Presentational — open state, the command list and its load state live
  * upstairs; this file owns only the filter text. A tap reports the row, and
- * the composer inserts it (nothing runs from here).
+ * the composer does the work (nothing uploads or inserts from here).
+ *
+ * The upload section is above the filter on purpose: it is not one of the
+ * `/commands`, so filtering must never hide it, and it is the action most
+ * users open this sheet for.
  */
 import { computed, ref, watch } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
@@ -23,14 +28,21 @@ const props = withDefaults(defineProps<{
   open: boolean;
   commands: readonly PiSlashCommand[];
   state?: ChatCommandState;
+  /** False when there is no session to stage into, so the row is not offered. */
+  canAttach?: boolean;
+  /** A batch already in flight: the row stays, but it cannot start another. */
+  attachBusy?: boolean;
 }>(), {
   state: 'idle',
+  canAttach: false,
+  attachBusy: false,
 });
 
 const emit = defineEmits<{
   select: [command: PiSlashCommand];
   close: [];
   retry: [];
+  attach: [];
 }>();
 
 const query = ref('');
@@ -68,6 +80,30 @@ const empty = computed(() => sections.value.length === 0);
             <AppIcon name="close" />
           </button>
         </header>
+
+        <!-- Uploads first (§7.4/#2857): the one row here that is not a
+             /command, so it sits above the filter that filters those. -->
+        <div v-if="canAttach" class="commands__attach">
+          <h3 class="commands__group">{{ t('commands.group.attach') }}</h3>
+          <button
+            type="button"
+            class="commands__row commands__row--attach"
+            :disabled="attachBusy"
+            :aria-label="t('commands.attach')"
+            data-testid="chat-command-attach"
+            @click="emit('attach')"
+          >
+            <span :class="{ 'commands__attach-spinner': attachBusy }" data-testid="chat-command-attach-icon">
+              <AppIcon :name="attachBusy ? 'refresh' : 'paperclip'" />
+            </span>
+            <span class="commands__attach-text">
+              <span class="commands__attach-label">
+                {{ attachBusy ? t('composer.attaching') : t('commands.attach') }}
+              </span>
+              <span class="commands__desc">{{ t('commands.attachDesc') }}</span>
+            </span>
+          </button>
+        </div>
 
         <div class="commands__filters">
           <input
@@ -282,6 +318,52 @@ const empty = computed(() => sections.value.length === 0);
   background: var(--state-selected);
 }
 
+/* The upload row: icon beside the text, because it is a file action rather
+   than a command token — the label carries it, not the monospace word. */
+.commands__row--attach {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.commands__row--attach:disabled {
+  opacity: var(--disabled-opacity);
+}
+
+.commands__attach {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0 var(--sp-2) var(--sp-2);
+}
+
+.commands__attach-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.commands__attach-label {
+  color: var(--fg);
+  font-size: var(--fs-300);
+  font-weight: var(--fw-semibold);
+}
+
+.commands__attach-spinner {
+  display: inline-flex;
+  animation: commands-spin var(--dur-normal) linear infinite;
+}
+
+@keyframes commands-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .commands__line {
   display: flex;
   flex-wrap: wrap;
@@ -317,6 +399,7 @@ const empty = computed(() => sections.value.length === 0);
 
 .commands__filter:focus-visible,
 .commands__retry:focus-visible,
+.commands__row--attach:focus-visible,
 .commands__row:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
