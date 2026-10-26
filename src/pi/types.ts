@@ -37,12 +37,43 @@ export interface PiModelSwitch {
   afterTurns: number;
 }
 
+/**
+ * A model call pi recorded as failed: an assistant message whose `stopReason`
+ * is `error` and whose `errorMessage` says why (`500: {"message":"billing
+ * service unavailable",...}`). It carries no text, so the chat would otherwise
+ * render the attempt as nothing at all — a turn that silently answered with
+ * silence. The error travels with the parse (and therefore through the local
+ * backup) so the failure is still there on the next open.
+ */
+export interface PiSessionError {
+  /**
+   * What pi recorded in `errorMessage`, whitespace collapsed to one line.
+   * Empty when the message failed without saying why — a reader shows its own
+   * wording rather than an empty row.
+   */
+  text: string;
+  /** When the failed message was written; 0 when it carried no readable time. */
+  timestampMs: number;
+  /**
+   * How many conversation turns the file held when the failure was written:
+   * the row belongs after turn `afterTurns - 1` (same convention as
+   * `PiModelSwitch.afterTurns`).
+   */
+  afterTurns: number;
+}
+
 export interface ParsedPiSession {
   version: number | null;
   id: string | null;
   cwd: string | null;
   name: string | null;
   turns: PiTurn[];
+  /**
+   * Model calls pi recorded as failed, in file order, including the attempts a
+   * retry then recovered from. Absent in a parse from before the field existed
+   * (or in a hand-built session): read it as "no failures recorded".
+   */
+  errors?: PiSessionError[];
   /**
    * Model switches the file records, in file order. Absent in a parse from
    * before the field existed (or in a hand-built session): read it as "no

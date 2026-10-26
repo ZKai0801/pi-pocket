@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   capturePaneCommand,
+  commandOutputLines,
   dialogAnswerKeys,
   newPaneLines,
   parseScreenDialog,
@@ -130,5 +131,31 @@ describe('newPaneLines', () => {
   it('drops rules, footers and repeats', () => {
     const after = ['──────────────────────────────────────────', 'same line', 'same line', ''].join('\n');
     expect(newPaneLines('same line\n', after)).toEqual([]);
+  });
+});
+
+describe('commandOutputLines', () => {
+  /** The pane before `/name`: an empty prompt above the rule. */
+  const BEFORE = ['────────────────────────────────────────────────────────────────────────────────', '', ' › ', ''].join('\n');
+
+  it('keeps what the command printed for itself', () => {
+    const after = [
+      '────────────────────────────────────────────────────────────────────────────────',
+      '',
+      ' › /name ninfer-check',
+      ' Session name set: ninfer-check',
+      '',
+    ].join('\n');
+    expect(commandOutputLines(BEFORE, after, '/name ninfer-check'))
+      .toEqual(['Session name set: ninfer-check']);
+  });
+
+  it('drops the input box\'s echo of the command the user typed', () => {
+    const after = ['────────────────────────────────────────────────────────────────────────────────', '', ' › /name ninfer-check', ''].join('\n');
+    expect(commandOutputLines(BEFORE, after, '/name ninfer-check')).toEqual([]);
+  });
+
+  it('reports nothing when the command changed nothing on screen', () => {
+    expect(commandOutputLines(BEFORE, BEFORE, '/name ninfer-check')).toEqual([]);
   });
 });

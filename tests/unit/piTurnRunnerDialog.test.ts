@@ -22,6 +22,24 @@ const CONFIRM_PANE = [
 
 const IDLE_PANE = ['────────────────────────────────────────────────────────────────────────────', ''].join('\n');
 
+/** An idle pane with pi's input box on it: what `/name` is typed into. */
+const PROMPT_PANE = [
+  '────────────────────────────────────────────────────────────────────────────',
+  '',
+  ' › ',
+  '',
+].join('\n');
+
+/** The pane after `/name`: the box cleared, pi's confirmation under it. */
+const NAMED_PANE = [
+  '────────────────────────────────────────────────────────────────────────────',
+  '',
+  ' Session name set: ninfer-check',
+  '',
+  ' › ',
+  '',
+].join('\n');
+
 /** The pane after Escape: the dialog is gone, the notify line stays. */
 const CANCELLED_PANE = [
   '────────────────────────────────────────────────────────────────────────────────',
@@ -47,11 +65,23 @@ function handle(): TurnPtyHandle {
   };
 }
 
-function harness(panes: string[]) {
+/**
+ * A runner whose pane reads answer `before` first — the capture taken just
+ * before the command is delivered — and then each of `panes` in turn.
+ */
+function harness(panes: string[], before: string = IDLE_PANE) {
   const queue = [...panes];
-  const capturePane = vi.fn(async () => queue.shift() ?? IDLE_PANE);
+  let capturedBefore = false;
+  const capturePane = vi.fn(async () => {
+    if (!capturedBefore) {
+      capturedBefore = true;
+      return before;
+    }
+    return queue.shift() ?? IDLE_PANE;
+  });
   const sendKeys = vi.fn(async () => undefined);
   const onDialog = vi.fn();
+  const onCommandOutput = vi.fn();
   const runner = createPiTurnRunner({
     openPty: vi.fn(async () => handle()),
     piCommand: '/opt/bin/pi',
@@ -61,12 +91,13 @@ function harness(panes: string[]) {
     capturePane,
     sendKeys,
     onDialog,
+    onCommandOutput,
     sleep: vi.fn(async () => {}),
     dialogSettleMs: 0,
     submitDelayMs: 0,
     pollIntervalMs: 1,
   });
-  return { runner, capturePane, sendKeys, onDialog };
+  return { runner, capturePane, sendKeys, onDialog, onCommandOutput };
 }
 
 async function flush(): Promise<void> {
@@ -101,6 +132,41 @@ describe('dialog detection after a /command', () => {
     await runner.runCommand('/r/a.jsonl', '/model');
     await flush();
     expect(capturePane).not.toHaveBeenCalled();
+  });
+});
+
+describe('command output after a /command', () => {
+  it('hands the chat the line pi printed for itself', async () => {
+    const { runner, onCommandOutput } = harness([NAMED_PANE], PROMPT_PANE);
+    await runner.runCommand('/r/a.jsonl', '/name ninfer-check');
+    await flush();
+    expect(onCommandOutput).toHaveBeenCalledTimes(1);
+    expect(onCommandOutput.mock.calls[0]?.[0]).toEqual({
+      sessionFile: '/r/a.jsonl',
+      command: '/name ninfer-check',
+      lines: ['Session name set: ninfer-check'],
+    });
+  });
+
+  it('reports a draft command as belonging to no session file', async () => {
+    const { runner, onCommandOutput } = harness([NAMED_PANE], PROMPT_PANE);
+    await runner.runCommand(null, '/name ninfer-check');
+    await flush();
+    expect(onCommandOutput.mock.calls[0]?.[0].sessionFile).toBeNull();
+  });
+
+  it('says nothing when the command changed nothing on screen', async () => {
+    const { runner, onCommandOutput } = harness([PROMPT_PANE], PROMPT_PANE);
+    await runner.runCommand('/r/a.jsonl', '/name ninfer-check');
+    await flush();
+    expect(onCommandOutput).not.toHaveBeenCalled();
+  });
+
+  it('does not also report a dialog as output: the dialog is the output', async () => {
+    const { runner, onCommandOutput } = harness([CONFIRM_PANE], IDLE_PANE);
+    await runner.runCommand('/r/a.jsonl', '/nix');
+    await flush();
+    expect(onCommandOutput).not.toHaveBeenCalled();
   });
 });
 

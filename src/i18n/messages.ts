@@ -154,6 +154,8 @@ export const ZH = {
   'chat.steering': '已插话，下一步生效',
   'chat.retry': '重试',
   'chat.modelSwitchedTo': '--- 模型已切换为 {to} ---',
+  'chat.modelError': '调用失败：{detail}',
+  'chat.modelErrorUnknown': '模型没有说明原因',
 
   /* ---- chat composer ----------------------------------------------- */
   'composer.placeholder': '输入消息…',
@@ -479,6 +481,8 @@ export const EN: Record<MessageKey, string> = {
   'chat.steering': 'Steering — takes effect at the next step',
   'chat.retry': 'Retry',
   'chat.modelSwitchedTo': '--- model switched to {to} ---',
+  'chat.modelError': 'Request failed: {detail}',
+  'chat.modelErrorUnknown': 'the model gave no reason',
 
   'composer.placeholder': 'Message…',
   'composer.aria': 'Message',

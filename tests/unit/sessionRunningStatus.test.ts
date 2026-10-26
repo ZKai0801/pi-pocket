@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     deleteSelected: vi.fn(async () => 0),
     pending: [] as Array<Record<string, unknown>>,
     modelNotes: [] as Array<Record<string, unknown>>,
+    commandNotes: [] as Array<Record<string, unknown>>,
     pendingDialog: null as Record<string, unknown> | null,
     dialogAnswering: false,
     answerPendingDialog: vi.fn(async () => {}),
@@ -86,6 +87,7 @@ describe('sessions running status', () => {
     mocks.sessions.openRunning = false;
     mocks.sessions.pending = [];
     mocks.sessions.modelNotes = [];
+    mocks.sessions.commandNotes = [];
     mocks.sessions.lastProject = { path: '/p/a', name: 'a' };
   });
 

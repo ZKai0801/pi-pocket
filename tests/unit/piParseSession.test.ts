@@ -67,6 +67,7 @@ describe('parsePiSession', () => {
       name: null,
       turns: [],
       modelSwitches: [],
+      errors: [],
       model: null,
       settled: false,
       entryCount: 0,
@@ -277,5 +278,126 @@ describe('parsePiSession', () => {
     const parsed = parsePiSession([header, user, assistantText].join('\n'));
 
     expect(parsed.model).toBeNull();
+  });
+});
+// ---- failures ------------------------------------------------------------
+//
+// A model call that failed is an assistant message with no text at all
+// (`stopReason: "error"`, the reason in `errorMessage`). Nothing in `turns`
+// records it, so a chat that reads only turns shows the run as having answered
+// with silence — the failure has to travel with the parse.
+
+describe('parsePiSession / failed model calls', () => {
+  /** One assistant entry, written the way the session file writes it. */
+  function failed(
+    patch: Record<string, unknown> = {},
+    id = 'e1',
+    content: unknown = [],
+  ): string {
+    return JSON.stringify({
+      type: 'message',
+      id,
+      parentId: 'u1',
+      timestamp: '2026-10-18T01:53:00.000Z',
+      message: { role: 'assistant', content, stopReason: 'error', ...patch },
+    });
+  }
+
+  it('keeps the reason a failed call recorded, though it left no turn', () => {
+    const billing = failed({
+      errorMessage: '500: {"message":"billing service unavailable","request_id":"d14b066b"}',
+      timestamp: 1792288380000,
+    });
+
+    const parsed = parsePiSession([header, user, billing].join('\n'));
+
+    expect(parsed.errors).toEqual([
+      {
+        text: '500: {"message":"billing service unavailable","request_id":"d14b066b"}',
+        timestampMs: 1792288380000,
+        afterTurns: 1,
+      },
+    ]);
+    // The attempt answered nothing, so it is not a bubble either.
+    expect(parsed.turns.map((turn) => turn.role)).toEqual(['user']);
+  });
+
+  it('keeps a failure that names no reason at all, with no text', () => {
+    const parsed = parsePiSession([header, user, failed()].join('\n'));
+
+    // No sentence to show, but the row is still owed: it is the only sign the
+    // attempt failed. Its time falls back to the entry's own timestamp.
+    expect(parsed.errors).toEqual([
+      { text: '', timestampMs: Date.parse('2026-10-18T01:53:00.000Z'), afterTurns: 1 },
+    ]);
+  });
+
+  it('collapses a multi-line reason to the one row the transcript draws', () => {
+    const multi = failed({ errorMessage: '502 Bad Gateway\n<html>\n  <body>nope</body>\n</html>' });
+
+    const parsed = parsePiSession([header, user, multi].join('\n'));
+
+    expect(parsed.errors?.[0]?.text).toBe('502 Bad Gateway <html> <body>nope</body> </html>');
+  });
+
+  it('puts the failure after the reply its message carried', () => {
+    // A run can narrate and then fail: the text is this run's next bubble, and
+    // the failure belongs below it, not above.
+    const partly = failed(
+      { errorMessage: 'connection reset', timestamp: 1792288380000 },
+      'e4',
+      [{ type: 'text', text: 'on it' }],
+    );
+
+    const parsed = parsePiSession([header, user, partly].join('\n'));
+
+    expect(parsed.turns.map((turn) => turn.text)).toEqual(['look at ninfer', 'on it']);
+    expect(parsed.errors?.[0]?.afterTurns).toBe(2);
+  });
+
+  it('keeps every retried attempt, in file order', () => {
+    const billing = failed({ errorMessage: '500: billing down' });
+    const retried = failed({ errorMessage: '500: still down' }, 'e5');
+
+    const parsed = parsePiSession([header, user, billing, retried].join('\n'));
+
+    expect(parsed.errors?.map((error) => error.text)).toEqual([
+      '500: billing down',
+      '500: still down',
+    ]);
+  });
+
+  it('keeps an attempt a retry went on to answer, next to the answer', () => {
+    const billing = failed({ errorMessage: '500: billing down' });
+    const answered = JSON.stringify({
+      type: 'message',
+      id: 'a9',
+      parentId: 'e1',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'All done.' }],
+        stopReason: 'stop',
+      },
+    });
+
+    const parsed = parsePiSession([header, user, billing, answered].join('\n'));
+
+    expect(parsed.errors?.[0]?.text).toBe('500: billing down');
+    expect(parsed.turns.at(-1)?.text).toBe('All done.');
+  });
+
+  it('caps a reason that hands back a whole response body', () => {
+    const huge = failed({ errorMessage: 'x'.repeat(900) });
+
+    const parsed = parsePiSession([header, user, huge].join('\n'));
+
+    expect(parsed.errors?.[0]?.text).toHaveLength(501);
+    expect(parsed.errors?.[0]?.text.endsWith('…')).toBe(true);
+  });
+
+  it('reads an ordinary answer as no failure at all', () => {
+    const parsed = parsePiSession([header, user, assistantText].join('\n'));
+
+    expect(parsed.errors).toEqual([]);
   });
 });

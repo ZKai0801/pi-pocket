@@ -160,3 +160,23 @@ export function newPaneLines(before: string, after: string): string[] {
   }
   return fresh;
 }
+
+/** A pane line without the glyphs pi draws in front of it (`›`, `❯`, `│`). */
+function bareLine(line: string): string {
+  return line.replace(/^[^\p{L}\p{N}/]+/u, '').trim();
+}
+
+/**
+ * What a `/command` printed for itself — the `Session name set: abcde` kind of
+ * line pi leaves on the screen, which a chat that renders the session file
+ * would otherwise never show: the command appends no turn, and an extension's
+ * notice leaves no entry at all.
+ *
+ * The input box's echo of the command is dropped, because pi redraws it as the
+ * user types and again as the line is submitted; it is the one new line the
+ * user already knows about.
+ */
+export function commandOutputLines(before: string, after: string, typed: string): string[] {
+  const echo = bareLine(typed);
+  return newPaneLines(before, after).filter((line) => bareLine(line) !== echo);
+}

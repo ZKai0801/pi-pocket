@@ -112,3 +112,43 @@ describe('answerPendingDialog', () => {
     await expect(first).resolves.toBe('answered');
   });
 });
+
+describe('noteCommandOutput', () => {
+  it('puts a command\'s own line after the turns that were on screen', async () => {
+    const store = storeWith(runnerWith());
+    await store.openSession('/r/a.jsonl');
+
+    store.noteCommandOutput('/r/a.jsonl', '/name ninfer-check', ['Session name set: ninfer-check']);
+
+    expect(store.commandNotes).toEqual([
+      { id: 'command-note-1', text: 'Session name set: ninfer-check', afterTurns: 1 },
+    ]);
+  });
+
+  it('says nothing for a command another chat ran', () => {
+    const store = storeWith(runnerWith());
+    store.openPath = '/r/other.jsonl';
+
+    store.noteCommandOutput('/r/a.jsonl', '/name ninfer-check', ['Session name set: ninfer-check']);
+
+    expect(store.commandNotes).toEqual([]);
+  });
+
+  it('leaves /model to the divider this store already paints', async () => {
+    const store = storeWith(runnerWith());
+    await store.openSession('/r/a.jsonl');
+
+    store.noteCommandOutput('/r/a.jsonl', '/model openai/gpt-5.1-codex', ['Model set to openai/gpt-5.1-codex']);
+
+    expect(store.commandNotes).toEqual([]);
+  });
+
+  it('drops blank lines instead of drawing empty rows', async () => {
+    const store = storeWith(runnerWith());
+    await store.openSession('/r/a.jsonl');
+
+    store.noteCommandOutput('/r/a.jsonl', '/name ninfer-check', ['  ', 'Session name set: ninfer-check', '']);
+
+    expect(store.commandNotes.map((note) => note.text)).toEqual(['Session name set: ninfer-check']);
+  });
+});

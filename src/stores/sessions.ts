@@ -118,6 +118,23 @@ export interface ModelSwitchNote {
   baseline: number;
 }
 
+/**
+ * One line pi printed for a `/command` (`Session name set: abcde`): plain text
+ * in the transcript, not a bubble — it is the command talking, not the agent,
+ * and it carries no turn. Kept in memory for the life of the open chat: the
+ * session file records the command's effect, never this line.
+ */
+export interface CommandNote {
+  id: string;
+  text: string;
+  /**
+   * How many turns the chat was showing when the command ran: the note belongs
+   * after them, so a command's line stays where it happened when the
+   * conversation grows past it.
+   */
+  afterTurns: number;
+}
+
 export interface SessionsStoreState {
   sessions: PiSessionMeta[];
   /**
@@ -176,6 +193,13 @@ export interface SessionsStoreState {
    * painted session that overtakes them.
    */
   modelNotes: ModelSwitchNote[];
+  /**
+   * What the last `/commands` printed for themselves, in the order they were
+   * run (`Session name set: abcde`). Rendered after the turns as plain text:
+   * a command appends no turn, so this is the only place the chat can say it
+   * happened.
+   */
+  commandNotes: CommandNote[];
   /**
    * A selection dialog a delivered `/command` left waiting on the turn's pane
    * (`ctx.ui.confirm`): rendered natively with answer buttons, and the one
@@ -259,6 +283,13 @@ export interface SessionsStore extends SessionsStoreState {
    * dialog outlived the keystroke and is still up — it stays pending.
    */
   answerPendingDialog(choice: 'confirm' | 'cancel'): Promise<'answered' | 'busy' | 'conflict' | 'error'>;
+  /**
+   * A `/command` printed lines of its own on the turn's pane (`Session name
+   * set: abcde`). They join the transcript as plain text after the turns that
+   * were on screen, in the chat that ran the command and no other. Called by
+   * the runner once the screen has settled, never on the send's own path.
+   */
+  noteCommandOutput(sessionFile: string | null, command: string, lines: readonly string[]): void;
   /**
    * Invalidates every in-flight run (D8): their results settle into dropped
    * writes, and nothing may join them any more. The wrapper's host-switch
@@ -469,6 +500,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     running: [],
     pending: [],
     modelNotes: [],
+    commandNotes: [],
     pendingDialog: null,
     dialogAnswering: false,
   });
@@ -488,6 +520,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
   let openToken = 0;
   let sendToken = 0;
   let deleteToken = 0;
+  /** Ids for `commandNotes`, so the list needs no index at render time. */
+  let commandNoteToken = 0;
   let loadInFlight: { token: number; host: string | null; project: PiProject; promise: Promise<void> } | null = null;
   let openInFlight: { token: number; host: string | null; path: string; promise: Promise<void> } | null = null;
 
@@ -553,6 +587,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.startingNew = false;
       state.pending = [];
       state.modelNotes = [];
+      state.commandNotes = [];
       // The dialog belonged to the old chat's pane; the runner that reported
       // it is dropped with the switch, so nothing could answer it any more.
       state.pendingDialog = null;
@@ -705,11 +740,12 @@ function rememberSession(
         // stale turns. A backup miss leaves the cold-open path unchanged.
         const coldOpen = state.openPath !== path || state.open === null;
         // A different conversation's ghosts mean nothing here, and neither do
-        // its switch notes; the queued lines and notes of a chat that is
+        // its command lines; the queued lines and notes of a chat that is
         // merely being re-read stay until the fresh parse proves them gone.
         if (coldOpen) {
           state.pending = [];
           state.modelNotes = [];
+          state.commandNotes = [];
         }
         let paintedBackup = false;
         if (coldOpen && deps.loadCachedSession) {
@@ -774,6 +810,7 @@ function rememberSession(
     state.sendNotice = null;
     state.pending = [];
     state.modelNotes = [];
+    state.commandNotes = [];
     // A draft is not a list load failure: never show the old error/retry.
     state.state = 'idle';
     state.error = null;
@@ -848,6 +885,7 @@ function rememberSession(
     state.openPath = null;
     state.pending = [];
     state.modelNotes = [];
+    state.commandNotes = [];
     state.sendError = null;
     state.sendNotice = null;
     state.startingNew = false;
@@ -1160,6 +1198,37 @@ function rememberSession(
   }
 
   /**
+   * pi's own line for a `/command`, in the chat that ran it: `Session name
+   * set: abcde`. The command appends no turn and an extension's notice leaves
+   * no entry at all, so without this a command that worked says nothing on
+   * screen. It belongs to the conversation that ran it — a note painted into
+   * another chat would report something the reader did not do there — and it
+   * sits after the turns that were on screen at the time, which is where it
+   * happened even once the conversation grows past it.
+   */
+  function noteCommandOutput(
+    sessionFile: string | null,
+    command: string,
+    lines: readonly string[],
+  ): void {
+    if (state.openPath !== sessionFile) return;
+    // `/model` is the one command this store paints itself — the divider in
+    // the transcript and the header's model name — so pi's own line for it
+    // would say the same thing a second time.
+    const slash = parseSlashLine(command);
+    if (slash !== null && isModelSwitchCommand(slash)) return;
+    const afterTurns = state.open?.turns.length ?? 0;
+    const notes: CommandNote[] = [];
+    for (const line of lines) {
+      const text = line.trim();
+      if (text === '') continue;
+      commandNoteToken += 1;
+      notes.push({ id: `command-note-${commandNoteToken}`, text, afterTurns });
+    }
+    if (notes.length > 0) state.commandNotes = [...state.commandNotes, ...notes];
+  }
+
+  /**
    * Put a name the user just set on every surface that titles this
    * conversation: the chat header, its row in the project's list, and its row
    * under 最近打开. Both lists are in memory from a load that predates the
@@ -1398,6 +1467,7 @@ function rememberSession(
     state.openPath = null;
     state.pending = [];
     state.modelNotes = [];
+    state.commandNotes = [];
   }
 
   // D8: called by the wrapper's host-switch watch. Bumping the tokens makes
@@ -1417,6 +1487,7 @@ function rememberSession(
     state.running = [];
     state.pending = [];
     state.modelNotes = [];
+    state.commandNotes = [];
     // The old host's pane is unreachable from this one: its dialog can be
     // neither shown nor answered, and the runner bound to it is gone.
     state.pendingDialog = null;
@@ -1471,6 +1542,8 @@ function rememberSession(
     set sendNotice(value: string | null) { state.sendNotice = value; },
     get modelNotes() { return state.modelNotes; },
     set modelNotes(value: ModelSwitchNote[]) { state.modelNotes = value; },
+    get commandNotes() { return state.commandNotes; },
+    set commandNotes(value: CommandNote[]) { state.commandNotes = value; },
     get startingNew() { return state.startingNew; },
     set startingNew(value: boolean) { state.startingNew = value; },
     get running() { return state.running; },
@@ -1493,6 +1566,7 @@ function rememberSession(
     closeChat,
     send,
     answerPendingDialog,
+    noteCommandOutput,
     hostChanged,
     startSelection,
     toggleSelected,
@@ -2036,6 +2110,11 @@ export const useSessionsStore = defineStore('sessions', () => {
         onDialog: ({ dialog, pane }) => {
           store.pendingDialog = { sessionFile: sessionFile === '' ? null : sessionFile, dialog, pane };
         },
+        // The command's own line, for the chat that ran it: the transcript
+        // shows turns, and a command leaves none.
+        onCommandOutput: ({ sessionFile: ranIn, command, lines }) => {
+          store.noteCommandOutput(ranIn, command, lines);
+        },
         pollIntervalMs: clampTurnPollInterval(TURN_POLL_INTERVAL_MS),
       }),
   });
@@ -2236,6 +2315,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     startingNew: toRef(store, 'startingNew'),
     pending: toRef(store, 'pending'),
     modelNotes: toRef(store, 'modelNotes'),
+    commandNotes: toRef(store, 'commandNotes'),
     running: toRef(store, 'running'),
     pendingDialog: toRef(store, 'pendingDialog'),
     dialogAnswering: toRef(store, 'dialogAnswering'),

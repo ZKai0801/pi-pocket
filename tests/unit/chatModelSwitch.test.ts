@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
     deleteSelected: vi.fn(async () => 0),
     pending: [] as Array<Record<string, unknown>>,
     modelNotes: [] as Array<Record<string, unknown>>,
+    commandNotes: [] as Array<Record<string, unknown>>,
     pendingDialog: null as Record<string, unknown> | null,
     dialogAnswering: false,
     answerPendingDialog: vi.fn(async () => {}),
@@ -77,6 +78,8 @@ function rowKinds(el: HTMLElement): string[] {
   return Array.from(turns.children).map((child) => {
     if (child.classList.contains('chat__time')) return 'time';
     if (child.classList.contains('chat__model')) return `model:${child.textContent?.trim() ?? ''}`;
+    if (child.classList.contains('chat__note')) return `note:${child.textContent?.trim() ?? ''}`;
+    if (child.classList.contains('chat__failure')) return `failure:${child.textContent?.trim() ?? ''}`;
     if (child.classList.contains('chat__pending')) return 'pending';
     return 'bubble';
   });
@@ -99,6 +102,7 @@ describe('chat model-switch divider', () => {
     mocks.sessions.open = null;
     mocks.sessions.openPath = '/r/a.jsonl';
     mocks.sessions.modelNotes = [];
+    mocks.sessions.commandNotes = [];
     mocks.sessions.pending = [];
     mocks.sessions.lastProject = { path: '/p/a', name: 'a' };
   });
@@ -306,6 +310,178 @@ describe('chat model-switch divider', () => {
       'bubble',
       'model:--- 模型已切换为 openai/gpt-5.1-codex ---',
       'time',
+      'bubble',
+    ]);
+  });
+});
+
+describe('chat /command notes', () => {
+  const turns = [
+    { role: 'user', text: 'one', timestampMs: 0 },
+    { role: 'assistant', text: 'done', timestampMs: 0 },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.sessions.open = null;
+    mocks.sessions.openPath = '/r/a.jsonl';
+    mocks.sessions.modelNotes = [];
+    mocks.sessions.commandNotes = [];
+    mocks.sessions.pending = [];
+    mocks.sessions.lastProject = { path: '/p/a', name: 'a' };
+  });
+
+  afterEach(() => {
+    app?.unmount();
+    app = null;
+    root = null;
+    document.body.innerHTML = '';
+  });
+
+  it('shows the line a command printed for itself, where the command ran', () => {
+    mocks.sessions.open = { version: 3, id: 'a', cwd: '/p/a', name: null, turns };
+    mocks.sessions.commandNotes = [
+      { id: 'command-note-1', text: 'Session name set: ninfer-check', afterTurns: 2 },
+    ];
+
+    const el = mount();
+
+    expect(rowKinds(el)).toEqual(['bubble', 'bubble', 'note:Session name set: ninfer-check']);
+  });
+
+  it('keeps a command run in an empty conversation above the first reply', () => {
+    mocks.sessions.open = { version: 3, id: 'a', cwd: '/p/a', name: null, turns };
+    mocks.sessions.commandNotes = [
+      { id: 'command-note-1', text: 'Session name set: ninfer-check', afterTurns: 0 },
+    ];
+
+    const el = mount();
+
+    expect(rowKinds(el)).toEqual(['note:Session name set: ninfer-check', 'bubble', 'bubble']);
+  });
+
+  it('renders it as plain text, not as a bubble', () => {
+    mocks.sessions.open = { version: 3, id: 'a', cwd: '/p/a', name: null, turns };
+    mocks.sessions.commandNotes = [
+      { id: 'command-note-1', text: 'Session name set: ninfer-check', afterTurns: 2 },
+    ];
+
+    const el = mount();
+
+    const note = el.querySelector('[data-testid="chat-command-note"]');
+    expect(note?.className).toBe('chat__note');
+    // The transcript's bubbles are still exactly the turns': the note adds no
+    // row of its own kind to the conversation.
+    expect(el.querySelectorAll('.chat__turns > *').length).toBe(3);
+  });
+});
+
+// A failed model call (`stopReason: "error"` + `errorMessage`) left an
+// assistant message with no text, so nothing in the transcript used to record
+// it: the run looked like it had answered with silence, and the failure was
+// only visible in a terminal or in the raw session file.
+describe('chat model failures', () => {
+  const turns = [
+    { role: 'user', text: 'run the build', timestampMs: 0 },
+    { role: 'assistant', text: 'on it', timestampMs: 0 },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.sessions.open = null;
+    mocks.sessions.openPath = '/r/a.jsonl';
+    mocks.sessions.modelNotes = [];
+    mocks.sessions.commandNotes = [];
+    mocks.sessions.pending = [];
+    mocks.sessions.lastProject = { path: '/p/a', name: 'a' };
+  });
+
+  afterEach(() => {
+    app?.unmount();
+    app = null;
+    root = null;
+    document.body.innerHTML = '';
+  });
+
+  it('shows what pi recorded for the failed attempt, at the end of the run', () => {
+    mocks.sessions.open = {
+      version: 3,
+      id: 'a',
+      cwd: '/p/a',
+      name: null,
+      turns,
+      errors: [
+        {
+          text: '500: {"message":"billing service unavailable","request_id":"d14b066b"}',
+          timestampMs: 0,
+          afterTurns: 2,
+        },
+      ],
+    };
+
+    const el = mount();
+
+    expect(rowKinds(el)).toEqual([
+      'bubble',
+      'bubble',
+      'failure:调用失败：500: {"message":"billing service unavailable","request_id":"d14b066b"}',
+    ]);
+  });
+
+  it('says so in its own words when pi recorded no reason', () => {
+    mocks.sessions.open = {
+      version: 3,
+      id: 'a',
+      cwd: '/p/a',
+      name: null,
+      turns: [{ role: 'user', text: 'run the build', timestampMs: 0 }],
+      errors: [{ text: '', timestampMs: 0, afterTurns: 1 }],
+    };
+
+    const el = mount();
+
+    expect(rowKinds(el)).toEqual(['bubble', 'failure:调用失败：模型没有说明原因']);
+  });
+
+  it('draws it as a plain row, not as a bubble from either side', () => {
+    mocks.sessions.open = {
+      version: 3,
+      id: 'a',
+      cwd: '/p/a',
+      name: null,
+      turns,
+      errors: [{ text: 'connection reset', timestampMs: 0, afterTurns: 2 }],
+    };
+
+    const el = mount();
+
+    const row = el.querySelector('[data-testid="chat-model-error"]');
+    expect(row?.className).toBe('chat__failure');
+    // The bubbles are still exactly the turns': the failure adds no turn.
+    expect(el.querySelectorAll('.chat__turns > *').length).toBe(3);
+  });
+
+  it('keeps a failure where it happened once the conversation grows past it', () => {
+    mocks.sessions.open = {
+      version: 3,
+      id: 'a',
+      cwd: '/p/a',
+      name: null,
+      turns: [
+        ...turns,
+        { role: 'user', text: 'try again', timestampMs: 0 },
+        { role: 'assistant', text: 'done', timestampMs: 0 },
+      ],
+      errors: [{ text: 'connection reset', timestampMs: 0, afterTurns: 2 }],
+    };
+
+    const el = mount();
+
+    expect(rowKinds(el)).toEqual([
+      'bubble',
+      'bubble',
+      'failure:调用失败：connection reset',
+      'bubble',
       'bubble',
     ]);
   });

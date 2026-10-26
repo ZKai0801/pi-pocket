@@ -861,6 +861,42 @@ describe('createPiTurnRunner', () => {
     expect(h.closeSession).toHaveBeenCalledTimes(1);
   });
 
+  it('settles a run pi gave up on, whose failure left no reply to count', async () => {
+    // The reported case: the provider answered `500: billing service
+    // unavailable`, pi wrote an assistant message with no text and stopped.
+    // The assistant-turn count can never reach the target (there is no reply),
+    // so without the tail's own `error` the chat reports running for the whole
+    // deadline and the failure never reaches the screen.
+    const gaveUp: ParsedPiSession = {
+      version: 3,
+      id: 'a',
+      cwd: '/home/kai/project',
+      name: null,
+      turns: [
+        { role: 'user', text: 'run the build', timestampMs: 1 },
+        { role: 'assistant', text: 'on it', timestampMs: 2 },
+      ],
+      errors: [
+        { text: '500: billing service unavailable', timestampMs: 3, afterTurns: 2 },
+      ],
+      settled: true,
+      stopReason: 'error',
+      entryCount: 8,
+    };
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(1), gaveUp],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'run the build');
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+
+    await expect(begun.completed).resolves.toMatchObject({ ok: true, session: gaveUp });
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps waiting while a run that may continue keeps appending entries', async () => {
     // Pi's retry appends a `context_edit` before it waits: the file growing is
     // the sign a run is not over, so the run is still busy when it happens and

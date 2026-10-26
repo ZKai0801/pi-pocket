@@ -415,7 +415,35 @@
         "shows a switch the file has not recorded yet as a note after the turns",
         "names the file's own model under the title",
         "leaves the header's model line out when nothing says which model is in effect",
-        "sits between the time separators a switch falls between"
+        "sits between the time separators a switch falls between",
+        {
+          "suite": "chat /command notes",
+          "title": "shows the line a command printed for itself, where the command ran"
+        },
+        {
+          "suite": "chat /command notes",
+          "title": "keeps a command run in an empty conversation above the first reply"
+        },
+        {
+          "suite": "chat /command notes",
+          "title": "renders it as plain text, not as a bubble"
+        },
+        {
+          "suite": "chat model failures",
+          "title": "shows what pi recorded for the failed attempt, at the end of the run"
+        },
+        {
+          "suite": "chat model failures",
+          "title": "says so in its own words when pi recorded no reason"
+        },
+        {
+          "suite": "chat model failures",
+          "title": "draws it as a plain row, not as a bubble from either side"
+        },
+        {
+          "suite": "chat model failures",
+          "title": "keeps a failure where it happened once the conversation grows past it"
+        }
       ]
     },
     "tests/unit/chatSegmentBubbles.test.ts": {
@@ -1138,6 +1166,18 @@
         {
           "suite": "newPaneLines",
           "title": "drops rules, footers and repeats"
+        },
+        {
+          "suite": "commandOutputLines",
+          "title": "keeps what the command printed for itself"
+        },
+        {
+          "suite": "commandOutputLines",
+          "title": "drops the input box's echo of the command the user typed"
+        },
+        {
+          "suite": "commandOutputLines",
+          "title": "reports nothing when the command changed nothing on screen"
         }
       ]
     },
@@ -1214,7 +1254,39 @@
         "does not count a switch as a turn or unsettle the run",
         "names the model the first assistant message was produced by",
         "ends on the last switch's target, not the model the session began with",
-        "leaves the model null when the file never says which one is in effect"
+        "leaves the model null when the file never says which one is in effect",
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "keeps the reason a failed call recorded, though it left no turn"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "keeps a failure that names no reason at all, with no text"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "collapses a multi-line reason to the one row the transcript draws"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "puts the failure after the reply its message carried"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "keeps every retried attempt, in file order"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "keeps an attempt a retry went on to answer, next to the answer"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "caps a reason that hands back a whole response body"
+        },
+        {
+          "suite": "parsePiSession / failed model calls",
+          "title": "reads an ordinary answer as no failure at all"
+        }
       ]
     },
     "tests/unit/piRepository.test.ts": {
@@ -1433,6 +1505,7 @@
         "does not settle while the file says pi will ask the model again",
         "keeps waiting while a run that may continue keeps appending entries",
         "settles a tail that stopped for good once the file stops growing",
+        "settles a run pi gave up on, whose failure left no reply to count",
         "refuses the send when the baseline read never succeeds",
         "writes the turn down so a connection arriving later can close it",
         "raises the recorded target when another message joins the run",
@@ -1458,6 +1531,22 @@
         {
           "suite": "dialog detection after a /command",
           "title": "does not read the pane for a command that took the terminal over"
+        },
+        {
+          "suite": "command output after a /command",
+          "title": "hands the chat the line pi printed for itself"
+        },
+        {
+          "suite": "command output after a /command",
+          "title": "reports a draft command as belonging to no session file"
+        },
+        {
+          "suite": "command output after a /command",
+          "title": "says nothing when the command changed nothing on screen"
+        },
+        {
+          "suite": "command output after a /command",
+          "title": "does not also report a dialog as output: the dialog is the output"
         },
         {
           "suite": "answerDialog",
@@ -1746,6 +1835,22 @@
         {
           "suite": "answerPendingDialog",
           "title": "does not double-answer while an answer is in flight"
+        },
+        {
+          "suite": "noteCommandOutput",
+          "title": "puts a command's own line after the turns that were on screen"
+        },
+        {
+          "suite": "noteCommandOutput",
+          "title": "says nothing for a command another chat ran"
+        },
+        {
+          "suite": "noteCommandOutput",
+          "title": "leaves /model to the divider this store already paints"
+        },
+        {
+          "suite": "noteCommandOutput",
+          "title": "drops blank lines instead of drawing empty rows"
         }
       ]
     },

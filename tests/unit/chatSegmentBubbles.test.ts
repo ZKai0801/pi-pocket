@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     running: [] as string[],
     pending: [] as Array<Record<string, unknown>>,
     modelNotes: [] as Array<Record<string, unknown>>,
+    commandNotes: [] as Array<Record<string, unknown>>,
     pendingDialog: null as Record<string, unknown> | null,
     dialogAnswering: false,
     answerPendingDialog: vi.fn(async () => {}),
@@ -73,6 +74,7 @@ describe('chat segment bubbles', () => {
     mocks.sessions.open = null;
     mocks.sessions.openPath = '/r/a.jsonl';
     mocks.sessions.modelNotes = [];
+    mocks.sessions.commandNotes = [];
     mocks.sessions.pending = [];
     mocks.sessions.lastProject = { path: '/p/a', name: 'a' };
   });

@@ -186,10 +186,13 @@ const attachmentScope = computed(() => attachmentScopeKey(
 
 interface ChatRow {
   key: string;
-  kind: 'separator' | 'bubble' | 'model';
+  kind: 'separator' | 'bubble' | 'model' | 'note' | 'failure';
   time?: string;
   turn?: PiTurn;
-  /** A model row's sentence, already in the active language. */
+  /**
+   * A model row's sentence, already in the active language, or a command's own
+   * line, which is pi's text and is shown as it came.
+   */
   text?: string;
 }
 
@@ -246,20 +249,49 @@ const rows = computed<ChatRow[]>(() => {
   // Pi appends a `model_change` entry per switch, so the dividers are the
   // file's own record — switches made in a terminal show up here too.
   const switches = (store.open?.modelSwitches ?? []).filter((item) => !isOpeningSwitch(item));
-  // A switch belongs after the turn it was appended behind: bucket them by
-  // that position so the walk below stays one pass over the turns.
-  const byPosition = new Map<number, PiModelSwitch[]>();
-  for (const item of switches) {
-    const bucket = byPosition.get(item.afterTurns);
-    if (bucket === undefined) byPosition.set(item.afterTurns, [item]);
-    else bucket.push(item);
+  // A switch, like a command's own line, belongs after the turn it was
+  // appended behind: bucket both by that position so the walk below stays one
+  // pass over the turns.
+  const byPosition = new Map<number, ChatRow[]>();
+  const place = (position: number, row: ChatRow): void => {
+    const bucket = byPosition.get(position);
+    if (bucket === undefined) byPosition.set(position, [row]);
+    else bucket.push(row);
+  };
+  switches.forEach((item, index) => {
+    place(item.afterTurns, {
+      key: `model-${index}`,
+      kind: 'model',
+      text: t('chat.modelSwitchedTo', { to: item.to }),
+    });
+  });
+  // What `/commands` printed for themselves, in the transcript at the point
+  // they ran: a command appends no turn, so this is the only place the chat
+  // can show that it happened (and what it said).
+  for (const note of store.commandNotes) {
+    place(note.afterTurns, { key: note.id, kind: 'note', text: note.text });
   }
+  // A model call pi recorded as failed. It carries no text of its own — the
+  // message that holds it is empty — so the transcript is the only place the
+  // reader can learn that the attempt did not answer, and where it happened.
+  (store.open?.errors ?? []).forEach((failure, index) => {
+    place(failure.afterTurns, {
+      key: `failure-${index}`,
+      kind: 'failure',
+      text: t('chat.modelError', {
+        detail: failure.text !== '' ? failure.text : t('chat.modelErrorUnknown'),
+      }),
+    });
+  });
   const out: ChatRow[] = [];
-  const pushSwitches = (position: number, keyPrefix: string): void => {
-    for (const item of byPosition.get(position) ?? []) {
-      out.push({ key: `${keyPrefix}-${out.length}`, kind: 'model', text: t('chat.modelSwitchedTo', { to: item.to }) });
+  const pushAt = (position: number, keyPrefix: string): void => {
+    for (const row of byPosition.get(position) ?? []) {
+      out.push({ ...row, key: `${keyPrefix}-${row.key}` });
     }
   };
+  // Notes taken before any turn (a command run in an empty conversation) sit at
+  // position 0, which the walk below never reaches.
+  pushAt(0, 'before-first');
   let lastDayKey: string | null = null;
   let lastMs = 0;
   turns.forEach((turn, index) => {
@@ -276,8 +308,13 @@ const rows = computed<ChatRow[]>(() => {
       }
     }
     out.push({ key: `turn-${index}`, kind: 'bubble', turn });
-    pushSwitches(index + 1, `model-${index}`);
+    pushAt(index + 1, `after-${index}`);
   });
+  // A position past the last turn (a note taken while the transcript looked
+  // longer than the fresh parse says) still lands at the end, not nowhere.
+  for (const position of [...byPosition.keys()].sort((a, b) => a - b)) {
+    if (position > turns.length) pushAt(position, `tail-${position}`);
+  }
   return out;
 });
 
@@ -339,6 +376,14 @@ watch(
 );
 watch(
   () => store.modelNotes.length,
+  () => void scrollToLatest(),
+);
+watch(
+  () => store.commandNotes.length,
+  () => void scrollToLatest(),
+);
+watch(
+  () => store.open?.errors?.length ?? 0,
   () => void scrollToLatest(),
 );
 
@@ -452,6 +497,22 @@ function goBack(): void {
               />
             </template>
             <p v-else-if="row.kind === 'model' && row.text !== undefined" class="chat__model" data-testid="chat-model-switch">
+              {{ row.text }}
+            </p>
+            <!-- A command's own line (`Session name set: abcde`): plain text,
+                 because it is the command talking, not the agent. -->
+            <p v-else-if="row.kind === 'note' && row.text !== undefined" class="chat__note" data-testid="chat-command-note">
+              {{ row.text }}
+            </p>
+            <!-- A failed model call (`Error: 500: ...`): plain text at the
+                 transcript's edge, because it is the failure talking, not the
+                 agent — and in the error colour, so it cannot be mistaken for
+                 a reply. -->
+            <p
+              v-else-if="row.kind === 'failure' && row.text !== undefined"
+              class="chat__failure"
+              data-testid="chat-model-error"
+            >
               {{ row.text }}
             </p>
           </template>
@@ -741,6 +802,35 @@ function goBack(): void {
   font-size: var(--fs-200);
   line-height: 1.45;
   text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* What a `/command` printed for itself. Plain text and start-aligned: it is
+   output, not a sentence about the conversation, and it must not read as a
+   bubble from either side. */
+.chat__note {
+  margin: var(--sp-2) 0 0;
+  padding-inline: var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--fs-200);
+  line-height: 1.45;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+/* A failed model call (`Error: 500: ...`). A plain row, not a bubble: nobody
+   said it, the run did — and the error colour plus the soft box keep it from
+   reading as any part of the conversation. */
+.chat__failure {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2);
+  border-inline-start: 2px solid var(--error);
+  border-radius: var(--r-md);
+  background: var(--error-soft);
+  color: var(--error);
+  font-size: var(--fs-200);
+  line-height: 1.45;
+  text-align: start;
   overflow-wrap: anywhere;
 }
 

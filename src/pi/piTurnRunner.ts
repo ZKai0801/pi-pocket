@@ -9,6 +9,7 @@ import { countAssistantTurns, isRunAnswered } from './pendingTurns';
 import { parseSlashLine, takesOverTerminal } from './piInteractivity';
 import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, toTurnLine, turnSessionName } from './piTurn';
 import {
+  commandOutputLines,
   dialogAnswerKeys,
   newPaneLines,
   parseScreenDialog,
@@ -133,6 +134,13 @@ export interface PiTurnRunnerDeps {
    * from a background check after delivery, never on the send's own path.
    */
   onDialog?(event: PiScreenDialogEvent): void;
+  /**
+   * A delivered `/command` printed lines of its own (`Session name set:
+   * abcde`). Fired from the same background check, never on the send's path,
+   * and only for a command that left no dialog: the dialog card is the output
+   * then. Absent without `capturePane`, where nothing can read the screen.
+   */
+  onCommandOutput?(event: PiCommandOutputEvent): void;
   sleep?(ms: number): Promise<void>;
   now?(): number;
   readyTimeoutMs?: number;
@@ -146,6 +154,16 @@ export interface PiTurnRunnerDeps {
 export type PiTurnSendResult =
   | { ok: true; session: ParsedPiSession }
   | { ok: false; error: string };
+
+/** What a delivered `/command` printed for itself, off the turn's pane. */
+export interface PiCommandOutputEvent {
+  /** The conversation the command belongs to; null for a draft. */
+  sessionFile: string | null;
+  /** The line as typed, so a listener can skip a command it paints itself. */
+  command: string;
+  /** The new lines, top-down, trimmed and blank-free. */
+  lines: string[];
+}
 
 export type PiTurnStartNewResult =
   | { ok: true; sessionFile: string; session: ParsedPiSession }
@@ -497,13 +515,21 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         // what a failed turn leaves while pi waits out a retry backoff, so
         // give pi the entry it appends before it continues to appear: a file
         // that has not grown since is a run that is over after all.
-        const settled =
-          session.settled === true && countAssistantTurns(session) >= active.target;
-        if (!settled || session.entryCount !== settledEntryCount) {
+        //
+        // A run pi gave up on shows up differently: the failed call left an
+        // assistant message with no text at all, so the assistant-turn count
+        // never reaches the target and the whole `answered` test above can
+        // never hold. The tail saying `error` is the run's own end — without
+        // this the chat reports "running" until the ten-minute deadline and
+        // the failure never reaches the screen.
+        const over =
+          session.settled === true &&
+          (countAssistantTurns(session) >= active.target || session.stopReason === 'error');
+        if (!over || session.entryCount !== settledEntryCount) {
           settledEntryCount = session.entryCount;
           settledSinceMs = now();
         }
-        if (settled && now() - settledSinceMs >= NON_FINAL_TAIL_GRACE_MS) {
+        if (over && now() - settledSinceMs >= NON_FINAL_TAIL_GRACE_MS) {
           return { ok: true, session };
         }
       } catch {
@@ -805,12 +831,20 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       if (!ready.ok) return ready;
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
 
+      // A command that takes the terminal over is read no further: its
+      // surface is not something this chat can show.
+      const takeover = takesOverTerminal(slash);
+      // The screen as it is before the command, so what the command prints can
+      // be told apart from what was already there. A capture that fails costs
+      // only the confirmation line: the command itself still runs.
+      const before = takeover ? null : await captureBefore();
+
       const deliveryFailure = await deliverLine(state, slash.line);
       if (deliveryFailure !== null) return { ok: false, error: deliveryFailure };
 
-      const hiddenUi = !disposed && takesOverTerminal(slash);
+      const hiddenUi = !disposed && takeover;
       if (hiddenUi) state.restartPending = true;
-      if (!hiddenUi) void checkForDialog();
+      if (!hiddenUi) void readScreenAfterCommand(sessionFile, slash.line, before);
       return { ok: true, hiddenUi };
     } finally {
       unsubscribeActive();
@@ -818,12 +852,24 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     }
   }
 
+  /** The turn pane's text, or null when it cannot be read right now. */
+  async function captureBefore(): Promise<string | null> {
+    const capture = deps.capturePane;
+    if (capture === undefined || openName === null) return null;
+    return capture(openName).catch(() => null);
+  }
+
   /**
-   * Read the pane once after the settle delay and report a waiting selection
-   * dialog. Every failure is silence: a screen this cannot read changes
-   * nothing about the delivery that already succeeded.
+   * Read the pane once after the settle delay: report a waiting selection
+   * dialog, or hand the chat the lines the command printed for itself
+   * (`Session name set: abcde`). Every failure is silence: a screen this
+   * cannot read changes nothing about the delivery that already succeeded.
    */
-  async function checkForDialog(): Promise<void> {
+  async function readScreenAfterCommand(
+    sessionFile: string | null,
+    command: string,
+    before: string | null,
+  ): Promise<void> {
     const capture = deps.capturePane;
     if (disposed || capture === undefined || openName === null) return;
     const sessionName = openName;
@@ -835,7 +881,11 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     if (dialog !== null) {
       dialogSession = sessionName;
       deps.onDialog?.({ dialog, pane, sessionName });
+      return;
     }
+    if (before === null) return;
+    const lines = commandOutputLines(before, pane, command);
+    if (lines.length > 0) deps.onCommandOutput?.({ sessionFile, command, lines });
   }
 
   /**

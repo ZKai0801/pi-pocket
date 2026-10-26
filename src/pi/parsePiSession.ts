@@ -1,4 +1,25 @@
-import type { ParsedPiSession, PiModelSwitch, PiTurn } from './types';
+import type { ParsedPiSession, PiModelSwitch, PiSessionError, PiTurn } from './types';
+
+/**
+ * How much of an `errorMessage` the transcript keeps. A provider failure is
+ * usually one short line (`500: {"message":"billing service unavailable",...}`),
+ * but some hand the whole response body back; a reader wants the status and the
+ * request id, not a page of HTML in the middle of the conversation.
+ */
+const MAX_ERROR_TEXT = 500;
+
+/**
+ * The failure a message carries, as one line, or null when it recorded none.
+ * `stopReason === 'error'` without an `errorMessage` is still a failure — pi
+ * says the call failed and nothing more — and is kept as an empty text so the
+ * chat can say so in its own words instead of showing nothing.
+ */
+function errorText(message: PiMessage): string | null {
+  const raw = typeof message.errorMessage === 'string' ? message.errorMessage : '';
+  const collapsed = raw.replace(/\s+/gu, ' ').trim();
+  if (collapsed === '') return message.stopReason === 'error' ? '' : null;
+  return collapsed.length > MAX_ERROR_TEXT ? `${collapsed.slice(0, MAX_ERROR_TEXT)}…` : collapsed;
+}
 
 interface PiContentBlock {
   type?: string;
@@ -22,6 +43,12 @@ interface PiMessage {
    * so it is the one field that says whether a run is over.
    */
   stopReason?: string;
+  /**
+   * What went wrong, as pi recorded it on a message that stopped with `error`.
+   * The message itself usually carries no text, which is why a failed call
+   * used to leave no trace a reader could see.
+   */
+  errorMessage?: string;
 }
 
 interface PiEntry {
@@ -70,6 +97,7 @@ function joinModel(provider: string | undefined, model: string | undefined): str
 export function parsePiSession(jsonl: string): ParsedPiSession {
   const parsed: ParsedPiSession = { version: null, id: null, cwd: null, name: null, turns: [] };
   const modelSwitches: PiModelSwitch[] = [];
+  const errors: PiSessionError[] = [];
   let pendingAssistant: PiTurn | null = null;
   // The last message entry of any role, for the settled test: a run is over
   // only when its final message is an assistant one with nothing left to run.
@@ -156,6 +184,20 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
         const model = joinModel(entry.message.provider, entry.message.model);
         if (model !== null) currentModel = model;
       }
+      // A failed call is an entry of its own that carries no text, so without
+      // this the chat shows the attempt as nothing: the run appears to have
+      // answered with silence. It sits after the reply this message belongs to
+      // (the merge below decides whether that reply is a new bubble or the
+      // open one), which is where it happened even once the chat grows past it.
+      const failure = errorText(entry.message);
+      if (failure !== null) {
+        const bubble = pendingAssistant !== null || text.trim() !== '' ? 1 : 0;
+        errors.push({
+          text: failure,
+          timestampMs: messageTimestamp(entry.message, entry),
+          afterTurns: parsed.turns.length + bubble,
+        });
+      }
       if (!text.trim()) continue;
       const timestampMs = messageTimestamp(entry.message, entry);
       if (pendingAssistant) {
@@ -170,6 +212,7 @@ export function parsePiSession(jsonl: string): ParsedPiSession {
 
   flushAssistant();
   parsed.modelSwitches = modelSwitches;
+  parsed.errors = errors;
   parsed.model = currentModel;
   parsed.settled = tail !== null && tail.role === 'assistant' && !tail.toolCall;
   parsed.stopReason = lastStopReason;
