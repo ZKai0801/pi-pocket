@@ -1152,4 +1152,108 @@ describe('createPiTurnRunner', () => {
 
     h.runner.dispose();
   });
+
+  it('adopt: watches a turn nobody here delivered, and closes its session when the reply lands', async () => {
+    // The app was killed mid-turn. The record it left names the file, the
+    // count that means answered and the tmux session, which is everything a
+    // watcher needs — the agent is already running.
+    const h = harness({
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    await expect(
+      h.runner.adopt({ sessionFile: '/r/a.jsonl', target: 1, sessionName: 'ps-pi-orphan' }),
+    ).resolves.toMatchObject({ ok: true });
+
+    // Nothing typed, no PTY opened: this turn was delivered in another life.
+    expect(h.openPty).not.toHaveBeenCalled();
+    expect(h.handle.writes).toEqual([]);
+    // …but the cleanup the dead watcher would have done is this one's job.
+    await flushMicrotasks();
+    expect(h.closeSession).toHaveBeenCalledWith('ps-pi-orphan');
+    expect(h.forgetTurn).toHaveBeenCalledWith('ps-pi-orphan');
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('adopt: keeps waiting while the adopted turn still owes replies', async () => {
+    const h = harness({
+      reads: [
+        // Tool work still running: the file has the first reply but does not
+        // settle, so this must not be taken as the end of the run.
+        sessionWithAssistantTurns(1, false),
+        sessionWithAssistantTurns(2),
+      ],
+    });
+
+    await expect(
+      h.runner.adopt({ sessionFile: '/r/a.jsonl', target: 2, sessionName: 'ps-pi-orphan' }),
+    ).resolves.toMatchObject({ ok: true });
+
+    expect(h.readSession).toHaveBeenCalledTimes(2);
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('adopt: writes the record before it starts watching, so a deadline still leaves the cleanup', async () => {
+    const h = harness({
+      reads: [sessionWithAssistantTurns(0), new Error('ssh gone')],
+      turnTimeoutMs: 5_000,
+    });
+
+    await expect(
+      h.runner.adopt({ sessionFile: '/r/a.jsonl', target: 2, sessionName: 'ps-pi-orphan' }),
+    ).resolves.toMatchObject({ ok: false });
+
+    expect(h.rememberTurn).toHaveBeenCalledWith({
+      sessionName: 'ps-pi-orphan',
+      sessionFile: '/r/a.jsonl',
+      target: 2,
+    });
+    // A watch that gave up is not a turn that failed: nothing is killed.
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+  });
+
+  it('adopt: refuses while this runner is already watching a turn', async () => {
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0)],
+      neverSettles: true,
+      turnTimeoutMs: 1_000_000,
+    });
+    void h.runner.send('/r/a.jsonl', 'one');
+    await flushMicrotasks();
+
+    await expect(
+      h.runner.adopt({ sessionFile: '/r/a.jsonl', target: 1, sessionName: 'ps-pi-orphan' }),
+    ).resolves.toMatchObject({ ok: false });
+    expect(h.openPty).toHaveBeenCalledTimes(1);
+
+    h.runner.dispose();
+  });
+
+  it('adopt: a steering message re-attaches to the session the adopted turn runs in', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(1, false), reply.promise],
+    });
+
+    const watching = h.runner.adopt({
+      sessionFile: '/r/a.jsonl',
+      target: 1,
+      sessionName: 'ps-pi-orphan',
+    });
+    await flushMicrotasks();
+
+    await expect(h.runner.queue('/r/a.jsonl', 'go left', 'steer')).resolves.toEqual({ ok: true });
+    // The adopted session's own name, so the line reaches the agent that is
+    // working instead of starting a second Pi on the same file.
+    expect(String(h.openPty.mock.calls[0]?.[0] ?? '')).toContain('ps-pi-orphan');
+    expect(h.handle.writes).toEqual(['go left', '\r']);
+
+    // One more reply is owed now; the run settles on the second one.
+    reply.resolve(sessionWithAssistantTurns(2));
+    await expect(watching).resolves.toMatchObject({ ok: true });
+    expect(h.closeSession).toHaveBeenCalledWith('ps-pi-orphan');
+  });
 });

@@ -456,4 +456,74 @@ describe('sessions store session backup', () => {
     // Only the open's save; the failed turn wrote nothing.
     expect(saveCachedSession).toHaveBeenCalledTimes(1);
   });
+
+  it('an adopted turn: marks the conversation running without painting anything into the chat', async () => {
+    // Cold start after the app was killed mid-turn: the record says this
+    // conversation still has a turn in flight, and the chat is otherwise just
+    // the file it read.
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => session),
+      hostId: () => 'alexey',
+    } as never);
+    await store.openSession('/r/a.jsonl');
+
+    store.adoptRunning('/r/a.jsonl');
+
+    expect(store.running).toEqual(['/r/a.jsonl']);
+    expect(store.openRunning).toBe(true);
+    // Nobody here sent it: the transcript is whatever the file holds.
+    expect(store.open?.turns).toHaveLength(1);
+  });
+
+  it('an adopted turn: its reply lands in the chat and its list row like any other', async () => {
+    const answered: ParsedPiSession = {
+      ...session,
+      turns: [
+        ...session.turns,
+        { role: 'assistant', text: 'done', timestampMs: 2 },
+        { role: 'assistant', text: 'and more', timestampMs: 3 },
+      ],
+    };
+    const store = createSessionsStore({
+      listSessions: vi.fn(async () => [
+        { path: '/r/a.jsonl', id: 'a', name: 'a', updatedAtMs: 1, preview: 'p', turnCount: 1 },
+      ]),
+      readSession: vi.fn(async () => session),
+      hostId: () => 'alexey',
+    } as never);
+    await store.load({ path: '/home/kai', name: 'kai' });
+    await store.openSession('/r/a.jsonl');
+    store.adoptRunning('/r/a.jsonl');
+
+    store.settleAdopted('alexey', '/r/a.jsonl', { ok: true, session: answered });
+
+    expect(store.running).toEqual([]);
+    expect(store.openRunning).toBe(false);
+    expect(store.open?.turns).toHaveLength(3);
+    expect(store.sessions[0]?.turnCount).toBe(3);
+  });
+
+  it('an adopted turn: a watch that gives up only ends the status, never the chat error', async () => {
+    // Nobody sent this turn from here, so its timeout is not the composer's
+    // failure to report — the record stays and the next sweep watches again.
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(async () => session),
+      hostId: () => 'alexey',
+    } as never);
+    await store.openSession('/r/a.jsonl');
+    store.adoptRunning('/r/a.jsonl');
+
+    store.settleAdopted('alexey', '/r/a.jsonl', {
+      ok: false,
+      error: 'The turn timed out before Pi wrote a new assistant reply.',
+    });
+
+    expect(store.running).toEqual([]);
+    expect(store.sendError).toBeNull();
+    // The chat stays open and untouched: all that ended was the status.
+    expect(store.openPath).toBe('/r/a.jsonl');
+    expect(store.open?.turns).toHaveLength(1);
+  });
 });

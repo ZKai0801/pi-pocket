@@ -25,6 +25,7 @@ function stubRunner(): StubRunner {
     beginSend: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     beginStartNew: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     queue: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
+    adopt: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     rebind: vi.fn(),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),

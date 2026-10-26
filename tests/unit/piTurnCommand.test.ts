@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { piNodePathPrelude, quoteShell } from '../../src/pi/piCommands';
 import {
   buildPiCloseCommand,
+  buildPiHasSessionCommand,
   buildPiInnerCommand,
   buildPiOpenCommand,
   PI_TURN_TMUX_SOCKET,
@@ -144,6 +145,13 @@ describe('pi turn teardown', () => {
     const command = buildPiCloseCommand(name);
     expect(command).toContain(`${TMUX} kill-session -t '${name}'`);
     expect(command.endsWith('|| true')).toBe(true);
+  });
+
+  it('asks the same private server whether a recorded turn is still alive', () => {
+    // Exit 0 is the only "yes": the sweep retires a record on a false answer,
+    // so the probe must name our own server and quote the name.
+    const name = turnSessionName('/r/a.jsonl', '/home/projects/x');
+    expect(buildPiHasSessionCommand(name)).toBe(`${TMUX} has-session -t '${name}' 2>/dev/null`);
   });
 });
 

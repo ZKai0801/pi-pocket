@@ -357,7 +357,7 @@
         "retains the text when the send reports an error",
         "retains the text when the send reports busy",
         "renders the inline error as an alert",
-        "turns the action into “+” only while the draft is empty",
+        "keeps “+” beside the draft and shows 发送 only once there is something to send",
         "opens the command sheet from “+” and asks the shell for commands",
         "inserts a picked command instead of sending it",
         "inserts the colon form of /skill: without a separator",
@@ -391,7 +391,8 @@
         "reports a missing connection owner instead of throwing at the tap",
         "drops a removed chip from the message",
         "keeps text and files when the send did not land",
-        "hides the paperclip when there is no session to stage into",
+        "offers no upload row when there is no session to stage into",
+        "puts the upload row above the command filter and closes the sheet on tap",
         "shows the acknowledged byte count while the batch is in flight"
       ]
     },
@@ -899,18 +900,22 @@
         "countAssistantTurns: counts merged turns, not assistant entries",
         "isRunAnswered: does not call a run answered while its narration still owes tool work",
         "isRunAnswered: calls a run answered only when the count is reached and the tail is settled",
+        "isRunAnswered: keeps a run whose last message says pi will ask again",
+        "isRunAnswered: reads a file that records no stop reason by its tail",
         "PendingTurns: remembers a turn for the host it runs on and no other",
         "PendingTurns: overwrites the record when the same conversation sends again",
         "PendingTurns: forgets a settled run",
         "PendingTurns: drops a record past its ttl instead of acting on it",
         "PendingTurns: keeps the cap by dropping the oldest records",
         "PendingTurns: rejects a record from another build or with unusable fields",
-        "sweepAnsweredTurns: closes and forgets a session whose turn was answered while nobody watched",
-        "sweepAnsweredTurns: leaves a session alone while Pi is still working",
-        "sweepAnsweredTurns: leaves a session alone when the count is reached but tools are still running",
-        "sweepAnsweredTurns: keeps the record when the file cannot be read, so the next connection retries",
-        "sweepAnsweredTurns: does not let a failed kill drop the record",
-        "sweepAnsweredTurns: does nothing at all without a host"
+        "reconcilePendingTurns: closes and forgets a session whose turn was answered while nobody watched",
+        "reconcilePendingTurns: hands a still-running turn back so it can be watched again",
+        "reconcilePendingTurns: leaves a session alone when the count is reached but tools are still running",
+        "reconcilePendingTurns: drops a record whose tmux session no longer exists",
+        "reconcilePendingTurns: keeps the record when the session probe cannot answer",
+        "reconcilePendingTurns: keeps the record when the file cannot be read, so the next connection retries",
+        "reconcilePendingTurns: does not let a failed kill drop the record",
+        "reconcilePendingTurns: does nothing at all without a host"
       ]
     },
     "tests/unit/phoneAppStateLifecycle.test.ts": {
@@ -1457,6 +1462,10 @@
           "title": "kills the conversation session and never fails a turn over it"
         },
         {
+          "suite": "pi turn teardown",
+          "title": "asks the same private server whether a recorded turn is still alive"
+        },
+        {
           "suite": "toTurnLine",
           "title": "collapses a multi-line message into one line"
         }
@@ -1515,7 +1524,12 @@
         "drops the dead PTY on a reconnect and keeps the run",
         "keeps watching a run across a reconnect and settles once the reads come back",
         "re-attaches to the same session and delivers the line after a reconnect",
-        "re-attaches a draft to its own session, which its adopted file cannot name"
+        "re-attaches a draft to its own session, which its adopted file cannot name",
+        "adopt: watches a turn nobody here delivered, and closes its session when the reply lands",
+        "adopt: keeps waiting while the adopted turn still owes replies",
+        "adopt: writes the record before it starts watching, so a deadline still leaves the cleanup",
+        "adopt: refuses while this runner is already watching a turn",
+        "adopt: a steering message re-attaches to the session the adopted turn runs in"
       ]
     },
     "tests/unit/piTurnRunnerDialog.test.ts": {
@@ -2004,6 +2018,9 @@
         "keeps the previous chat intact when a re-read fails",
         "clamps the turn poll interval to the shared floor",
         "treats a dropped or redialled connection as the same host, not a switch",
+        "an adopted turn: marks the conversation running without painting anything into the chat",
+        "an adopted turn: its reply lands in the chat and its list row like any other",
+        "an adopted turn: a watch that gives up only ends the status, never the chat error",
         "host switch: drops a load result that resolves after the host changed",
         "host switch: drops an open-session result that resolves after the host changed",
         "host switch: starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim",

@@ -119,6 +119,7 @@ function answeredRunner(sessionFile: string): PiTurnRunner {
     runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })),
     answerDialog: vi.fn(async () => ({ ok: true as const, settled: true, newLines: [] })),
     queue: vi.fn(async () => ({ ok: true as const })),
+    adopt: vi.fn(async () => ({ ok: false as const, error: 'unused' })),
     rebind: vi.fn(),
     isBusy: vi.fn(() => false),
     dispose: vi.fn(),

@@ -157,6 +157,18 @@ export function buildPiCloseCommand(sessionName: string): string {
   return `tmux -L ${PI_TURN_TMUX_SOCKET} kill-session -t ${name} 2>/dev/null || true`;
 }
 
+/**
+ * Ask whether the conversation's tmux session still exists: exit 0 when it
+ * does, non-zero when the agent is gone (the host rebooted, pi exited, or the
+ * user killed the pane). A record whose session is gone has nothing left to
+ * watch or to close, so the sweep drops it instead of reporting a turn as
+ * running on the strength of a file it can never be joined in.
+ */
+export function buildPiHasSessionCommand(sessionName: string): string {
+  const name = quoteShell(sessionName);
+  return `tmux -L ${PI_TURN_TMUX_SOCKET} has-session -t ${name} 2>/dev/null`;
+}
+
 /** A multi-line message is delivered as one line of terminal input. */
 export function toTurnLine(message: string): string {
   return message.replace(/[\r\n]+/g, ' ').trim();

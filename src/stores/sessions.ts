@@ -58,16 +58,21 @@ import {
   type PiTurnRunner,
   type PiTurnSendResult,
   type PiTurnStartNewResult,
+  type PiTurnAdoption,
   type TurnQueueKind,
 } from '../pi/piTurnRunner';
 import { parseSlashLine } from '../pi/piInteractivity';
-import { buildPiCloseCommand, toTurnLine } from '../pi/piTurn';
+import { buildPiCloseCommand, buildPiHasSessionCommand, toTurnLine } from '../pi/piTurn';
 import {
   capturePaneCommand,
   sendKeysCommand,
   type PiScreenDialog,
 } from '../pi/piDialog';
-import { pendingTurns, sweepAnsweredTurns } from '../pi/pendingTurns';
+import {
+  pendingTurns,
+  reconcilePendingTurns,
+  type PendingTurnRun,
+} from '../pi/pendingTurns';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
 import type { ParsedPiSession, PiTurn } from '../pi/types';
@@ -300,6 +305,19 @@ export interface SessionsStore extends SessionsStoreState {
    * watch calls this in addition to its state clear.
    */
   hostChanged(): void;
+  /**
+   * The conversation has a turn in flight that this app did not just deliver —
+   * a record found it still running on the host after the runner watching it
+   * died with the app. Only the status is set: nothing is painted into the
+   * chat, because nothing was said here.
+   */
+  adoptRunning(sessionFile: string): void;
+  /**
+   * An adopted turn's reply landed (or its watch gave up). Paints exactly what
+   * a delivered turn's landing does; a failure only ends the status, since the
+   * user never sent this turn from this app.
+   */
+  settleAdopted(host: string | null, sessionFile: string, result: PiTurnSendResult): void;
 }
 
 export interface SessionsStoreDeps {
@@ -1075,6 +1093,36 @@ function rememberSession(
   }
 
   /**
+   * The conversation has a turn in flight that nobody in this process
+   * delivered: its record survived a killed app or an expired poll deadline,
+   * and the host is still working. Reporting it is the whole job here — the
+   * transcript follows when the reply lands.
+   */
+  function adoptRunning(sessionFile: string): void {
+    markRunning(sessionFile);
+  }
+
+  /**
+   * An adopted turn is over. The reply lands through the same `completeTurn` a
+   * delivered turn uses, because the parse it brings is the same and the chat
+   * on screen is the same conversation. A failure is different: nobody here
+   * sent this turn, so a timeout or a transport that went away mid-poll is not
+   * the chat's error to show — it only ends the status, and the record stays
+   * for the next sweep to take the watch over again.
+   */
+  function settleAdopted(
+    host: string | null,
+    sessionFile: string,
+    result: PiTurnSendResult,
+  ): void {
+    if (!result.ok) {
+      clearRunning(sessionFile);
+      return;
+    }
+    completeTurn({ host, sessionFile }, result);
+  }
+
+  /**
    * Answer the pending dialog from its native card: the runner that reported
    * it sends the keystrokes into the pane (Enter on the affirmative option, or
    * Escape), waits out pi's settle, and diffs the screen so the chat can show
@@ -1572,6 +1620,8 @@ function rememberSession(
     answerPendingDialog,
     noteCommandOutput,
     hostChanged,
+    adoptRunning,
+    settleAdopted,
     startSelection,
     toggleSelected,
     setAllSelected,
@@ -1667,6 +1717,19 @@ function closeTurnSessionOnActiveHost(sessionName: string): Promise<void> {
 }
 
 /**
+ * Whether a recorded turn's tmux session still exists. Exit 0 is the only
+ * "yes": anything else — a session pi already ended, a host without tmux, or
+ * a transport that answered nothing — means the pane is not there to join, and
+ * a throw leaves the record alone rather than retiring a turn on a guess.
+ */
+function turnSessionAliveOnActiveHost(sessionName: string): Promise<boolean> {
+  return piLive()
+    .transport()
+    .exec(buildPiHasSessionCommand(sessionName), 5_000)
+    .then((result) => result.exitCode === 0);
+}
+
+/**
  * The local backup of an opened conversation (spec §8.6): the chat paints it
  * instantly on a cold open while the server's fresh read is in flight, and
  * every fresh read or turn re-saves it. Keyed by the claim's host — a session
@@ -1704,8 +1767,13 @@ export interface TurnRunnerCacheDeps {
 }
 
 export interface TurnRunnerCache {
-  /** The runner for `sessionFile`, built on first use and reused afterwards. */
-  runnerFor(sessionFile: string): Promise<PiTurnRunner>;
+  /**
+   * The runner for `sessionFile`, built on first use and reused afterwards.
+   * `pinnedProjectPath` names the directory the runner works in when the
+   * caller knows it for the conversation itself rather than from whatever chat
+   * happens to be open — an adopted turn, whose chat may not be open at all.
+   */
+  runnerFor(sessionFile: string, pinnedProjectPath?: string): Promise<PiTurnRunner>;
   /**
    * Dispose the cached runner for one conversation. Called once its turn has
    * settled and its chat is no longer on screen — a runner that is still
@@ -1785,13 +1853,16 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     started: number,
     host: string | null,
     projectPath: string,
+    pinned: boolean,
   ): boolean {
     // A draft's open path is always null, so the project directory is the only
-    // thing that can prove which conversation the build was claimed for.
+    // thing that can prove which conversation the build was claimed for. A
+    // pinned build names its own conversation's directory, which the open chat
+    // cannot disagree with: only the connection can invalidate it.
     return (
       generation === started &&
       deps.hostId() === host &&
-      deps.projectPath() === projectPath
+      (pinned || deps.projectPath() === projectPath)
     );
   }
 
@@ -1812,21 +1883,25 @@ export function createTurnRunnerCache(deps: TurnRunnerCacheDeps): TurnRunnerCach
     return resolution;
   }
 
-  async function runnerFor(sessionFile: string): Promise<PiTurnRunner> {
+  async function runnerFor(
+    sessionFile: string,
+    pinnedProjectPath?: string,
+  ): Promise<PiTurnRunner> {
     const started = generation;
     const host = deps.hostId();
-    const projectPath = deps.projectPath();
+    const pinned = pinnedProjectPath !== undefined;
+    const projectPath = pinnedProjectPath ?? deps.projectPath();
     const key = keyFor(host, projectPath, sessionFile);
     const cached = runners.get(key);
     if (cached !== undefined) return cached.runner;
     if (projectPath === null) throw new Error(t('store.sessionMissingProject'));
 
     const command = await commandFor(host ?? '', started);
-    if (!claimed(started, host, projectPath)) throw new Error(STALE_TURN_ERROR);
+    if (!claimed(started, host, projectPath, pinned)) throw new Error(STALE_TURN_ERROR);
     if (!command.ok) throw new Error(command.error);
 
     const runner = deps.build(command.command, projectPath, sessionFile);
-    if (!claimed(started, host, projectPath)) {
+    if (!claimed(started, host, projectPath, pinned)) {
       runner.dispose();
       throw new Error(STALE_TURN_ERROR);
     }
@@ -2062,11 +2137,33 @@ export function createTurnRunnerFacade(deps: TurnRunnerFacadeDeps): PiTurnRunner
     }
   }
 
+  /**
+   * Watch a turn that is already running on the host (a `pendingTurns` record
+   * found it still working after the app that delivered it died). Nothing is
+   * claimed: an adoption is not a delivery, so it never races a turn for the
+   * chat — and the sweep that drives it refuses a conversation that is already
+   * marked running, which is the claim that matters here.
+   *
+   * The sweep calls the cache itself rather than this, because an adopted
+   * turn's chat is usually not open and the runner has to be built for the
+   * directory the session file records; this forwards for any caller that does
+   * hold the conversation's chat.
+   */
+  async function adopt(turn: PiTurnAdoption): Promise<PiTurnSendResult> {
+    try {
+      const runner = await deps.runnerFor(turn.sessionFile);
+      return await runner.adopt(turn);
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
   return {
     send,
     startNew,
     runCommand,
     answerDialog,
+    adopt,
     beginSend,
     beginStartNew,
     queue,
@@ -2139,6 +2236,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   });
 
   function disposeTurnRunner(): void {
+    stopPendingTurnWatch();
     turnRunners.dispose();
   }
 
@@ -2152,13 +2250,92 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   /**
-   * Close the conversations whose turn was answered while this phone was not
-   * looking — the case the runner cannot cover, because the runner is gone by
-   * then (the app was killed, or the poll's deadline expired offline). The
-   * record holds the assistant-turn count that means "answered", and the read
-   * is the same one the runner polls, so a run that is still working is left
-   * alone. Returns how many sessions were closed; a failure on one record
-   * leaves it for the next connection.
+   * How often the records are rechecked while any of them still owes work.
+   *
+   * The runner's poll has a ten-minute window, and a turn can outlive it —
+   * a build, a test suite, a long refactor. Without this watch the status
+   * would simply disappear at that point, which is the bug this whole path
+   * exists for one step earlier (the record survives the watcher; so must the
+   * watch). Each pass re-adopts whatever is still running, which renews the
+   * window, and stops as soon as no record is left owing anything.
+   */
+  const PENDING_TURN_WATCH_MS = 60_000;
+  let pendingTurnWatch: ReturnType<typeof setInterval> | null = null;
+
+  function stopPendingTurnWatch(): void {
+    if (pendingTurnWatch === null) return;
+    clearInterval(pendingTurnWatch);
+    pendingTurnWatch = null;
+  }
+
+  /** Keep the watch alive only while a record still owes a reply. */
+  function armPendingTurnWatch(remaining: number): void {
+    if (remaining === 0) {
+      stopPendingTurnWatch();
+      return;
+    }
+    if (pendingTurnWatch !== null) return;
+    pendingTurnWatch = setInterval(() => {
+      void sweepPendingTurns();
+    }, PENDING_TURN_WATCH_MS);
+  }
+
+  /**
+   * Take the watch over for a turn a record says is still running. The status
+   * goes up before the runner is built — the host is working right now, and the
+   * header should not wait on a shell probe to say so — and the conversation's
+   * own runner (built for the directory the session file records, not for
+   * whatever chat is open) polls the same file the dead watcher was reading.
+   *
+   * Nothing is delivered and nothing is painted: this turn was started in some
+   * earlier life of the app, and all that is left to do is wait for its reply
+   * and tear its session down when it lands.
+   */
+  function adoptPendingTurn(host: string, run: PendingTurnRun): void {
+    const turn = run.turn;
+    // Already watched: the user sent this turn from here, or an earlier pass
+    // adopted it. A second watcher would settle the same reply twice.
+    if (store.running.includes(turn.sessionFile)) return;
+    // The runner works in the conversation's own directory, which only the
+    // session file itself knows once its chat is closed. A file that recorded
+    // none leaves the record for the next pass.
+    const projectPath = run.session.cwd ?? null;
+    if (projectPath === null) return;
+    store.adoptRunning(turn.sessionFile);
+    void (async (): Promise<void> => {
+      let result: PiTurnSendResult;
+      try {
+        const runner = await turnRunners.runnerFor(turn.sessionFile, projectPath);
+        result = await runner.adopt({
+          sessionFile: turn.sessionFile,
+          target: turn.target,
+          sessionName: turn.sessionName,
+        });
+      } catch (error) {
+        result = { ok: false, error: errorMessage(error) };
+      }
+      store.settleAdopted(host, turn.sessionFile, result);
+      // A chat that is not on screen has nothing to keep a runner open for;
+      // the reply reaches its list row from the settle above either way.
+      if (store.openPath !== turn.sessionFile) turnRunners.release(turn.sessionFile);
+    })();
+  }
+
+  /**
+   * Reconcile the conversations whose turn was recorded but not seen answered
+   * — the case the runner cannot cover, because the runner is gone by then
+   * (the app was killed, or the poll's deadline expired offline). The record
+   * holds the assistant-turn count that means "answered", and the read is the
+   * same one the runner polls, so:
+   *
+   * - an answered run is closed and forgotten (nobody is left to do it);
+   * - a run that is still working is adopted back into a runner, so the chat
+   *   keeps reporting it and its reply still lands in the list;
+   * - a run whose tmux session is gone is dropped, since there is nothing left
+   *   to watch and nothing to close.
+   *
+   * Returns how many sessions were closed; a record that could not be read is
+   * left for the next pass.
    */
   let sweepingPendingTurns = false;
   async function sweepPendingTurns(): Promise<number> {
@@ -2168,13 +2345,17 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (host === null || sweepingPendingTurns) return 0;
     sweepingPendingTurns = true;
     try {
-      return await sweepAnsweredTurns({
+      const settlement = await reconcilePendingTurns({
         host,
         list: (target) => pendingTurns().onHost(target),
         readSession: readSessionOnActiveHost,
         kill: closeTurnSessionOnActiveHost,
+        hasSession: turnSessionAliveOnActiveHost,
         forget: (target, sessionName) => pendingTurns().forget(target, sessionName),
       });
+      for (const run of settlement.running) adoptPendingTurn(host, run);
+      armPendingTurnWatch(settlement.running.length);
+      return settlement.closed;
     } finally {
       sweepingPendingTurns = false;
     }

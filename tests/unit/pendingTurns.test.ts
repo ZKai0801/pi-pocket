@@ -7,7 +7,7 @@ import {
   isUsablePendingTurn,
   PENDING_TURN_SCHEMA,
   PendingTurns,
-  sweepAnsweredTurns,
+  reconcilePendingTurns,
   type PendingTurn,
 } from '../../src/pi/pendingTurns';
 import { parsePiSession } from '../../src/pi/parsePiSession';
@@ -203,6 +203,10 @@ describe('pending turns', () => {
   function sweepWith(options: {
     entries: PendingTurn[];
     sessions: Record<string, ParsedPiSession | Error>;
+    /** The tmux sessions that still exist; omitted means the host is not probed. */
+    alive?: string[];
+    /** The probe itself fails (an SSH hiccup), as opposed to answering "gone". */
+    probeThrows?: boolean;
   }) {
     const readSession = vi.fn(async (path: string) => {
       const next = options.sessions[path] ?? new Error('no such file');
@@ -211,47 +215,58 @@ describe('pending turns', () => {
     });
     const kill = vi.fn(async (_sessionName: string) => undefined);
     const forget = vi.fn(async (_host: string, _sessionName: string) => undefined);
+    const hasSession = options.alive === undefined
+      ? undefined
+      : vi.fn(async (sessionName: string) => {
+          if (options.probeThrows === true) throw new Error('probe failed');
+          return options.alive?.includes(sessionName) ?? false;
+        });
     const run = () =>
-      sweepAnsweredTurns({
+      reconcilePendingTurns({
         host: 'box',
         list: async (host) =>
           options.entries.filter((entry) => (host === 'box' ? entry.host === 'box' : false)),
         readSession,
         kill,
+        hasSession,
         forget,
       });
-    return { readSession, kill, forget, run };
+    return { readSession, kill, forget, hasSession, run };
   }
 
-  it('sweepAnsweredTurns: closes and forgets a session whose turn was answered while nobody watched', async () => {
+  it('reconcilePendingTurns: closes and forgets a session whose turn was answered while nobody watched', async () => {
     const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
     const sweep = sweepWith({
       entries: [turn],
       sessions: { '/r/a.jsonl': sessionWithAssistantTurns(2) },
     });
 
-    await expect(sweep.run()).resolves.toBe(1);
+    await expect(sweep.run()).resolves.toMatchObject({ closed: 1, running: [] });
 
     expect(sweep.kill).toHaveBeenCalledWith('ps-pi-a');
     expect(sweep.forget).toHaveBeenCalledWith('box', 'ps-pi-a');
   });
 
-  it('sweepAnsweredTurns: leaves a session alone while Pi is still working', async () => {
+  it('reconcilePendingTurns: hands a still-running turn back so it can be watched again', async () => {
+    // The app was killed mid-turn; the agent kept working. This record is the
+    // only reason anyone still knows the conversation has a turn in flight.
     const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
-    const sweep = sweepWith({
-      entries: [turn],
-      // One of the two owed replies has landed: the run is mid-flight, and
-      // closing it here would destroy exactly the work this all exists for.
-      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1) },
-    });
+    const session = sessionWithAssistantTurns(1);
+    const sweep = sweepWith({ entries: [turn], sessions: { '/r/a.jsonl': session } });
 
-    await expect(sweep.run()).resolves.toBe(0);
+    const settlement = await sweep.run();
 
+    expect(settlement.closed).toBe(0);
+    expect(settlement.running).toHaveLength(1);
+    expect(settlement.running[0]?.turn.sessionName).toBe('ps-pi-a');
+    // The parse comes back with it: the caller needs the conversation's own
+    // directory to build a runner for a chat that is not open.
+    expect(settlement.running[0]?.session).toBe(session);
     expect(sweep.kill).not.toHaveBeenCalled();
     expect(sweep.forget).not.toHaveBeenCalled();
   });
 
-  it('sweepAnsweredTurns: leaves a session alone when the count is reached but tools are still running', async () => {
+  it('reconcilePendingTurns: leaves a session alone when the count is reached but tools are still running', async () => {
     // The phone went away right after sending; by the time it reconnects, the
     // model has narrated (one text turn in the file) and is deep in a tool
     // call. The count matches the record's target; the tail does not settle.
@@ -263,23 +278,54 @@ describe('pending turns', () => {
       sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1, false) },
     });
 
-    await expect(sweep.run()).resolves.toBe(0);
+    await expect(sweep.run()).resolves.toMatchObject({ closed: 0, running: [{ turn }] });
 
     expect(sweep.kill).not.toHaveBeenCalled();
     expect(sweep.forget).not.toHaveBeenCalled();
   });
 
-  it('sweepAnsweredTurns: keeps the record when the file cannot be read, so the next connection retries', async () => {
+  it('reconcilePendingTurns: drops a record whose tmux session no longer exists', async () => {
+    // Pi exited (or the host rebooted) before the reply was ever written: no
+    // watcher can join that pane, and no cleanup is owed. Keeping the record
+    // would report a turn as running in a session that is gone.
+    const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
+    const sweep = sweepWith({
+      entries: [turn],
+      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1) },
+      alive: [],
+    });
+
+    await expect(sweep.run()).resolves.toMatchObject({ gone: 1, running: [] });
+
+    expect(sweep.forget).toHaveBeenCalledWith('box', 'ps-pi-a');
+    expect(sweep.kill).not.toHaveBeenCalled();
+  });
+
+  it('reconcilePendingTurns: keeps the record when the session probe cannot answer', async () => {
+    const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
+    const sweep = sweepWith({
+      entries: [turn],
+      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1) },
+      alive: ['ps-pi-a'],
+      probeThrows: true,
+    });
+
+    await expect(sweep.run()).resolves.toMatchObject({ unreadable: 1, running: [], gone: 0 });
+
+    expect(sweep.forget).not.toHaveBeenCalled();
+  });
+
+  it('reconcilePendingTurns: keeps the record when the file cannot be read, so the next connection retries', async () => {
     const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/gone.jsonl' });
     const sweep = sweepWith({ entries: [turn], sessions: {} });
 
-    await expect(sweep.run()).resolves.toBe(0);
+    await expect(sweep.run()).resolves.toMatchObject({ closed: 0, unreadable: 1, running: [] });
 
     expect(sweep.kill).not.toHaveBeenCalled();
     expect(sweep.forget).not.toHaveBeenCalled();
   });
 
-  it('sweepAnsweredTurns: does not let a failed kill drop the record', async () => {
+  it('reconcilePendingTurns: does not let a failed kill drop the record', async () => {
     const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl' });
     const sweep = sweepWith({
       entries: [turn],
@@ -288,25 +334,25 @@ describe('pending turns', () => {
     sweep.kill.mockRejectedValueOnce(new Error('ssh gone'));
 
     // Nothing was closed, so nothing is reported as closed.
-    await expect(sweep.run()).resolves.toBe(0);
+    await expect(sweep.run()).resolves.toMatchObject({ closed: 0 });
 
     // The kill never happened, so the record has to survive for the retry.
     expect(sweep.forget).not.toHaveBeenCalled();
   });
 
-  it('sweepAnsweredTurns: does nothing at all without a host', async () => {
+  it('reconcilePendingTurns: does nothing at all without a host', async () => {
     const list = vi.fn(async () => [record()]);
     const kill = vi.fn(async () => undefined);
 
     await expect(
-      sweepAnsweredTurns({
+      reconcilePendingTurns({
         host: null,
         list,
         readSession: async () => sessionWithAssistantTurns(1),
         kill,
         forget: async () => undefined,
       }),
-    ).resolves.toBe(0);
+    ).resolves.toMatchObject({ closed: 0, running: [] });
     expect(kill).not.toHaveBeenCalled();
   });
 });

@@ -14,10 +14,18 @@
  * rechecks the records it holds for the host it just reached. A record names
  * the conversation's file and the assistant-turn count that means "answered"
  * — the same count, from the same parser, that the runner itself settles on,
- * backed by the same settled-tail test — so the sweep closes only runs that
- * are provably finished. A run that is still working has not reached that
- * count or still owes tool work, and is left strictly alone: killing it
- * would destroy exactly the work this app keeps alive across a disconnect.
+ * backed by the same settled-tail test — so the reconciliation closes only
+ * runs that are provably finished. A run that is still working has not reached
+ * that count or still owes tool work, and is never killed: killing it would
+ * destroy exactly the work this app keeps alive across a disconnect. Instead
+ * it is reported back as `running`, so the store can take the watch over again
+ * — rule 1 of this file is that the watcher dies with the app, and rule 2 is
+ * that the turn does not.
+ *
+ * A record whose tmux session is gone (`hasSession` says so) is neither: the
+ * agent exited without its reply ever landing, so there is nothing to watch
+ * and nothing to kill, and the record is dropped so the chat stops claiming a
+ * turn is running in a pane that no longer exists.
  *
  * Keyed by host and session name: the name is what tmux needs, the host is
  * where it lives. A record is overwritten when the same conversation's next
@@ -257,42 +265,104 @@ export interface PendingTurnSweepDeps {
   readSession(path: string): Promise<ParsedPiSession>;
   /** Close the conversation's tmux session. Best-effort by contract. */
   kill(sessionName: string): Promise<void>;
+  /**
+   * Whether the record's tmux session still exists. Absent, or a probe that
+   * fails, means "cannot tell": the record is kept for the next sweep instead
+   * of being dropped. Only a session that is provably gone retires a record.
+   */
+  hasSession?(sessionName: string): Promise<boolean>;
   forget(host: string, sessionName: string): Promise<void>;
 }
 
+/** A record whose turn is still in flight, with the parse that proves it. */
+export interface PendingTurnRun {
+  turn: PendingTurn;
+  session: ParsedPiSession;
+}
+
 /**
- * Close the tmux sessions whose recorded turn has been answered, and return
- * how many were closed.
- *
- * The read is the only authority: a file that cannot be read leaves its record
- * in place for the next connection, and a count below the target means Pi is
- * still working — the record stays so a later connection can finish the job.
+ * What one pass over the host's records found. The caller acts on the last
+ * group: a turn that is still running is one to watch again, not one to close
+ * — that is the whole point of the records surviving the app.
  */
-export async function sweepAnsweredTurns(deps: PendingTurnSweepDeps): Promise<number> {
+export interface PendingTurnSettlement {
+  /** Sessions closed because their turn had been answered. */
+  closed: number;
+  /** Records still owing work: take the watch over. */
+  running: PendingTurnRun[];
+  /** Records dropped because their tmux session no longer exists. */
+  gone: number;
+  /** Records kept because nothing could be read; the next pass retries. */
+  unreadable: number;
+}
+
+/**
+ * Reconcile the host's recorded turns with what the host actually has:
+ * answered runs are closed and forgotten, live runs are handed back to the
+ * caller to watch, and runs whose session is gone are dropped.
+ *
+ * The read is the only authority on "answered": a file that cannot be read
+ * leaves its record in place for the next pass, and a count below the target
+ * means Pi is still working. Only a session that `hasSession` reports as
+ * missing retires an unfinished record, and only because there is then
+ * nothing left to watch or to close.
+ */
+export async function reconcilePendingTurns(
+  deps: PendingTurnSweepDeps,
+): Promise<PendingTurnSettlement> {
+  const settlement: PendingTurnSettlement = {
+    closed: 0,
+    running: [],
+    gone: 0,
+    unreadable: 0,
+  };
   // No host means no connection was reached: there is nothing to read, and a
   // record must not be acted on through some other host's transport.
-  if (deps.host === null || deps.host === '') return 0;
+  if (deps.host === null || deps.host === '') return settlement;
   const turns = await deps.list(deps.host).catch(() => []);
-  let closed = 0;
   for (const turn of turns) {
-    let answered = false;
+    let session: ParsedPiSession;
     try {
-      answered = isRunAnswered(await deps.readSession(turn.sessionFile), turn.target);
+      session = await deps.readSession(turn.sessionFile);
     } catch {
+      settlement.unreadable += 1;
       continue;
     }
-    if (!answered) continue;
-    try {
-      await deps.kill(turn.sessionName);
-    } catch {
-      // The kill never landed, so the session is probably still there: keep
-      // the record rather than forget a cleanup that still has to happen.
+    if (isRunAnswered(session, turn.target)) {
+      try {
+        await deps.kill(turn.sessionName);
+      } catch {
+        // The kill never landed, so the session is probably still there: keep
+        // the record rather than forget a cleanup that still has to happen.
+        settlement.unreadable += 1;
+        continue;
+      }
+      await deps.forget(turn.host, turn.sessionName).catch(() => undefined);
+      settlement.closed += 1;
       continue;
     }
-    await deps.forget(turn.host, turn.sessionName).catch(() => undefined);
-    closed += 1;
+    // Still working — unless the pane it works in is gone, in which case the
+    // agent died before its reply landed and no watcher can ever be joined in.
+    if (deps.hasSession !== undefined) {
+      let alive: boolean | null;
+      try {
+        alive = await deps.hasSession(turn.sessionName);
+      } catch {
+        alive = null;
+      }
+      if (alive === false) {
+        await deps.forget(turn.host, turn.sessionName).catch(() => undefined);
+        settlement.gone += 1;
+        continue;
+      }
+      if (alive === null) {
+        settlement.unreadable += 1;
+        continue;
+      }
+    }
+    settlement.running.push({ turn, session });
   }
-  return closed;
+  return settlement;
 }
 
 /** In-memory storage: tests, and any environment without localStorage. */

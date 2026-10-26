@@ -205,6 +205,15 @@ export type TurnQueueKind = 'steer' | 'follow-up';
 
 export type PiTurnQueueResult = { ok: true } | { ok: false; error: string };
 
+/** A turn that is already running on the host, found in a `pendingTurns` record. */
+export interface PiTurnAdoption {
+  sessionFile: string;
+  /** The assistant-turn count the record says means "answered". */
+  target: number;
+  /** The tmux session Pi is working in; the thing a watcher closes. */
+  sessionName: string;
+}
+
 export interface PiTurnRunner {
   send(sessionFile: string, message: string): Promise<PiTurnSendResult>;
   startNew(projectPath: string, message: string): Promise<PiTurnStartNewResult>;
@@ -236,6 +245,16 @@ export interface PiTurnRunner {
    * `beginSend`, so the caller can never confuse the two.
    */
   queue(sessionFile: string, message: string, kind: TurnQueueKind): Promise<PiTurnQueueResult>;
+  /**
+   * Take over watching a turn this runner never delivered: the app was killed,
+   * or its poll deadline expired while the phone was offline, and the agent
+   * kept working in `sessionName` (the case the `pendingTurns` record exists
+   * for). Nothing is written and no PTY is opened — the reply is awaited
+   * exactly as a delivered turn's is, and the session is torn down when it
+   * lands. `queue` re-attaches to that same server-side session, so a turn
+   * adopted from a record still accepts steering.
+   */
+  adopt(turn: PiTurnAdoption): Promise<PiTurnSendResult>;
   /**
    * The transport this runner's PTY was opened on is gone (a reconnect), but
    * the turn is not: drop the dead handle and keep the run's state, so the
@@ -1011,6 +1030,30 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     return begun.completed;
   }
 
+  /**
+   * Watch a turn that is already running on the host. This is the recovery
+   * path for a watcher that died with the app: the record it left behind names
+   * the file, the count that means answered, and the tmux session, which is
+   * everything the poll and the teardown need — no delivery, no PTY, no
+   * readiness wait.
+   *
+   * The session name is kept as this runner's open pane even though nothing is
+   * attached to it: `queue` and `answerDialog` address the agent by name, so an
+   * adopted run behaves like any other from here on.
+   */
+  function adopt(turn: PiTurnAdoption): Promise<PiTurnSendResult> {
+    if (disposed) return Promise.resolve({ ok: false, error: DISPOSED_ERROR });
+    if (busy) return Promise.resolve({ ok: false, error: BUSY_ERROR });
+    busy = true;
+    openName = turn.sessionName;
+    return startCompletion({
+      sessionFile: turn.sessionFile,
+      target: turn.target,
+      deadline: now() + turnTimeoutMs,
+      sessionName: turn.sessionName,
+    });
+  }
+
   async function startNew(
     projectPath: string,
     message: string,
@@ -1072,5 +1115,5 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     wakeCurrentWait?.();
   }
 
-  return { send, startNew, runCommand, answerDialog, beginSend, beginStartNew, queue, rebind, isBusy, dispose };
+  return { send, startNew, runCommand, answerDialog, beginSend, beginStartNew, queue, adopt, rebind, isBusy, dispose };
 }
