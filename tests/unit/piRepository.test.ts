@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PiRepository, PiRepositoryError, type PiTransport } from '../../src/pi/piRepository';
 import { createPiTransport } from '../../src/pi/piTransport';
+import { readSessionSummaryCommand } from '../../src/pi/piCommands';
 
 const ROOT = '/home/projects/.pi-agent/sessions';
 const DIR = `${ROOT}/--home-kai--`;
@@ -67,7 +68,7 @@ describe('pi repository', () => {
     const a = `${DIR}/2026-10-18T01-52-19-726Z_01a14cb5-b70d-76f4-b739-6721b8b88c02.jsonl`;
     const t = transport({
       [findCmd]: `1792288352.0 ${a}\n`,
-      [`tail -c 65536 -- '${a}' 2>/dev/null`]: [
+      [readSessionSummaryCommand(a, 65536)]: [
         '{"type":"session","version":3,"id":"01a14cb5","cwd":"/home/kai"}',
         '{"type":"message","id":"u","parentId":"s","timestamp":"2026-10-18T01:52:32.023Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1792288352007}}',
         '{"type":"message","id":"a","parentId":"u","timestamp":"2026-10-18T01:52:40.896Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"timestamp":1792288356896}}',
@@ -77,6 +78,25 @@ describe('pi repository', () => {
     expect(await new PiRepository(t, ROOT).listSessions({ path: '/home/kai', name: 'kai' })).toEqual([
       { path: a, id: '01a14cb5-b70d-76f4-b739-6721b8b88c02', name: 'ninfer-check', updatedAtMs: 1792288352000, preview: 'done', turnCount: 2 },
     ]);
+  });
+
+  it('listSessions: names a conversation whose /name entry sits above the tail window', async () => {
+    // `/name` appends where the user ran it, so a conversation that kept
+    // working afterwards carries its name far above the last 64 KiB. The row
+    // must still be titled, not fall back to the file's id.
+    const findCmd = `find '${DIR}' -maxdepth 1 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn`;
+    const a = `${DIR}/2026-10-20T10-00-00-000Z_01a20000-0000-0000-0000-000000000000.jsonl`;
+    const summary = [
+      '{"type":"session_info","id":"n","parentId":"s","timestamp":"2026-10-20T10:00:01.000Z","name":"ninfer-check"}',
+      '{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-10-20T10:05:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"still here"}],"timestamp":1792288360896}}',
+    ].join('\n');
+    const t = transport({
+      [findCmd]: `1792288352.0 ${a}\n`,
+      [readSessionSummaryCommand(a, 65536)]: summary,
+    });
+    const [row] = await new PiRepository(t, ROOT).listSessions({ path: '/home/kai', name: 'kai' });
+    expect(row?.name).toBe('ninfer-check');
+    expect(row?.preview).toBe('still here');
   });
 
   it('readSession: prefers SFTP and falls back to tail on failure', async () => {

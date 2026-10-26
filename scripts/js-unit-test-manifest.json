@@ -1050,7 +1050,7 @@
         "commands: lists session dirs under the root",
         "commands: reads the first header line of any session file in a dir",
         "commands: lists session files newest first with mtime",
-        "commands: tails a session file with a byte cap",
+        "commands: one exec reads a row: the byte-capped tail, then the last session_info",
         "commands: probes the override, PATH and node glob for an executable",
         "commands: asks for the model list in the project, stderr left intact",
         "commands: the built-ins-only retry drops extension discovery",
@@ -1224,6 +1224,7 @@
         "listProjects: returns [] when the root has no dirs",
         "listProjects: throws a typed error when the listing command fails",
         "listSessions: maps find output to session metadata, newest first",
+        "listSessions: names a conversation whose /name entry sits above the tail window",
         "readSession: prefers SFTP and falls back to tail on failure",
         "readSession: reads a file past the old 256 KiB head truncation",
         "readSession: the exec fallback pages by lines, not bytes"
@@ -1861,6 +1862,26 @@
         {
           "suite": "sessions store /model repaint",
           "title": "does not re-read for any other command"
+        },
+        {
+          "suite": "sessions store /name repaint",
+          "title": "titles the chat and both list rows the moment /name settles, then re-reads the file"
+        },
+        {
+          "suite": "sessions store /name repaint",
+          "title": "keeps the typed name when the file has not recorded it yet"
+        },
+        {
+          "suite": "sessions store /name repaint",
+          "title": "leaves a bare /name alone: no text, no title, no re-read"
+        },
+        {
+          "suite": "sessions store /name repaint",
+          "title": "paints nothing for a draft: no session file exists for pi to name"
+        },
+        {
+          "suite": "sessions store /name repaint",
+          "title": "drops the re-read when the chat closes first"
         }
       ]
     },

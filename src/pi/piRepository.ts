@@ -7,7 +7,7 @@ import {
   listSessionFilesCommand,
   readProjectCwdCommand,
   readSessionLinesCommand,
-  readSessionTailCommand,
+  readSessionSummaryCommand,
 } from './piCommands';
 
 export interface PiTransport {
@@ -45,6 +45,13 @@ export class PiRepositoryError extends Error {
   }
 }
 
+/**
+ * How much of a session file's end one list row reads: enough for the last
+ * turns and the preview. The name is NOT limited to this window — it is read
+ * from the same exec by its own `session_info` scan (see
+ * {@link readSessionSummaryCommand}), because `/name` writes where the user ran
+ * it rather than at the end of the file.
+ */
 const SESSION_TAIL_BYTES = 65536;
 /** Bytes per SFTP transfer when reading a whole session file. */
 const SESSION_READ_CHUNK_BYTES = 262144;
@@ -167,7 +174,7 @@ export class PiRepository {
       const path = match[2].trim();
 
       const tail = await this.transport.exec(
-        readSessionTailCommand(path, SESSION_TAIL_BYTES),
+        readSessionSummaryCommand(path, SESSION_TAIL_BYTES),
         EXEC_TIMEOUT_MS,
       );
       const parsed = parsePiSession(tail.stdout);

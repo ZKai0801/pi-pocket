@@ -10,7 +10,7 @@ import {
   piPathProbeCommand,
   quoteShell,
   readProjectCwdCommand,
-  readSessionTailCommand,
+  readSessionSummaryCommand,
 } from '../../src/pi/piCommands';
 
 /** pi needs `node` and these shells read no profile; every invocation has this. */
@@ -40,8 +40,13 @@ describe('pi commands', () => {
     expect(listSessionFilesCommand('/r/--x--'))
       .toBe("find '/r/--x--' -maxdepth 1 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn");
   });
-  it('commands: tails a session file with a byte cap', () => {
-    expect(readSessionTailCommand('/r/a.jsonl', 4096)).toBe("tail -c 4096 -- '/r/a.jsonl' 2>/dev/null");
+  it('commands: one exec reads a row: the byte-capped tail, then the last session_info', () => {
+    // The name is not bounded by the tail: `/name` writes where it was run, and
+    // the pattern is anchored so a message quoting an entry is never picked up.
+    expect(readSessionSummaryCommand('/r/a.jsonl', 4096)).toBe(
+      "tail -c 4096 -- '/r/a.jsonl' 2>/dev/null; echo; "
+      + "grep -a -E '^[{][[:space:]]*\"type\"[[:space:]]*:[[:space:]]*\"session_info\"' -- '/r/a.jsonl' 2>/dev/null | tail -n 1",
+    );
   });
 
   it('commands: probes the override, PATH and node glob for an executable', () => {

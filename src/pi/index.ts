@@ -7,7 +7,7 @@ export {
   listSessionFilesCommand,
   quoteShell,
   readProjectCwdCommand,
-  readSessionTailCommand,
+  readSessionSummaryCommand,
   resolveSessionRootCommand,
 } from './piCommands';
 export type { PiProject, PiSessionMeta, PiTransport } from './piRepository';

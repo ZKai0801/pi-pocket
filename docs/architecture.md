@@ -49,8 +49,10 @@ hide behind a spinner:
 - `src/pi/sessionListCache.ts` — a project's last confirmed 会话 rows on a
   host, in the same localStorage record shape (keyed by host **and** project
   path, 14-day TTL, 16 lists, 200 rows per list). `listSessions` is the
-  slowest read in the app — one `tail` per session file — so entering a
-  project paints these rows and lets the listing replace them; a failed sync
+  slowest read in the app — one exec per session file: its tail, plus the
+  `session_info` scan that names it, because `/name` writes where it was run
+  rather than at the file's end — so entering a project paints these rows and
+  lets the listing replace them; a failed sync
   keeps them (`stale`/`refreshing` on the sessions store). Re-pointing a
   host's Pi directory drops every list for that host, since their paths name
   files under the old root.

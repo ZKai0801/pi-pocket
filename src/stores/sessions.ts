@@ -400,25 +400,34 @@ const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
 /**
- * How many times the re-read after a `/model` command tries, and the pause
- * before the second attempt. Pi appends the `model_change` entry when it
- * handles the command — after the PTY write this store already saw
- * acknowledged — so the first read almost always has it; the second covers a
- * pi that was mid-repaint when the bytes arrived. A switch that still has not
- * shown up is no failure: the divider belongs to the file, and the next
- * natural read (the reply, a pull-to-refresh) brings it.
+ * How many times the re-read after a command whose effect only lands in the
+ * session file tries, and the pause before the second attempt. Pi appends the
+ * entry (`model_change`, `session_info`) when it handles the command — after
+ * the PTY write this store already saw acknowledged — so the first read almost
+ * always has it; the second covers a pi that was mid-repaint when the bytes
+ * arrived. A record that still has not shown up is no failure: it belongs to
+ * the file, and the next natural read (the reply, a pull-to-refresh) brings it.
  */
-const MODEL_SWITCH_REPAINT_READS = 2;
-const MODEL_SWITCH_REPAINT_DELAY_MS = 400;
+const COMMAND_REPAINT_READS = 2;
+const COMMAND_REPAINT_DELAY_MS = 400;
 
 /**
- * The one command whose whole effect is invisible to a chat that reads the
+ * The commands whose whole effect is invisible to a chat that reads the
  * session file turn by turn: `/model provider/model` switches the model and
- * appends a `model_change` entry, never a turn, so the chat paints the switch
- * from the command itself and lets the re-read confirm it against the file.
+ * `/name text` titles the conversation, each appending one entry and no turn.
+ * The chat paints both from the command itself and lets the re-read confirm
+ * them against the file.
  */
 function isModelSwitchCommand(slash: { token: string; argument: string }): boolean {
   return slash.token === '/model' && slash.argument !== '';
+}
+
+/**
+ * `/name text`: the command pi records as a `session_info` entry. A bare
+ * `/name` opens pi's own prompt, so it changes nothing this chat can paint.
+ */
+function isNameCommand(slash: { token: string; argument: string }): boolean {
+  return slash.token === '/name' && slash.argument !== '';
 }
 
 /** The switches a parse records; a parse from before the field has none. */
@@ -1130,8 +1139,8 @@ function rememberSession(
    */
   async function repaintAfterModelSwitch(sessionFile: string, before: number, token: number): Promise<void> {
     const host = hostId();
-    for (let attempt = 0; attempt < MODEL_SWITCH_REPAINT_READS; attempt += 1) {
-      if (attempt > 0) await sleep(MODEL_SWITCH_REPAINT_DELAY_MS);
+    for (let attempt = 0; attempt < COMMAND_REPAINT_READS; attempt += 1) {
+      if (attempt > 0) await sleep(COMMAND_REPAINT_DELAY_MS);
       let session: ParsedPiSession;
       try {
         session = await deps.readSession(sessionFile);
@@ -1147,6 +1156,55 @@ function rememberSession(
       state.error = null;
       rememberSession(host, sessionFile, session);
       if (countModelSwitches(session) > before) return;
+    }
+  }
+
+  /**
+   * Put a name the user just set on every surface that titles this
+   * conversation: the chat header, its row in the project's list, and its row
+   * under 最近打开. Both lists are in memory from a load that predates the
+   * rename and neither reloads while a chat is open, so without this a
+   * conversation the user named kept showing its id — the one thing the name
+   * exists to replace.
+   */
+  function paintSessionName(name: string): void {
+    // A draft has no file and no row: nothing to name yet.
+    const path = state.openPath;
+    if (path === null) return;
+    if (state.open !== null) state.open = { ...state.open, name };
+    state.sessions = state.sessions.map((row) => (row.path === path ? { ...row, name } : row));
+    state.recents = state.recents.map((row) => (row.path === path ? { ...row, name } : row));
+  }
+
+  /**
+   * Re-read the session after a `/name` command, so the name on screen is the
+   * file's own record and the 最近打开 backup carries it into the next cold
+   * start. Only a parse that HAS a name is painted: a read that raced pi's
+   * write would otherwise put the id back under the title the command just
+   * set. Same claim guards as a turn's (D8), and the same two attempts — pi
+   * appends the `session_info` entry as it handles the command.
+   */
+  async function repaintAfterRename(sessionFile: string, token: number): Promise<void> {
+    const host = hostId();
+    for (let attempt = 0; attempt < COMMAND_REPAINT_READS; attempt += 1) {
+      if (attempt > 0) await sleep(COMMAND_REPAINT_DELAY_MS);
+      let session: ParsedPiSession;
+      try {
+        session = await deps.readSession(sessionFile);
+      } catch {
+        // A failed read changes nothing: the name the command painted stands,
+        // and the next natural read records it.
+        return;
+      }
+      if (sendToken !== token || hostId() !== host || state.openPath !== sessionFile) return;
+      if (session.name === null) continue;
+      reconcilePending(session);
+      state.open = session;
+      state.state = 'ready';
+      state.error = null;
+      paintSessionName(session.name);
+      rememberSession(host, sessionFile, session);
+      return;
     }
   }
 
@@ -1229,6 +1287,14 @@ function rememberSession(
         return 'error';
       }
       if (command.hiddenUi) state.sendNotice = t('store.commandTerminalOnly');
+      if (isNameCommand(slash) && !startingNew) {
+        // The name the user typed IS this conversation's title from here, so
+        // the header and the two lists show it without waiting for a read —
+        // the file's own `session_info` entry confirms it below. A draft has
+        // no session file for pi to record a name in: nothing to paint.
+        paintSessionName(slash.argument);
+        void repaintAfterRename(sessionFile as string, token);
+      }
       if (isModelSwitchCommand(slash)) {
         // The argument the user typed IS the model now in effect, so the
         // divider and the header's model name go up with no read in between;

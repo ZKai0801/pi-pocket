@@ -6,6 +6,7 @@ import type {
   PiTurnSendResult,
 } from '../../src/pi/piTurnRunner';
 import type { ParsedPiSession } from '../../src/pi/types';
+import type { RecentSessionEntry } from '../../src/pi/recentSessionsCache';
 import {
   createSessionsStore,
   createTurnRunnerFacade,
@@ -90,7 +91,11 @@ const switched: ParsedPiSession = {
 function storeWithRepaint(
   runner: unknown,
   read: () => ParsedPiSession | Promise<ParsedPiSession>,
-  options: { sleep?: (ms: number) => Promise<void>; hostId?: () => string | null } = {},
+  options: {
+    sleep?: (ms: number) => Promise<void>;
+    hostId?: () => string | null;
+    loadRecentSessions?: () => Promise<RecentSessionEntry[]>;
+  } = {},
 ) {
   const readSession = vi.fn(read);
   const store = createSessionsStore({
@@ -99,6 +104,7 @@ function storeWithRepaint(
     runner,
     sleep: options.sleep,
     hostId: options.hostId,
+    loadRecentSessions: options.loadRecentSessions,
   } as never);
   return { store, readSession };
 }
@@ -1082,5 +1088,129 @@ describe('sessions store /model repaint', () => {
 
     expect(readSession).not.toHaveBeenCalled();
     expect(store.open).toEqual(session);
+  });
+});
+
+describe('sessions store /name repaint', () => {
+  /** The file once pi has appended the `/name` entry. */
+  const named: ParsedPiSession = { ...session, name: 'ninfer-check' };
+
+  const listRow = {
+    path: '/r/a.jsonl',
+    id: 'a',
+    name: null,
+    updatedAtMs: 1,
+    preview: null,
+    turnCount: 1,
+  };
+
+  it('titles the chat and both list rows the moment /name settles, then re-reads the file', async () => {
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => named,
+      {
+        sleep: async () => {},
+        loadRecentSessions: async () => [
+          { ...listRow, projectPath: '/home/kai', host: 'A', schema: 1, openedAtMs: 1 },
+        ],
+      },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+    // The rows on screen were loaded before the rename, and neither list
+    // reloads while the chat is open.
+    store.sessions = [listRow];
+    await store.loadRecents();
+
+    expect(await store.send('/name ninfer-check')).toBe('sent');
+
+    // No read in between: the name the user typed is the title from here, in
+    // the chat and in both lists — not the file's id.
+    expect(store.open?.name).toBe('ninfer-check');
+    expect(store.sessions[0]?.name).toBe('ninfer-check');
+    expect(store.recents[0]?.name).toBe('ninfer-check');
+
+    await settle();
+
+    // The file's own `session_info` entry is the record from here, and the
+    // chat is what that read says it is.
+    expect(readSession).toHaveBeenCalledWith('/r/a.jsonl');
+    expect(store.open).toEqual(named);
+    expect(store.sendError).toBeNull();
+  });
+
+  it('keeps the typed name when the file has not recorded it yet', async () => {
+    // Pi appends the entry as it handles the command, so a read can still see
+    // the file as it was. Painting that parse would put the id back under the
+    // title the command just set.
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+
+    expect(await store.send('/name ninfer-check')).toBe('sent');
+    await settle();
+
+    expect(readSession).toHaveBeenCalledTimes(2);
+    expect(store.open?.name).toBe('ninfer-check');
+    expect(store.open?.turns).toEqual(session.turns);
+    expect(store.sendError).toBeNull();
+  });
+
+  it('leaves a bare /name alone: no text, no title, no re-read', async () => {
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => session,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    readSession.mockClear();
+
+    // A bare `/name` opens pi's own prompt; nothing has been named yet.
+    expect(await store.send('/name')).toBe('sent');
+    await settle();
+
+    expect(readSession).not.toHaveBeenCalled();
+    expect(store.open).toEqual(session);
+  });
+
+  it('paints nothing for a draft: no session file exists for pi to name', async () => {
+    const { store, readSession } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => named,
+      { sleep: async () => {} },
+    );
+    store.newConversation({ path: '/p/a', name: 'a' });
+
+    expect(await store.send('/name ninfer-check')).toBe('sent');
+    await settle();
+
+    expect(readSession).not.toHaveBeenCalled();
+    expect(store.open?.name).toBeNull();
+  });
+
+  it('drops the re-read when the chat closes first', async () => {
+    let deliver!: (value: ParsedPiSession) => void;
+    const pendingRead = new Promise<ParsedPiSession>((resolve) => {
+      deliver = resolve;
+    });
+    let file: ParsedPiSession | Promise<ParsedPiSession> = session;
+    const { store } = storeWithRepaint(
+      runnerWith({ runCommand: vi.fn(async () => ({ ok: true as const, hiddenUi: false })) }),
+      () => file,
+      { sleep: async () => {} },
+    );
+    await store.openSession('/r/a.jsonl');
+    file = pendingRead;
+
+    await store.send('/name ninfer-check');
+    store.closeChat();
+    deliver(named);
+    await settle();
+
+    expect(store.open).toBeNull();
   });
 });

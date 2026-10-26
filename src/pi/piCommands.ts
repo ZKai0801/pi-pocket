@@ -26,8 +26,33 @@ export function listSessionFilesCommand(dir: string): string {
   return `find ${quoteShell(dir)} -maxdepth 1 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn`;
 }
 
-export function readSessionTailCommand(path: string, maxBytes: number): string {
-  return `tail -c ${maxBytes} -- ${quoteShell(path)} 2>/dev/null`;
+/**
+ * One exec that answers everything a list row needs from a session file: the
+ * file's tail (the turns the preview is taken from) followed by its LAST
+ * `session_info` line — the conversation's name.
+ *
+ * The tail alone loses names: `/name` appends its entry where the user ran the
+ * command, so a conversation that kept working afterwards grows past the tail
+ * window and its name falls outside it — which is how a conversation the user
+ * named came to be listed under its bare id. The two parts are printed in one
+ * command and parsed as one text, tail first: the line `grep` found is the
+ * newest `session_info`, so it is the last one the parser sees and therefore
+ * the name it keeps.
+ *
+ * The pattern is anchored at the line's start on purpose. A message whose text
+ * merely quotes an entry (`{"type":"session_info"…}` pasted into a prompt)
+ * must not be picked up as one: a duplicated message line would move the
+ * parse's "last message" and make a finished conversation look unfinished.
+ * `echo` closes the tail's final line — a file need not end with a newline, and
+ * the grep output must never share a line with it.
+ */
+export function readSessionSummaryCommand(path: string, maxBytes: number): string {
+  const quoted = quoteShell(path);
+  return [
+    `tail -c ${maxBytes} -- ${quoted} 2>/dev/null`,
+    'echo',
+    `grep -a -E '^[{][[:space:]]*"type"[[:space:]]*:[[:space:]]*"session_info"' -- ${quoted} 2>/dev/null | tail -n 1`,
+  ].join('; ');
 }
 
 /**
