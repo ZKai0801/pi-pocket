@@ -14,8 +14,12 @@
  * claimed on, and the host is re-read at write time — a run whose host
  * changes under it (or that a newer claim supersedes) drops its writes, so a
  * stale host's list or chat never renders. The wrapper's host-switch watch
- * invalidates the in-flight runs (`hostChanged()`) and clears the state; it
- * also loads the session list when the projects tab selects a project.
+ * invalidates the in-flight runs (`hostChanged()`) and clears the state, but
+ * only when the *host* changes: `activeName` also reports null while a dial is
+ * in flight and when the link is lost, and coming back to the same name is a
+ * reconnect, not a switch — the same host's list, chat and running turns are
+ * still this side's to watch (D44). It also loads the session list when the
+ * projects tab selects a project.
  *
  * Navigation is store-driven (R11.5): the chat shows while `open !== null`,
  * back calls `closeChat()`. The legacy navigation store is not involved.
@@ -1609,6 +1613,21 @@ export function clampTurnPollInterval(requestedMs: number): number {
   return Math.max(MIN_TURN_POLL_INTERVAL_MS, requestedMs);
 }
 
+/**
+ * Whether a new `activeName` is the host *changing* (D8) rather than the same
+ * host's connection coming and going.
+ *
+ * `null` is not a host: the connections store reports it while a dial is in
+ * flight and when the link is lost, and neither is a switch. Reading it as one
+ * is what threw away the previous host's list, chat and `running` set on every
+ * reconnect — the turn itself never stopped: it keeps working in its tmux
+ * session on the host (D44), so the only honest thing to do is keep watching
+ * it through the new transport.
+ */
+export function isHostSwitch(watchedHost: string | null, nextHost: string | null): boolean {
+  return nextHost !== null && nextHost !== watchedHost;
+}
+
 /** Re-read the open session through the live seam, bounded by PiRepository's own exec timeout. */
 function readSessionOnActiveHost(path: string): Promise<ParsedPiSession> {
   return readActiveSession(path);
@@ -2222,13 +2241,19 @@ export const useSessionsStore = defineStore('sessions', () => {
     runnerForDialog: (sessionFile) => turnRunners.runnerFor(sessionFile ?? ''),
   });
 
-  // Host switch (D8): the previous host's list and chat are stale the moment
-  // the connection changes. The runner's PTY belongs to that connection too,
-  // so abandon it before clearing the state — the turn itself keeps running on
-  // the old host's tmux server (D44); only this side stops watching it.
+  // Host switch (D8), not a reconnect. `activeName` also drops to null while a
+  // dial is in flight and when the link is lost, and the same host coming back
+  // is not a switch: clearing on it closed the open chat and dropped `running`
+  // on every reconnect, while the turn kept working in its tmux session on the
+  // host (D44). Only a different host invalidates the list, the chat and the
+  // in-flight runs; the runner's PTYs are rebound by the shell when the new
+  // generation lands, and the runs themselves are only abandoned here.
+  let watchedHost: string | null = connections.activeName;
   watch(
     () => connections.activeName,
-    () => {
+    (next) => {
+      if (!isHostSwitch(watchedHost, next)) return;
+      watchedHost = next;
       disposeTurnRunner();
       store.hostChanged();
       store.sessions = [];

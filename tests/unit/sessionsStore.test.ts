@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PiProject, PiSessionMeta } from '../../src/pi/piRepository';
 import type { ParsedPiSession } from '../../src/pi/types';
-import { clampTurnPollInterval, createSessionsStore } from '../../src/stores/sessions';
+import { clampTurnPollInterval, createSessionsStore, isHostSwitch } from '../../src/stores/sessions';
 
 const session: ParsedPiSession = { version: 3, id: 'a', cwd: '/home/kai', name: null, turns: [{ role: 'user', text: 'hi', timestampMs: 1 }] };
 
@@ -113,6 +113,18 @@ describe('sessions store', () => {
     expect(clampTurnPollInterval(50)).toBe(250);
     expect(clampTurnPollInterval(250)).toBe(250);
     expect(clampTurnPollInterval(1_000)).toBe(1_000);
+  });
+
+  it('treats a dropped or redialled connection as the same host, not a switch', () => {
+    // A switch is what invalidates the list, the chat and `running`.
+    expect(isHostSwitch('A', 'B')).toBe(true);
+    expect(isHostSwitch(null, 'A')).toBe(true);
+    // `null` is what the connections store reports while a dial is in flight
+    // and when the link is lost: the host did not change, its turn did not
+    // stop, and this side must keep watching it.
+    expect(isHostSwitch('A', null)).toBe(false);
+    expect(isHostSwitch('A', 'A')).toBe(false);
+    expect(isHostSwitch(null, null)).toBe(false);
   });
 
   it('host switch: drops a load result that resolves after the host changed', async () => {

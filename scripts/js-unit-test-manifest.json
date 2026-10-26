@@ -1513,6 +1513,7 @@
         "leaves the session running when the poll gives up before the reply",
         "never tears the session down when the connection goes away mid-turn",
         "drops the dead PTY on a reconnect and keeps the run",
+        "keeps watching a run across a reconnect and settles once the reads come back",
         "re-attaches to the same session and delivers the line after a reconnect",
         "re-attaches a draft to its own session, which its adopted file cannot name"
       ]
@@ -2002,6 +2003,7 @@
         "does not start a second load while one is in flight",
         "keeps the previous chat intact when a re-read fails",
         "clamps the turn poll interval to the shared floor",
+        "treats a dropped or redialled connection as the same host, not a switch",
         "host switch: drops a load result that resolves after the host changed",
         "host switch: drops an open-session result that resolves after the host changed",
         "host switch: starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim",

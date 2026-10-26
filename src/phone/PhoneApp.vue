@@ -306,7 +306,13 @@ async function closeController(): Promise<void> {
   controller = null;
   dialedTarget = null;
   snapshot.value = null;
-  sessions.disposeTurnRunner();
+  // A closed channel is not a finished turn: pi keeps working in its tmux
+  // session on the host (D44), and the runner's reads go through the live
+  // seam, not through the dead PTY. Rebinding (not disposing) is what lets a
+  // reconnect resume the same run, so the chat still says Running while it
+  // works and paints the reply when it lands. A real host switch disposes the
+  // runners from the sessions store's own watch.
+  sessions.rebindTurnRunner();
   releaseSeams();
   if (active) await active.close().catch(() => undefined);
 }

@@ -1078,6 +1078,29 @@ describe('createPiTurnRunner', () => {
     h.runner.dispose();
   });
 
+  it('keeps watching a run across a reconnect and settles once the reads come back', async () => {
+    // A phone that loses its link mid-turn: the PTY is gone, the reads throw
+    // until the transport is back, and the reply is waiting on the other side.
+    // Nothing on this side may be disposed — the settlement is the reply's.
+    const offline = new Error('No live SSH connection.');
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), offline, offline, sessionWithAssistantTurns(1)],
+      turnTimeoutMs: 1_000_000,
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'one');
+    expect(begun.ok).toBe(true);
+    h.runner.rebind();
+    expect(h.runner.isBusy()).toBe(true);
+
+    if (begun.ok) await expect(begun.completed).resolves.toMatchObject({ ok: true });
+    expect(h.runner.isBusy()).toBe(false);
+    // The run was answered, so the host's tmux session is closed exactly once.
+    expect(h.closeSession).toHaveBeenCalledTimes(1);
+    expect(h.closeSession).toHaveBeenLastCalledWith(turnSessionName('/r/a.jsonl', '/home/kai/project'));
+  });
+
   it('re-attaches to the same session and delivers the line after a reconnect', async () => {
     const reply = deferred<ParsedPiSession>();
     const h = harness({
