@@ -181,7 +181,7 @@ function toggleConnect(host: SavedHost): void {
 </script>
 
 <template>
-  <section class="connections" :class="{ 'connections--editing': editorOpen }">
+  <section class="connections phone-page" :class="{ 'connections--editing': editorOpen }">
     <ConnectionEditor
       v-if="editorOpen"
       :host="editing"
@@ -196,9 +196,14 @@ function toggleConnect(host: SavedHost): void {
     />
 
     <template v-else>
-      <header class="connections__bar">
+      <header class="connections__bar phone-bar">
         <h1 class="connections__title">{{ t('connections.title') }}</h1>
-        <button type="button" class="connections__add" :aria-label="t('connections.add')" @click="openNew">
+        <button
+          type="button"
+          class="connections__add phone-icon-btn phone-icon-btn--accent"
+          :aria-label="t('connections.add')"
+          @click="openNew"
+        >
           <AppIcon name="plus" />
         </button>
       </header>
@@ -312,13 +317,8 @@ function toggleConnect(host: SavedHost): void {
   overflow-y: auto;
 }
 
-.connections__bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-}
-
+/* The header row and the "+" button wear the shared .phone-bar /
+   .phone-icon-btn recipes from src/styles.css. */
 .connections__title {
   margin: 0;
   color: var(--fg);
@@ -326,20 +326,6 @@ function toggleConnect(host: SavedHost): void {
   font-weight: var(--fw-semibold);
 }
 
-.connections__add {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  color: var(--accent);
-}
-
-.connections__add:focus-visible,
 .connections__host:focus-visible,
 .connections__more:focus-visible,
 .connections__menu-item:focus-visible,

@@ -389,9 +389,14 @@ function goBack(): void {
 </script>
 
 <template>
-  <section class="chat">
+  <section class="chat phone-page">
     <header class="chat__bar">
-      <button type="button" class="chat__back" :aria-label="t('chat.backAria')" @click="goBack">
+      <button
+        type="button"
+        class="chat__back phone-icon-btn"
+        :aria-label="t('chat.backAria')"
+        @click="goBack"
+      >
         <AppIcon name="arrow-left" />
       </button>
       <div class="chat__heading">
@@ -546,7 +551,7 @@ function goBack(): void {
   box-sizing: border-box;
   height: 100%;
   background: var(--chat-bg);
-  padding: var(--sp-3);
+  padding-block: var(--sp-3);
   /* One phone-width ratio for every bubble: a bubble is a share of the
      screen, never a share of its own content (a fenced block scrolls inside
      it). ChatBubble reads this; the fallback there keeps it standalone. */
@@ -560,24 +565,6 @@ function goBack(): void {
   margin-bottom: var(--sp-3);
 }
 
-.chat__back {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--fg);
-}
-
-.chat__back:active {
-  background: var(--state-hover);
-}
-
-.chat__back:focus-visible,
 .chat__retry:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
@@ -809,7 +796,7 @@ function goBack(): void {
 
 .chat__dialog-cancel,
 .chat__dialog-confirm {
-  min-height: 44px;
+  min-height: 48px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   padding: 0 var(--sp-3);

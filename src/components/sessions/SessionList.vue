@@ -112,8 +112,8 @@ async function confirmDelete(): Promise<void> {
 </script>
 
 <template>
-  <section class="sessions">
-    <header class="sessions__bar">
+  <section class="sessions phone-page">
+    <header class="sessions__bar phone-bar">
       <h1 v-if="store.selecting" class="sessions__title" data-testid="sessions-select-title">
         {{ t('sessions.selectTitle', { count: store.selected.length }) }}
       </h1>
@@ -152,7 +152,7 @@ async function confirmDelete(): Promise<void> {
         <button
           v-else
           type="button"
-          class="sessions__add"
+          class="sessions__add phone-icon-btn phone-icon-btn--accent"
           :aria-label="t('sessions.new')"
           :disabled="store.lastProject === null"
           @click="newConversation"
@@ -299,21 +299,14 @@ async function confirmDelete(): Promise<void> {
   gap: var(--sp-3);
   box-sizing: border-box;
   height: 100%;
-  padding: var(--sp-3);
-}
-
-.sessions__bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
+  padding-block: var(--sp-3);
 }
 
 .sessions__actions {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
 }
 
 .sessions__title {
@@ -362,19 +355,6 @@ async function confirmDelete(): Promise<void> {
 .sessions__action-glyph {
   width: 14px;
   height: 14px;
-}
-
-.sessions__add {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  color: var(--accent);
 }
 
 .sessions__add:disabled {

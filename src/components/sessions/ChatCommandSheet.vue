@@ -60,7 +60,7 @@ const empty = computed(() => sections.value.length === 0);
           <h2 class="commands__title">{{ t('commands.title') }}</h2>
           <button
             type="button"
-            class="commands__close"
+            class="commands__close phone-icon-btn"
             :aria-label="t('commands.close')"
             data-testid="chat-command-close"
             @click="emit('close')"
@@ -154,7 +154,7 @@ const empty = computed(() => sections.value.length === 0);
   border-top: 1px solid var(--border);
   border-radius: var(--r-lg) var(--r-lg) 0 0;
   background: var(--surface);
-  padding-bottom: max(24px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
+  padding-bottom: var(--android-shell-safe-bottom);
 }
 
 .commands__bar {
@@ -163,7 +163,7 @@ const empty = computed(() => sections.value.length === 0);
   align-items: center;
   gap: var(--sp-2);
   border-bottom: 1px solid var(--border-soft);
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--phone-page-gutter);
 }
 
 .commands__title {
@@ -177,33 +177,16 @@ const empty = computed(() => sections.value.length === 0);
   white-space: nowrap;
 }
 
-.commands__close {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--fg-secondary);
-}
-
-.commands__close:active {
-  background: var(--state-hover);
-}
-
 .commands__filters {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
   gap: var(--sp-1);
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--phone-page-gutter);
 }
 
 .commands__filter {
-  min-height: 44px;
+  min-height: 48px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface-2);
@@ -228,7 +211,7 @@ const empty = computed(() => sections.value.length === 0);
 .commands__notice,
 .commands__empty {
   margin: 0;
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--phone-page-gutter);
   color: var(--fg-secondary);
   font-size: var(--fs-200);
   line-height: 1.45;
@@ -246,7 +229,7 @@ const empty = computed(() => sections.value.length === 0);
 
 .commands__retry {
   display: inline-flex;
-  min-height: 44px;
+  min-height: 48px;
   align-items: center;
   gap: var(--sp-1);
   border: 0;
@@ -332,7 +315,6 @@ const empty = computed(() => sections.value.length === 0);
   line-height: var(--lh-200);
 }
 
-.commands__close:focus-visible,
 .commands__filter:focus-visible,
 .commands__retry:focus-visible,
 .commands__row:focus-visible {

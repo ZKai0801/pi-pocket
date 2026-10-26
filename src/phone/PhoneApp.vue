@@ -77,6 +77,12 @@ const TURN_PTY_WAIT_MS = 250;
 const TURN_TERM = 'xterm-256color';
 const nativePlatform = Capacitor.getPlatform();
 
+// The safe-area floor tokens (src/styles.css) key off these two attributes on
+// <html>. The .app-shell div carries them for its own subtree; layers
+// teleported to <body> (key vault, command sheets) only see the root element,
+// so the same state is mirrored here once at setup.
+document.documentElement.dataset.nativePlatform = nativePlatform;
+
 const activeTab = ref<PhoneTab>('connections');
 const sessions = useSessionsStore();
 const connections = useConnectionsStore();
@@ -230,6 +236,14 @@ watch(
   },
 );
 const keyboardVisible = ref(false);
+
+// Keyboard visibility must also reach <html>: the teleported sheets read
+// --android-shell-safe-bottom, whose IME override keys off the root element.
+watch(
+  keyboardVisible,
+  (visible) => { document.documentElement.dataset.keyboardVisible = String(visible); },
+  { immediate: true },
+);
 const connectionMessage = ref('');
 
 let controller: ConnectionController | null = null;
@@ -890,7 +904,7 @@ onBeforeUnmount(() => {
 
 .phone-shell__message {
   position: fixed;
-  inset-inline: var(--sp-3);
+  inset-inline: var(--phone-page-gutter);
   top: calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + var(--sp-3));
   z-index: 25;
   margin: 0;
@@ -911,6 +925,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   background: var(--scrim);
-  padding: var(--sp-4);
+  /* The fixed layer spans the raw viewport, so it clears the status and
+     navigation bars itself through the same root tokens the shell uses. */
+  padding: var(--android-shell-safe-top) var(--phone-page-gutter) var(--android-shell-safe-bottom);
 }
 </style>

@@ -119,12 +119,22 @@ specific to the phone:
 
 - safe-area padding, driven by `--safe-area-inset-*`. `App.vue` sets these at
   runtime from Capacitor and the IME insets. The composer stays above the IME.
+  The `--android-shell-safe-*` floors (24px minimum) are declared on `:root`
+  in `src/styles.css`, keyed off `data-native-platform` /
+  `data-keyboard-visible` that PhoneApp mirrors onto `<html>`, so layers
+  teleported to `<body>` (key vault, command sheets) read the same tokens the
+  shell pads with.
 - touch targets. [design-language.md](design-language.md) asks for 48px. The
   workspace navigation buttons are 48px, but most other controls in
   `src/styles.css` are 44px, which is a known gap. Never use the desktop
   `--control-h` (28px) for a tap target.
 - the phone app bar, workspace navigation, host/session flow and screen
   layout. The shell caps its width at 1040px on large screens.
+- the shared page geometry: every screen floats its content at
+  `--phone-page-gutter` (16px, `--sp-4`) via `.phone-page`, header rows are
+  `.phone-bar`, and the one 48px icon-button recipe is `.phone-icon-btn`
+  (ghost) / `.phone-icon-btn--accent` (header "+"). New screens take these
+  classes instead of re-declaring per-screen paddings and button geometry.
 - Android Back handling and the keyboard-visible state.
 
 `tests/unit/designTokens.test.ts` runs in the JS unit gate

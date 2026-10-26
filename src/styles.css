@@ -33,13 +33,20 @@ button { color: inherit; }
   --live-terminal-compact-grid-inline: var(--sp-1);
 }
 
-.app-shell[data-native-platform="android"] {
+/* The shell's safe-area floors live on <html>, not on .app-shell: PhoneApp
+   mirrors the shell's data-native-platform / data-keyboard-visible attributes
+   onto documentElement, so layers teleported to <body> (the key vault and
+   command sheets) read the same tokens the shell pads with instead of
+   re-deriving their own copy of the number. */
+:root {
   --android-shell-safe-top: max(24px, var(--safe-area-inset-top, env(safe-area-inset-top, 0px)));
   --android-shell-safe-bottom: max(24px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
+}
+:root[data-keyboard-visible="true"] { --android-shell-safe-bottom: 0px; }
+.app-shell[data-native-platform="android"] {
   padding-top: var(--android-shell-safe-top);
   padding-bottom: var(--android-shell-safe-bottom);
 }
-.app-shell[data-keyboard-visible="true"] { --android-shell-safe-bottom: 0px; }
 
 .app-bar {
   display: flex;
@@ -100,8 +107,8 @@ button { color: inherit; }
 
 .brand-button, .icon-button {
   display: inline-flex;
-  min-width: 44px;
-  min-height: 44px;
+  min-width: 48px;
+  min-height: 48px;
   align-items: center;
   justify-content: center;
   border: 0;
@@ -114,7 +121,7 @@ button { color: inherit; }
 .brand-mark { width: 24px; height: 24px; color: var(--accent); }
 .wordmark { font-size: var(--fs-500); font-weight: 600; letter-spacing: -0.02em; }
 .app-bar-actions { display: flex; align-items: center; gap: var(--sp-2); }
-.icon-button { width: 44px; border: 1px solid var(--border); color: var(--fg-secondary); }
+.icon-button { width: 48px; border: 1px solid var(--border); color: var(--fg-secondary); }
 .icon-button:active, .icon-button:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
 .icon-button svg { width: 20px; height: 20px; }
 
@@ -141,7 +148,9 @@ button { color: inherit; }
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 14px 24px;
+  /* Inline padding is the shared page gutter (see the phone layout section at
+     the bottom), so this screen lines up with the tabs that use .phone-page. */
+  padding: 16px var(--phone-page-gutter) 24px;
   scrollbar-color: var(--border-strong) var(--bg);
 }
 .home-screen { display: grid; align-content: start; gap: 12px; }
@@ -492,7 +501,7 @@ button { color: inherit; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 
 @media (min-width: 720px) {
-  .screen-content { padding: 22px; }
+  .screen-content { padding: 22px var(--phone-page-gutter); }
   .home-screen { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
   .terminal-panel, .composer-panel { grid-column: 1 / -1; }
   .terminal-viewport { min-height: 240px; }
@@ -851,6 +860,54 @@ button { color: inherit; }
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+}
+
+/* ---- Phone layout: one gutter, one header row, one icon button -----------
+   The phone screens share geometry through these classes instead of each
+   re-declaring it: `--phone-page-gutter` is the x every screen floats its
+   content at — tabs, teleported sheets and dialogs included, so a sheet's
+   back button lands on the same x as the page's own. 16px is --sp-4 on the
+   4px grid, comfortable against a 390px phone edge. The icon-button recipe
+   is the design-language 48px tap floor with the two skins the screens use:
+   the ghost for back/close and the accent variant for a header "+". */
+:root { --phone-page-gutter: var(--sp-4); }
+
+.phone-page { padding-inline: var(--phone-page-gutter); }
+
+.phone-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-height: 48px;
+}
+
+.phone-icon-btn {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.phone-icon-btn:active { background: var(--state-hover); }
+
+.phone-icon-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.phone-icon-btn svg { width: 20px; height: 20px; }
+
+.phone-icon-btn--accent {
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--accent);
 }
 
 /* ---- Phone layer: the WeChat roles the phone UI adds (spec §10) --------

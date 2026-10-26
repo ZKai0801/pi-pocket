@@ -50,7 +50,7 @@ const emit = defineEmits<{
           <h2 class="choices__title">{{ command }}</h2>
           <button
             type="button"
-            class="choices__close"
+            class="choices__close phone-icon-btn"
             :aria-label="t('commands.options.close')"
             data-testid="chat-command-options-close"
             @click="emit('close')"
@@ -128,7 +128,7 @@ const emit = defineEmits<{
   border-top: 1px solid var(--border);
   border-radius: var(--r-lg) var(--r-lg) 0 0;
   background: var(--surface);
-  padding-bottom: max(24px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
+  padding-bottom: var(--android-shell-safe-bottom);
 }
 
 .choices__bar {
@@ -137,7 +137,7 @@ const emit = defineEmits<{
   align-items: center;
   gap: var(--sp-2);
   border-bottom: 1px solid var(--border-soft);
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--phone-page-gutter);
 }
 
 .choices__title {
@@ -151,27 +151,10 @@ const emit = defineEmits<{
   white-space: nowrap;
 }
 
-.choices__close {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--fg-secondary);
-}
-
-.choices__close:active {
-  background: var(--state-hover);
-}
-
 .choices__status,
 .choices__notice {
   margin: 0;
-  padding: var(--sp-3);
+  padding: var(--sp-3) var(--phone-page-gutter);
   color: var(--fg-secondary);
   font-size: var(--fs-200);
   line-height: 1.45;
@@ -194,7 +177,7 @@ const emit = defineEmits<{
   overflow-wrap: anywhere;
   margin: 0;
   border-top: 1px solid var(--border-soft);
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  padding: var(--sp-2) var(--phone-page-gutter) var(--sp-3);
   color: var(--fg-secondary);
   font: var(--fw-regular) var(--fs-100) var(--font-mono);
   line-height: 1.45;
@@ -202,7 +185,7 @@ const emit = defineEmits<{
 
 .choices__retry {
   display: inline-flex;
-  min-height: 44px;
+  min-height: 48px;
   align-items: center;
   gap: var(--sp-1);
   border: 0;
@@ -255,7 +238,6 @@ const emit = defineEmits<{
   line-height: var(--lh-200);
 }
 
-.choices__close:focus-visible,
 .choices__retry:focus-visible,
 .choices__row:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);

@@ -119,11 +119,16 @@ function addCurrentDirectory(): void {
 </script>
 
 <template>
-  <section class="projects">
-    <header class="projects__bar">
+  <section class="projects phone-page">
+    <header class="projects__bar phone-bar">
       <h1 class="projects__title">{{ t('projects.title') }}</h1>
       <div class="projects__actions">
-        <button type="button" class="projects__add" :aria-label="t('projects.add')" @click="void store.openBrowse()">
+        <button
+          type="button"
+          class="projects__add phone-icon-btn phone-icon-btn--accent"
+          :aria-label="t('projects.add')"
+          @click="void store.openBrowse()"
+        >
           <AppIcon name="plus" />
         </button>
       </div>
@@ -238,9 +243,14 @@ function addCurrentDirectory(): void {
 
     <div v-if="store.browse.open" class="projects__sheet-scrim" @click.self="store.closeBrowse()">
       <div class="projects__sheet" role="dialog" :aria-label="t('projects.add')">
-        <header class="projects__sheet-bar">
+        <header class="projects__sheet-bar phone-bar">
           <h2 class="projects__sheet-title">{{ t('projects.sheetTitle') }}</h2>
-          <button type="button" class="projects__sheet-close" :aria-label="t('projects.sheetCloseAria')" @click="store.closeBrowse()">
+          <button
+            type="button"
+            class="projects__sheet-close phone-icon-btn"
+            :aria-label="t('projects.sheetCloseAria')"
+            @click="store.closeBrowse()"
+          >
             <AppIcon name="close" />
           </button>
         </header>
@@ -294,14 +304,7 @@ function addCurrentDirectory(): void {
   gap: var(--sp-3);
   box-sizing: border-box;
   height: 100%;
-  padding: var(--sp-3);
-}
-
-.projects__bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
+  padding-block: var(--sp-3);
 }
 
 .projects__title {
@@ -317,23 +320,8 @@ function addCurrentDirectory(): void {
   gap: var(--sp-2);
 }
 
-.projects__add {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  color: var(--accent);
-}
-
-.projects__add:focus-visible,
 .projects__item:focus-visible,
 .projects__empty-button:focus-visible,
-.projects__sheet-close:focus-visible,
 .projects__sheet-item:focus-visible,
 .projects__sheet-up:focus-visible,
 .projects__sheet-add:focus-visible {
@@ -625,15 +613,8 @@ function addCurrentDirectory(): void {
   border-radius: var(--r-xl) var(--r-xl) 0 0;
   border-top: 1px solid var(--border);
   background: var(--surface);
-  padding: var(--sp-3);
-  padding-bottom: calc(var(--android-shell-safe-bottom, var(--safe-area-inset-bottom, 0px)) + var(--sp-3));
-}
-
-.projects__sheet-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
+  padding: var(--sp-3) var(--phone-page-gutter);
+  padding-bottom: calc(var(--android-shell-safe-bottom) + var(--sp-3));
 }
 
 .projects__sheet-title {
@@ -641,23 +622,6 @@ function addCurrentDirectory(): void {
   color: var(--fg);
   font-size: var(--fs-400);
   font-weight: var(--fw-semibold);
-}
-
-.projects__sheet-close {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--fg-secondary);
-}
-
-.projects__sheet-close:active {
-  background: var(--state-hover);
 }
 
 .projects__sheet-cwd {

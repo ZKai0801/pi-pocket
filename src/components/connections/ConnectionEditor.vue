@@ -211,7 +211,12 @@ function submit(): void {
 <template>
   <section class="connection-editor" :aria-label="t('editor.aria')">
     <header class="connection-editor__bar">
-      <button type="button" class="connection-editor__close" :aria-label="t('editor.cancelAria')" @click="emit('cancel')">
+      <button
+        type="button"
+        class="connection-editor__close phone-icon-btn"
+        :aria-label="t('editor.cancelAria')"
+        @click="emit('cancel')"
+      >
         <AppIcon name="close" />
       </button>
       <h2 class="connection-editor__title">{{ props.host ? t('editor.titleEdit') : t('editor.titleNew') }}</h2>
@@ -391,7 +396,7 @@ function submit(): void {
         <header class="connection-editor__keys-bar" data-testid="ssh-key-sheet-header">
           <button
             type="button"
-            class="connection-editor__keys-back"
+            class="connection-editor__keys-back phone-icon-btn"
             :aria-label="t('editor.backAria')"
             data-testid="close-ssh-key-sheet"
             @click="closeKeySheet"
@@ -432,27 +437,12 @@ function submit(): void {
   gap: var(--sp-2);
 }
 
-.connection-editor__close {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--fg-secondary);
-}
-
-.connection-editor__close:focus-visible,
 .connection-editor__segment:focus-visible,
 .connection-editor__cancel:focus-visible,
 .connection-editor__save:focus-visible,
 .connection-editor__forget:focus-visible,
 .connection-editor__import-key:focus-visible,
 .connection-editor__manage-keys:focus-visible,
-.connection-editor__keys-back:focus-visible,
 .connection-editor__toggle input:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
@@ -649,12 +639,11 @@ function submit(): void {
   flex-direction: column;
   min-height: 0;
   background: var(--bg);
-  /* The shell's own insets (src/styles.css:37-38), repeated here because the
-     sheet is teleported to <body> and so never matches `.app-shell`. The 24px
-     floor is what the shell has on Android; the runtime variable is written on
-     documentElement (PhoneApp's IME listener), so both inherit from <html>. */
-  padding-top: max(24px, var(--safe-area-inset-top, env(safe-area-inset-top, 0px)));
-  padding-bottom: max(24px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
+  /* The shell's safe-area floors, now defined on <html> (src/styles.css), so
+     this teleported layer reads the same tokens the shell itself pads with,
+     including the IME zeroing carried by data-keyboard-visible on the root. */
+  padding-top: var(--android-shell-safe-top);
+  padding-bottom: var(--android-shell-safe-bottom);
 }
 
 .connection-editor__keys-bar {
@@ -664,24 +653,7 @@ function submit(): void {
   gap: var(--sp-2);
   border-bottom: 1px solid var(--border-soft);
   background: var(--surface);
-  padding: var(--sp-1) var(--sp-2);
-}
-
-.connection-editor__keys-back {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--fg-secondary);
-}
-
-.connection-editor__keys-back:active {
-  background: var(--state-hover);
+  padding: var(--sp-1) var(--phone-page-gutter);
 }
 
 .connection-editor__keys-title {
