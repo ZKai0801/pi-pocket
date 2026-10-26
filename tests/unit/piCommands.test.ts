@@ -28,8 +28,9 @@ describe('pi commands', () => {
     expect(quoteShell("a'b")).toBe("'a'\\''b'");
   });
 
-  it('commands: lists session dirs under the root', () => {
-    expect(listSessionDirsCommand('/root')).toBe("ls -1 -- '/root' 2>/dev/null");
+  it('commands: lists session dirs newest conversation first', () => {
+    expect(listSessionDirsCommand('/root'))
+      .toBe("find '/root' -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn");
   });
   it('commands: reads the first header line of any session file in a dir', () => {
     expect(readProjectCwdCommand("/r/--home-kai--"))

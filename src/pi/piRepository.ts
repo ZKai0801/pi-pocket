@@ -116,16 +116,29 @@ export class PiRepository {
       );
     }
 
+    // The listing is newest session file first, so a directory's first
+    // appearance marks its most recent conversation: de-duplicating in order
+    // leaves the projects sorted by the recency of their latest session.
+    const dirs: string[] = [];
+    const seenDirs = new Set<string>();
+    for (const rawLine of listing.stdout.split('\n')) {
+      const match = rawLine.match(/^\S+\s+(.+)$/);
+      if (!match) continue;
+      const file = match[1].trim();
+      const slash = file.lastIndexOf('/');
+      if (slash <= 0) continue;
+      const dir = file.slice(0, slash);
+      if (seenDirs.has(dir)) continue;
+      seenDirs.add(dir);
+      dirs.push(dir);
+    }
+
     const projects: PiProject[] = [];
     const seen = new Set<string>();
-    for (const rawLine of listing.stdout.split('\n')) {
-      const dir = rawLine.trim();
-      if (!SESSION_DIR_PATTERN.test(dir)) continue;
+    for (const dir of dirs) {
+      if (!SESSION_DIR_PATTERN.test(dir.slice(dir.lastIndexOf('/') + 1))) continue;
 
-      const header = await this.transport.exec(
-        readProjectCwdCommand(`${this.sessionRoot}/${dir}`),
-        EXEC_TIMEOUT_MS,
-      );
+      const header = await this.transport.exec(readProjectCwdCommand(dir), EXEC_TIMEOUT_MS);
       const cwd = this.readCwd(header.stdout);
       if (!cwd || seen.has(cwd)) continue;
 
@@ -167,6 +180,11 @@ export class PiRepository {
         turnCount: parsed.turns.length,
       });
     }
+    // The listing's `sort -rn` already answers newest first; sorting on the
+    // parsed timestamps keeps that promise even when the command's order
+    // surprises us — `newestSessionFileOnActiveHost` reads `sessions[0]` as
+    // exactly that.
+    sessions.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
     return sessions;
   }
 

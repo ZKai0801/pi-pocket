@@ -14,8 +14,15 @@ function transport(handlers: Record<string, string>): PiTransport {
 
 describe('pi repository', () => {
   it('listProjects: reads cwd from each dir header and de-duplicates', async () => {
+    const findDirs = `find '${ROOT}' -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn`;
     const t = transport({
-      "ls -1 -- '/home/projects/.pi-agent/sessions' 2>/dev/null": '--home-kai--\n--junk--\n--home-projects-auto_sci--',
+      // Newest session file first, so the project owning it lists first —
+      // the ordering the 项目 tab paints.
+      [findDirs]: [
+        `1799999999.0 ${DIR}/2026-10-24T10-00-00-000Z_kai.jsonl`,
+        `1600000000.0 ${ROOT}/--home-projects-auto_sci--/2026-10-01T00-00-00-000Z_old.jsonl`,
+        `1500000000.0 ${ROOT}/--junk--/2020-01-01T00-00-00-000Z_x.jsonl`,
+      ].join('\n'),
       [`for f in '${DIR}'/*.jsonl; do head -n 1 "$f"; break; done 2>/dev/null`]:
         '{"type":"session","version":3,"id":"s","cwd":"/home/kai"}',
       [`for f in '${ROOT}/--junk--'/*.jsonl; do head -n 1 "$f"; break; done 2>/dev/null`]: '',
@@ -26,6 +33,24 @@ describe('pi repository', () => {
       { path: '/home/kai', name: 'kai' },
       { path: '/home/projects/auto_sci', name: 'auto_sci' },
     ]);
+  });
+
+  it('listProjects: a project whose newest session is fresher lists first regardless of name order', async () => {
+    const findDirs = `find '${ROOT}' -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn`;
+    const zebra = `${ROOT}/--home-zebra--`;
+    const alpha = `${ROOT}/--home-alpha--`;
+    const t = transport({
+      [findDirs]: [
+        `1799999999.0 ${zebra}/new.jsonl`,
+        `1600000000.0 ${alpha}/old.jsonl`,
+      ].join('\n'),
+      [`for f in '${zebra}'/*.jsonl; do head -n 1 "$f"; break; done 2>/dev/null`]:
+        '{"type":"session","version":3,"id":"s","cwd":"/home/zebra"}',
+      [`for f in '${alpha}'/*.jsonl; do head -n 1 "$f"; break; done 2>/dev/null`]:
+        '{"type":"session","version":3,"id":"s","cwd":"/home/alpha"}',
+    });
+    const projects = await new PiRepository(t, ROOT).listProjects();
+    expect(projects.map((project) => project.path)).toEqual(['/home/zebra', '/home/alpha']);
   });
 
   it('listProjects: returns [] when the root has no dirs', async () => {

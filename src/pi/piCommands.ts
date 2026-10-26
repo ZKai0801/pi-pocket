@@ -7,8 +7,15 @@ export function encodePiCwd(cwd: string): string {
   return `--${stripped.replace(/[/\\:]/g, '-')}--`;
 }
 
+/**
+ * The project directories under the session root, newest conversation first:
+ * every `*.jsonl` exactly two levels below the root prints as `%T@ %p`, sorted
+ * newest first, so a directory's first appearance sits at its most recently
+ * written session. `ls -1` listed them alphabetically — the project the user
+ * is working in right now sat wherever the alphabet put it.
+ */
 export function listSessionDirsCommand(root: string): string {
-  return `ls -1 -- ${quoteShell(root)} 2>/dev/null`;
+  return `find ${quoteShell(root)} -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn`;
 }
 
 export function readProjectCwdCommand(dir: string): string {
