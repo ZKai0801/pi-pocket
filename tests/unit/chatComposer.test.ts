@@ -11,7 +11,14 @@ type SendResult = 'sent' | 'busy' | 'error';
 interface Mounted {
   app: App;
   root: HTMLElement;
-  state: { sending: boolean; error: string | null; notice: string | null; sheetOpen: boolean; running: boolean };
+  state: {
+    sending: boolean;
+    error: string | null;
+    notice: string | null;
+    sheetOpen: boolean;
+    running: boolean;
+    pendingCount: number;
+  };
   requests: () => number;
   optionRequests: () => number;
   input(): HTMLTextAreaElement;
@@ -53,6 +60,7 @@ function mountComposer(
     notice: options.notice ?? null,
     running: options.running ?? false,
     sheetOpen: false,
+    pendingCount: 0,
   });
   let requests = 0;
   let optionRequests = 0;
@@ -67,6 +75,7 @@ function mountComposer(
       commandsState: options.commandsState ?? 'ready',
       commandOptions: options.commandOptions ?? null,
       sheetOpen: state.sheetOpen,
+      pendingCount: state.pendingCount,
       'onUpdate:sheetOpen': (open: boolean) => { state.sheetOpen = open; },
       onRequestCommands: () => { requests += 1; },
       onRequestOptions: (command: { command: string }) => {
@@ -150,6 +159,38 @@ describe('chat composer', () => {
     composer.button()?.click();
     await settle();
 
+    expect(composer.input().value).toBe('hello');
+  });
+
+  it('lets go of the draft the moment the transcript takes the line', async () => {
+    let release: (result: SendResult) => void = () => undefined;
+    const composer = mountComposer(
+      vi.fn(() => new Promise<SendResult>((done) => { release = done; })),
+    );
+    await type(composer.input(), 'hello');
+
+    composer.button()?.click();
+    await nextTick();
+
+    // The delivery is still in flight and the bubble is already on screen, so
+    // the box drops the words: the reader must not see them twice.
+    composer.state.pendingCount = 1;
+    await nextTick();
+    expect(composer.input().value).toBe('');
+
+    release('sent');
+    await settle();
+  });
+
+  it('keeps the draft when no bubble took the line', async () => {
+    const composer = mountComposer(vi.fn(async () => 'error' as const));
+    await type(composer.input(), 'hello');
+
+    composer.button()?.click();
+    await settle();
+
+    // Nothing went on screen, so the words stay where they were typed.
+    expect(composer.state.pendingCount).toBe(0);
     expect(composer.input().value).toBe('hello');
   });
 

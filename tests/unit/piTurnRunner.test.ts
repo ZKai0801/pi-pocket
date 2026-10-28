@@ -621,6 +621,29 @@ describe('createPiTurnRunner', () => {
     expect(h.runner.isBusy()).toBe(false);
   });
 
+  it('beginSend reports where the delivery spent its time', async () => {
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+    });
+
+    const begun = await h.runner.beginSend('/r/a.jsonl', 'hi');
+    if (!begun.ok) throw new Error('the delivery should have started');
+    reply.resolve(sessionWithAssistantTurns(1));
+    await begun.completed;
+
+    // One number per stage of the delay the bubble's spinner covers: the only
+    // way to tell which of them is worth shortening.
+    expect(begun.timings).toMatchObject({
+      openMs: expect.any(Number),
+      readyMs: expect.any(Number),
+      baselineMs: expect.any(Number),
+      deliverMs: expect.any(Number),
+      totalMs: expect.any(Number),
+    });
+  });
+
   it('beginSend reports a delivery failure without leaving the runner busy', async () => {
     const h = harness({
       autoReady: true,

@@ -101,6 +101,12 @@ const props = withDefaults(defineProps<{
    * a session.
    */
   attachmentScope?: string;
+  /**
+   * How many of the reader's own lines the transcript is holding as ghosts —
+   * lines the session file does not carry yet. A new one is the moment the
+   * draft's words move out of this box and into their bubble.
+   */
+  pendingCount?: number;
 }>(), {
   commands: () => [],
   commandsState: 'idle',
@@ -109,6 +115,7 @@ const props = withDefaults(defineProps<{
   commandOptions: null,
   sheetOpen: false,
   attachmentScope: '',
+  pendingCount: 0,
 });
 
 const emit = defineEmits<{
@@ -157,6 +164,28 @@ const pendingState = computed(() => props.commandOptions?.state ?? 'idle');
 watch(() => props.sheetOpen, (open) => {
   if (!open) pending.value = null;
 });
+
+/**
+ * The draft belongs to the bubble from the moment the line goes on screen —
+ * leaving the same words in the box would show the reader their own message
+ * twice while it is still being delivered, and keep it there if the delivery
+ * fails (the bubble's retry mark is what offers it back). Only a line the
+ * transcript took clears the box: a send that was refused outright (`busy`,
+ * or an error before the line existed) has nowhere to go, so it stays typed.
+ */
+watch(() => props.pendingCount, (count, before) => {
+  if (count <= before) return;
+  text.value = '';
+  staged.value = [];
+});
+
+/** Put a failed line back in the box, ready to be edited and sent again. */
+function setText(value: string): void {
+  text.value = value;
+  input.value?.focus();
+}
+
+defineExpose({ setText });
 
 async function submit(intent?: 'steer' | 'follow-up'): Promise<void> {
   if (!canSend.value) return;

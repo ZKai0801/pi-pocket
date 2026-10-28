@@ -431,6 +431,41 @@ async function refresh(): Promise<void> {
 function goBack(): void {
   store.closeChat();
 }
+
+/* ------------------------------------------------------------ resend */
+
+/**
+ * A line Pi never got keeps its bubble with a retry mark. Tapping the mark
+ * asks before anything moves: the words the reader is about to edit back are
+ * the ones that failed, and the bubble goes when they do — the transcript and
+ * the composer must never hold the same line at once.
+ */
+const composer = ref<InstanceType<typeof ChatComposer> | null>(null);
+const resendId = ref<string | null>(null);
+
+const resendText = computed(() => {
+  const id = resendId.value;
+  if (id === null) return null;
+  return store.pending.find((item) => item.id === id)?.text ?? null;
+});
+
+function askResend(id: string): void {
+  resendId.value = id;
+}
+
+function cancelResend(): void {
+  resendId.value = null;
+}
+
+function confirmResend(): void {
+  const id = resendId.value;
+  if (id === null) return;
+  const text = store.retryPending(id);
+  resendId.value = null;
+  // The bubble is gone either way: a line that has already been taken back
+  // (or has since landed in the file) leaves nothing to put in the composer.
+  if (text !== null) composer.value?.setText(text);
+}
 </script>
 
 <template>
@@ -528,12 +563,51 @@ function goBack(): void {
           >
             {{ t('chat.modelSwitchedTo', { to: note.to }) }}
           </p>
-          <!-- Lines typed into the running turn: pi writes them to the file only
-               when it delivers them, so they wait here as ghosts until then. -->
-          <div v-for="item in store.pending" :key="item.id" class="chat__pending">
-            <ChatBubble role="user" :text="item.text" />
+          <!-- The reader's own lines that the file does not carry yet: a
+               message on its way to Pi, or one typed into the run already in
+               flight. Each carries what the delivery is doing — a spinner
+               while the line is still travelling, a retry mark once it has
+               failed, and nothing at all once Pi has it. The mark leads the
+               row, so it sits to the left of the bubble and the bubble keeps
+               the right edge every other self bubble has. -->
+          <div
+            v-for="item in store.pending"
+            :key="item.id"
+            class="chat__pending"
+            :class="{
+              'chat__pending--sending': item.status === 'sending',
+              'chat__pending--failed': item.status === 'failed',
+            }"
+            data-testid="chat-pending"
+          >
+            <div class="chat__pending-line">
+              <!-- Still travelling: the only thing on screen that says the
+                   line has not reached Pi yet. -->
+              <span
+                v-if="item.status === 'sending'"
+                class="chat__spinner"
+                role="status"
+                :aria-label="t('chat.sending')"
+                data-testid="chat-pending-spinner"
+              />
+              <!-- Never arrived: the mark is the way back to the words. -->
+              <button
+                v-else-if="item.status === 'failed'"
+                type="button"
+                class="chat__failed-mark"
+                :aria-label="t('chat.sendFailed')"
+                data-testid="chat-pending-failed"
+                @click="askResend(item.id)"
+              >
+                !
+              </button>
+              <ChatBubble role="user" :text="item.text" />
+            </div>
             <p v-if="item.kind === 'follow-up'" class="chat__queued" data-testid="chat-queued">
               {{ t('chat.queued') }}
+            </p>
+            <p v-else-if="item.kind === 'steer'" class="chat__queued" data-testid="chat-steering">
+              {{ t('chat.steering') }}
             </p>
           </div>
         </div>
@@ -586,9 +660,42 @@ function goBack(): void {
           </button>
         </div>
       </section>
+      <!-- A line Pi never got, asked about before it moves: confirm hands the
+           words back to the composer and takes the bubble away with them. -->
+      <section
+        v-if="resendText !== null"
+        class="chat__resend"
+        data-testid="chat-resend"
+        role="alertdialog"
+        :aria-label="t('chat.resendTitle')"
+      >
+        <h3 class="chat__dialog-title">{{ t('chat.resendTitle') }}</h3>
+        <p class="chat__dialog-line">{{ t('chat.resendBody') }}</p>
+        <p class="chat__resend-text">{{ resendText }}</p>
+        <div class="chat__dialog-actions">
+          <button
+            type="button"
+            class="chat__dialog-cancel"
+            data-testid="chat-resend-cancel"
+            @click="cancelResend"
+          >
+            {{ t('chat.resendCancel') }}
+          </button>
+          <button
+            type="button"
+            class="chat__dialog-confirm"
+            data-testid="chat-resend-confirm"
+            @click="confirmResend"
+          >
+            {{ t('chat.resendConfirm') }}
+          </button>
+        </div>
+      </section>
       <ChatComposer
+        ref="composer"
         :send="store.send"
         :sending="store.sending"
+        :pending-count="store.pending.length"
         :error="store.sendError"
         :notice="store.sendNotice"
         :running="store.openRunning"
@@ -912,13 +1019,109 @@ function goBack(): void {
 }
 
 /* Not yet on the server: the bubble is the user's, but dimmed, so a queued
-   follow-up never reads as something pi has already seen. */
+   follow-up never reads as something pi has already seen. Only a line still
+   travelling is dimmed — one Pi has, or one that failed, is the reader's to
+   read at full strength. */
 .chat__pending {
   display: flex;
   align-items: flex-end;
   flex-direction: column;
   gap: var(--sp-1);
+}
+
+.chat__pending--sending {
   opacity: 0.72;
+}
+
+/* The mark and the bubble share a row: the mark on the left, centred on the
+   bubble, the bubble on the right edge every other self bubble sits on.
+   The row takes the full column width on purpose. A shrink-to-fit row would
+   make the bubble's own `max-width: 78%` resolve against the row instead of
+   against the column, so the pending bubble would be a different size from —
+   and no longer flush with — the bubbles already in the transcript. */
+.chat__pending-line {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+}
+
+/* The bubble's own `align-self: flex-end` means "bottom" in a row, not
+   "right": the row already puts it on the right, so it only has to stay
+   level with the mark's centre. */
+.chat__pending-line .bubble {
+  align-self: center;
+}
+
+/* The line is on its way: a ring that turns until Pi has the bytes. It sits
+   at the vertical centre of the bubble, so `align-items: center` on the row
+   does the placing — no bottom margin to shift it off centre. */
+.chat__spinner {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--fg-muted);
+  border-radius: 50%;
+  animation: chat-spin 0.8s linear infinite;
+}
+
+@keyframes chat-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+/* It never arrived: the mark is a button, because it is the way back to the
+   words — a tap asks, and confirming puts them in the composer. */
+.chat__failed-mark {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* A thumb has to hit it: the ring is drawn small, the target is not. */
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--error);
+  border-radius: 50%;
+  background: var(--error-soft);
+  color: var(--error);
+  font: var(--fw-semibold) var(--fs-300) var(--font-ui);
+}
+
+.chat__failed-mark:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.chat__resend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0 0 var(--sp-2);
+  border: 1px solid var(--error);
+  border-radius: var(--r-md);
+  background: var(--error-soft);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+/* The words themselves, so the reader can tell which line the question is
+   about before deciding. */
+.chat__resend-text {
+  margin: 0;
+  max-height: 4.8em;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: var(--fs-200);
+  overflow-wrap: anywhere;
 }
 
 .chat__queued {

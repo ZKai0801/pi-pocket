@@ -354,7 +354,9 @@
       "tests": [
         "disables send while a turn is in flight but keeps the text editable",
         "clears the text only when the send reports sent",
+        "lets go of the draft the moment the transcript takes the line",
         "retains the text when the send reports an error",
+        "keeps the draft when no bubble took the line",
         "retains the text when the send reports busy",
         "renders the inline error as an alert",
         "keeps “+” beside the draft and shows 发送 only once there is something to send",
@@ -1503,6 +1505,7 @@
         "refuses a command while a turn is in flight",
         "reports a command delivery failure without leaving the runner busy",
         "beginSend resolves once the line is delivered and keeps the reply pending in completed",
+        "beginSend reports where the delivery spent its time",
         "beginSend reports a delivery failure without leaving the runner busy",
         "beginStartNew returns the adopted file before the reply and completes later",
         "beginStartNew times out waiting for the adopted file and leaves the runner idle",
@@ -1896,6 +1899,9 @@
       "tests": [
         "reports sent once the line is delivered, with the user turn on screen and the chat running",
         "keeps sending true only while the line is being written",
+        "puts the line on screen before the delivery has even started",
+        "hands a line that never arrived back to the reader and takes its bubble away",
+        "refuses to take back a line that is still being delivered",
         "steers the turn that is already running instead of refusing the message",
         "queues a follow-up behind the running turn",
         "drops the ghost once the session file has the queued line",
@@ -2299,6 +2305,16 @@
       "suite": "Android native PTY channel budget",
       "tests": [
         "states the native per-connection channel budget to core, so the controller keeps exec headroom"
+      ]
+    },
+    "tests/unit/chatPendingBubbles.test.ts": {
+      "suite": "chat pending bubbles",
+      "tests": [
+        "spins next to a line that is still travelling",
+        "stops spinning once Pi has the line, and shows nothing at all then",
+        "marks a line that never arrived, and asks before handing it back",
+        "puts the failed line in the composer and leaves the words alone when cancelled",
+        "says nothing about a line the store has already taken back"
       ]
     }
   }

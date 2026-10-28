@@ -125,9 +125,19 @@ describe('sessions store send', () => {
     await expect(store.send('next please')).resolves.toBe('sent');
 
     // Delivered, not answered: the message is visible and the turn is running.
+    // It went on screen the moment it was typed — the file does not have it
+    // yet, so the chat is holding it as a ghost of its own.
     expect(runner.beginSend).toHaveBeenCalledWith('/r/a.jsonl', 'next please');
-    expect(store.open?.turns).toHaveLength(2);
-    expect(store.open?.turns[1]).toMatchObject({ role: 'user', text: 'next please' });
+    expect(store.open?.turns).toHaveLength(1);
+    expect(store.pending).toEqual([
+      {
+        id: expect.any(String),
+        text: 'next please',
+        kind: 'send',
+        afterUserTurns: 1,
+        status: 'sent',
+      },
+    ]);
     expect(store.running).toEqual(['/r/a.jsonl']);
     expect(store.openRunning).toBe(true);
     expect(store.sending).toBe(false);
@@ -137,6 +147,7 @@ describe('sessions store send', () => {
     await flush();
 
     expect(store.open).toEqual(replied);
+    expect(store.pending).toEqual([]);
     expect(store.running).toEqual([]);
     expect(store.openRunning).toBe(false);
   });
@@ -155,6 +166,65 @@ describe('sessions store send', () => {
     expect(store.sending).toBe(false);
   });
 
+  it('puts the line on screen before the delivery has even started', async () => {
+    const turn = deferred<PiTurnBegun>();
+    const runner = runnerWith({ beginSend: vi.fn(() => turn.promise) });
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+
+    const sending = store.send('hello');
+
+    // Not one byte has been written yet, and the bubble is already there: a
+    // delivery is seconds of SSH work, and a transcript that waited for it
+    // read as a message the app had lost.
+    expect(store.pending).toEqual([
+      { id: expect.any(String), text: 'hello', kind: 'send', afterUserTurns: 1, status: 'sending' },
+    ]);
+
+    turn.resolve(begun('/r/a.jsonl', deferred<PiTurnSendResult>().promise));
+    await expect(sending).resolves.toBe('sent');
+
+    // Pi has the line now: the spinner's job is done, the bubble waits for the
+    // file's own copy of it.
+    expect(store.pending[0]).toMatchObject({ status: 'sent' });
+  });
+
+  it('hands a line that never arrived back to the reader and takes its bubble away', async () => {
+    const runner = runnerWith({
+      beginSend: vi.fn(async () => ({
+        ok: false as const,
+        error: 'The turn timed out before Pi wrote a new assistant reply.',
+      })),
+    });
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+    await store.send('hello');
+
+    const id = store.pending[0]?.id ?? '';
+    expect(store.pending[0]).toMatchObject({ status: 'failed' });
+    expect(store.retryPending(id)).toBe('hello');
+    // The same words must never be in the transcript and in the draft at once.
+    expect(store.pending).toEqual([]);
+    // And a line already taken back is nobody's to take twice.
+    expect(store.retryPending(id)).toBeNull();
+  });
+
+  it('refuses to take back a line that is still being delivered', async () => {
+    const turn = deferred<PiTurnBegun>();
+    const runner = runnerWith({ beginSend: vi.fn(() => turn.promise) });
+    const store = storeWith(runner);
+    await store.openSession('/r/a.jsonl');
+
+    const sending = store.send('hello');
+    const id = store.pending[0]?.id ?? '';
+    // Still in flight: taking it back would send it a second time.
+    expect(store.retryPending(id)).toBeNull();
+    expect(store.pending).toHaveLength(1);
+
+    turn.resolve(begun('/r/a.jsonl', deferred<PiTurnSendResult>().promise));
+    await sending;
+  });
+
   it('steers the turn that is already running instead of refusing the message', async () => {
     const reply = deferred<PiTurnSendResult>();
     const runner = runnerWith({ beginSend: vi.fn(async (path: string) => begun(path, reply.promise)) });
@@ -167,10 +237,19 @@ describe('sessions store send', () => {
     // No second turn and no second PTY: the line joins the run in flight.
     expect(runner.beginSend).toHaveBeenCalledTimes(1);
     expect(runner.queue).toHaveBeenCalledWith('/r/a.jsonl', 'use ripgrep instead', 'steer');
-    // The chat still says running, and the line is a ghost until Pi writes it.
+    // The chat still says running, and both lines are ghosts until Pi writes
+    // them: the one that opened the turn and the one typed into it. The second
+    // waits behind the first, so its baseline counts it.
     expect(store.running).toEqual(['/r/a.jsonl']);
     expect(store.pending).toEqual([
-      { id: expect.any(String), text: 'use ripgrep instead', kind: 'steer', afterUserTurns: 2 },
+      { id: expect.any(String), text: 'one', kind: 'send', afterUserTurns: 1, status: 'sent' },
+      {
+        id: expect.any(String),
+        text: 'use ripgrep instead',
+        kind: 'steer',
+        afterUserTurns: 2,
+        status: 'sent',
+      },
     ]);
     expect(store.sending).toBe(false);
     expect(store.sendError).toBeNull();
@@ -186,7 +265,8 @@ describe('sessions store send', () => {
     await expect(store.send('then run the tests', 'follow-up')).resolves.toBe('sent');
 
     expect(runner.queue).toHaveBeenCalledWith('/r/a.jsonl', 'then run the tests', 'follow-up');
-    expect(store.pending[0]).toMatchObject({ kind: 'follow-up' });
+    expect(store.pending).toHaveLength(2);
+    expect(store.pending[1]).toMatchObject({ kind: 'follow-up', status: 'sent' });
     expect(store.running).toEqual(['/r/a.jsonl']);
   });
 
@@ -202,7 +282,7 @@ describe('sessions store send', () => {
     await store.openSession('/r/a.jsonl');
     await store.send('one');
     await store.send('two', 'follow-up');
-    expect(store.pending).toHaveLength(1);
+    expect(store.pending).toHaveLength(2);
 
     // The file now holds both delivered lines and the steered one: the ghost
     // has served its purpose.
@@ -234,7 +314,10 @@ describe('sessions store send', () => {
     await expect(store.send('too late')).resolves.toBe('error');
 
     expect(store.sendError).toBe('这一轮已经结束了，这条消息没有发出去。');
-    expect(store.pending).toEqual([]);
+    // The line Pi never got stays on screen to be dealt with: its bubble
+    // carries the retry mark, and only the reader takes it back.
+    expect(store.pending).toHaveLength(2);
+    expect(store.pending[1]).toMatchObject({ text: 'too late', status: 'failed' });
     expect(store.sending).toBe(false);
   });
 
@@ -259,14 +342,18 @@ describe('sessions store send', () => {
     await flush();
 
     // A finished in the background: its flag clears, and the open chat (B) is
-    // never repainted with A's transcript.
+    // never repainted with A's transcript. B's own line is still a ghost there
+    // — the reply that will retire it has not landed.
     expect(store.running).toEqual(['/r/b.jsonl']);
     expect(store.open?.id).toBe('a');
-    expect(store.open?.turns).toHaveLength(2);
+    expect(store.pending).toEqual([
+      { id: expect.any(String), text: 'to b', kind: 'send', afterUserTurns: 1, status: 'sent' },
+    ]);
 
     replyB.resolve({ ok: true, session: replied });
     await flush();
     expect(store.running).toEqual([]);
+    expect(store.pending).toEqual([]);
   });
 
   it('keeps a turn running after its chat closes and updates the list row when the reply lands', async () => {
@@ -307,6 +394,11 @@ describe('sessions store send', () => {
     expect(store.sendError).toBe('等待回复超时，请重试。');
     expect(store.running).toEqual([]);
     expect(store.open?.turns).toHaveLength(1);
+    // The line never reached Pi, so it is not quietly dropped: the bubble
+    // stays with its retry mark until the reader decides.
+    expect(store.pending).toEqual([
+      { id: expect.any(String), text: 'hi', kind: 'send', afterUserTurns: 1, status: 'failed' },
+    ]);
     expect(store.sending).toBe(false);
   });
 
@@ -322,7 +414,9 @@ describe('sessions store send', () => {
     expect(store.running).toEqual([]);
     expect(store.sendError).toBe('等待回复超时，请重试。');
     // The user's line is still there: the turn was delivered, the reply is not.
-    expect(store.open?.turns).toHaveLength(2);
+    expect(store.pending).toEqual([
+      { id: expect.any(String), text: 'hi', kind: 'send', afterUserTurns: 1, status: 'sent' },
+    ]);
   });
 
   it('refuses to send with no open session', async () => {
@@ -357,9 +451,10 @@ describe('sessions store send', () => {
     reply.resolve({ ok: true, session: replied });
     await flush();
 
-    // The delivered line stays, the old host's reply never paints.
-    expect(store.open?.turns).toHaveLength(2);
-    expect(store.open?.turns[1]).toMatchObject({ role: 'user', text: 'hi' });
+    // The old host's reply never paints; its ghosts went with the host, so the
+    // line is no longer this screen's to hold.
+    expect(store.open?.turns).toHaveLength(1);
+    expect(store.pending).toEqual([]);
     expect(store.running).toEqual([]);
     expect(store.sendError).toBeNull();
     expect(store.sending).toBe(false);
@@ -377,8 +472,13 @@ describe('sessions store send', () => {
     reply.resolve({ ok: true, session: replied });
     await flush();
 
-    expect(store.open?.turns).toHaveLength(2);
-    expect(store.open?.turns[1]?.role).toBe('user');
+    // No `hostChanged` came, so the ghost is still the chat's to show: the line
+    // was delivered before the host moved, and nothing here can prove the file
+    // has it — so it stays, spinner already stopped, until a read settles it.
+    expect(store.open?.turns).toHaveLength(1);
+    expect(store.pending).toEqual([
+      { id: expect.any(String), text: 'hi', kind: 'send', afterUserTurns: 1, status: 'sent' },
+    ]);
     expect(store.running).toEqual([]);
     expect(store.sendError).toBeNull();
   });

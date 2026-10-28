@@ -187,8 +187,35 @@ export type PiCommandRunResult =
  * failure here means the line never got there, and nothing is pending.
  */
 export type PiTurnBegun =
-  | { ok: true; sessionFile: string; completed: Promise<PiTurnSendResult> }
+  | {
+      ok: true;
+      sessionFile: string;
+      completed: Promise<PiTurnSendResult>;
+      /** How long the delivery's stages took; absent from hand-written stubs. */
+      timings?: PiSendTimings;
+    }
   | { ok: false; error: string };
+
+/**
+ * What a delivery spent its time on, in milliseconds: the four things that sit
+ * between the tap and the line leaving for Pi. It is here because the chat
+ * cannot paint around them — it paints first and waits — and because the only
+ * way to know which of them is worth shortening is to measure them.
+ */
+export interface PiSendTimings {
+  /** Opening the pane (or re-attaching to the one Pi already runs in). */
+  openMs: number;
+  /** Waiting for Pi's editor to be able to take a line. */
+  readyMs: number;
+  /** Reading the session file for the turn's baseline — the one big read. */
+  baselineMs: number;
+  /** Writing the line itself. */
+  deliverMs: number;
+  /** Adopting the file Pi created for a brand-new conversation. */
+  adoptMs: number;
+  /** All of the above: the delay the bubble's spinner is covering. */
+  totalMs: number;
+}
 
 /**
  * Where a message lands when a run is already in flight, in pi's own words:
@@ -702,6 +729,41 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     }
   }
 
+  /** Zeroed stage timings, filled in as the delivery moves through them. */
+  function emptyTimings(): PiSendTimings {
+    return { openMs: 0, readyMs: 0, baselineMs: 0, deliverMs: 0, adoptMs: 0, totalMs: 0 };
+  }
+
+  /**
+   * Time one stage of a delivery. The number is all this adds: the stages are
+   * the delivery itself, and none of them moves to make it measurable.
+   */
+  async function measure<T>(
+    timings: PiSendTimings,
+    stage: 'openMs' | 'readyMs' | 'baselineMs' | 'deliverMs' | 'adoptMs',
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = now();
+    try {
+      return await run();
+    } finally {
+      timings[stage] = now() - startedAt;
+    }
+  }
+
+  /**
+   * One line per delivery, saying which stage the spinner was covering. Same
+   * shape as the launch-reconnect log: a tag that greps, numbers only — never
+   * the message, the file or what came back.
+   */
+  function logSendTimings(kind: 'send' | 'start-new', timings: PiSendTimings): void {
+    console.debug(
+      `[pi turn] ${kind} open=${timings.openMs} ready=${timings.readyMs}`
+      + ` baseline=${timings.baselineMs} deliver=${timings.deliverMs}`
+      + ` adopt=${timings.adoptMs} total=${timings.totalMs}`,
+    );
+  }
+
   async function beginSend(sessionFile: string, message: string): Promise<PiTurnBegun> {
     if (disposed) return { ok: false, error: DISPOSED_ERROR };
     if (busy) return { ok: false, error: BUSY_ERROR };
@@ -711,24 +773,26 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     // Set once the reply poll owns the claim; until then this function still
     // has to clean up after itself.
     let handedOff = false;
+    const timings = emptyTimings();
+    const startedAt = now();
     try {
       const deadline = now() + turnTimeoutMs;
       dropTurnIfSuperseded();
-      const opened = await ensureOpen(sessionFile, deps.projectPath);
+      const opened = await measure(timings, 'openMs', () => ensureOpen(sessionFile, deps.projectPath));
       if (!opened.ok) return opened;
       const state = open;
       if (!state) return { ok: false, error: DISPOSED_ERROR };
 
       subscribe(state);
-      const ready = await waitForReady(state);
+      const ready = await measure(timings, 'readyMs', () => waitForReady(state));
       if (!ready.ok) return ready;
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
 
-      const baseline = await assistantBaseline(sessionFile, deadline);
+      const baseline = await measure(timings, 'baselineMs', () => assistantBaseline(sessionFile, deadline));
       if (baseline === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
       if (baseline === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
 
-      const deliveryFailure = await deliverLine(state, line);
+      const deliveryFailure = await measure(timings, 'deliverMs', () => deliverLine(state, line));
       if (deliveryFailure !== null) return { ok: false, error: deliveryFailure };
 
       const completed = startCompletion({
@@ -738,7 +802,9 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         sessionName: openName,
       });
       handedOff = true;
-      return { ok: true, sessionFile, completed };
+      timings.totalMs = now() - startedAt;
+      logSendTimings('send', timings);
+      return { ok: true, sessionFile, completed, timings };
     } finally {
       if (!handedOff) {
         unsubscribeActive();
@@ -757,26 +823,28 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     if (line === '') return { ok: false, error: EMPTY_MESSAGE_ERROR };
     busy = true;
     let handedOff = false;
+    const timings = emptyTimings();
+    const startedAt = now();
     try {
       const deadline = now() + turnTimeoutMs;
       // A new conversation is opened without `--session`, in the project dir.
       dropTurnIfSuperseded();
-      const opened = await ensureOpen(null, projectPath);
+      const opened = await measure(timings, 'openMs', () => ensureOpen(null, projectPath));
       if (!opened.ok) return opened;
       const state = open;
       if (!state) return { ok: false, error: DISPOSED_ERROR };
 
       subscribe(state);
-      const ready = await waitForReady(state);
+      const ready = await measure(timings, 'readyMs', () => waitForReady(state));
       if (!ready.ok) return ready;
       if (disposed) return { ok: false, error: DISPOSED_ERROR };
 
       // Capture the newest file before delivering, so only a file Pi writes
       // for this message is adopted.
-      const baselineOutcome = await awaitBefore(
+      const baselineOutcome = await measure(timings, 'baselineMs', () => awaitBefore(
         deps.newestSessionFile(projectPath),
         deadline,
-      );
+      ));
       if (baselineOutcome === DISPOSED || disposed) {
         return { ok: false, error: DISPOSED_ERROR };
       }
@@ -787,14 +855,14 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         return { ok: false, error: messageOf(baselineOutcome.error) };
       }
 
-      const deliveryFailure = await deliverLine(state, line);
+      const deliveryFailure = await measure(timings, 'deliverMs', () => deliverLine(state, line));
       if (deliveryFailure !== null) return { ok: false, error: deliveryFailure };
 
-      const adopted = await pollForNewSessionFile(
+      const adopted = await measure(timings, 'adoptMs', () => pollForNewSessionFile(
         projectPath,
         baselineOutcome.value,
         deadline,
-      );
+      ));
       if (!adopted.ok) return adopted;
 
       // The new file exists; its first assistant turn is awaited on the same
@@ -806,7 +874,9 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
         sessionName: openName,
       });
       handedOff = true;
-      return { ok: true, sessionFile: adopted.sessionFile, completed };
+      timings.totalMs = now() - startedAt;
+      logSendTimings('start-new', timings);
+      return { ok: true, sessionFile: adopted.sessionFile, completed, timings };
     } finally {
       if (!handedOff) {
         unsubscribeActive();

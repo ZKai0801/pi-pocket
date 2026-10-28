@@ -94,17 +94,31 @@ import { t } from '../i18n';
 export type SessionsState = 'idle' | 'loading' | 'ready' | 'error';
 
 /**
- * A line typed into the run that is already in flight. Pi writes it to the
- * session file only when it delivers it (a steering line at the next turn
- * boundary, a follow-up once the run has nothing left), so the chat shows it
+ * A line the reader has typed that the session file does not carry yet: a
+ * message on its way to Pi, or a line typed into the run already in flight
+ * (a steering line at the next turn boundary, a follow-up once the run has
+ * nothing left). Pi writes it only when it delivers it, so the chat shows it
  * as a ghost of its own until the file proves it landed.
+ *
+ * The ghost is painted the moment the line is typed, not when the transport
+ * reports back: a delivery is seconds of SSH work (a pane to open, Pi to boot,
+ * a read of the file), and a chat that waits for it looks like it swallowed
+ * the message. `status` is what the bubble renders next to itself while the
+ * line is still the chat's own to show.
  */
 export interface PendingTurn {
   id: string;
   text: string;
-  kind: TurnQueueKind;
+  /** `'send'` is a delivered turn's own line; the rest are lines queued into a run. */
+  kind: TurnQueueKind | 'send';
   /** User turns the session held when this line was typed: it becomes the next one. */
   afterUserTurns: number;
+  /**
+   * Whether the line has reached Pi. `sending` waits on the delivery itself,
+   * `sent` waits on the file that will carry it, and `failed` is a line Pi
+   * never got — it stays on screen until the reader retries or drops it.
+   */
+  status: 'sending' | 'sent' | 'failed';
 }
 
 /**
@@ -285,6 +299,13 @@ export interface SessionsStore extends SessionsStoreState {
    * itself instead of spinning until the answer.
    */
   send(text: string, intent?: TurnQueueKind): Promise<'sent' | 'busy' | 'error'>;
+  /**
+   * Take a ghost line Pi never got (`status: 'failed'`) back out of the
+   * transcript: its bubble goes and its text is returned, ready for the
+   * composer. `null` when the line is not there, has not failed, or has
+   * already been taken back — the caller must not invent a draft for it.
+   */
+  retryPending(id: string): string | null;
   /**
    * Answer the pending dialog with the user's tap: sends the keystrokes to
    * the pane it waits in, then reports pi's own follow-up line (or a plain
@@ -1013,7 +1034,9 @@ function rememberSession(
       name: null,
       updatedAtMs: Date.now(),
       preview,
-      turnCount: state.open?.turns.length ?? 1,
+      // The draft had no turns of its own; the line that just went out is the
+      // first one, and it is on screen as a ghost rather than in the parse.
+      turnCount: (state.open?.turns.length ?? 0) + 1,
     };
     state.sessions = [
       meta,
@@ -1035,9 +1058,28 @@ function rememberSession(
   }
 
   /**
+   * How many user turns the file will hold before the line about to be typed
+   * lands in it: what is there now, plus every line already delivered and
+   * still waiting to be written. Without the ghosts the count would be the
+   * file's alone, and a line queued behind an earlier one would be dropped the
+   * moment THAT one appeared — its bubble would vanish and come back as a real
+   * turn when pi finally wrote it. A failed line never gets written, so it is
+   * not part of the count.
+   */
+  function pendingBaseline(): number {
+    const ghosts = state.pending.filter((item) => item.status !== 'failed').length;
+    return userTurnCount(state.open) + ghosts;
+  }
+
+  /**
    * Drop the ghost lines Pi has written by now. A queued line becomes the next
    * user turn of its chat, so `afterUserTurns + 1` is exactly the count it
    * appears at; anything the file still does not have is still queued.
+   *
+   * The words themselves are the second test: a parse whose user turns hold
+   * this line is the file's copy of it, whatever the count says — which is
+   * also what retires a ghost whose delivery was never confirmed here but did
+   * reach Pi (a send the reader left behind by switching hosts).
    */
   function reconcilePending(session: ParsedPiSession): void {
     // A note the file has now recorded itself is the file's to show: the
@@ -1048,7 +1090,20 @@ function rememberSession(
     );
     if (state.pending.length === 0) return;
     const users = userTurnCount(session);
-    state.pending = state.pending.filter((item) => users < item.afterUserTurns + 1);
+    // Only the turns this line is waiting BEHIND can be its own: a repeat of
+    // the same words earlier in the conversation is not this line arriving.
+    const waitingBehind = session.turns.filter((turn) => turn.role === 'user');
+    state.pending = state.pending.filter((item) => {
+      const written = waitingBehind
+        .slice(item.afterUserTurns)
+        .some((turn) => turn.text === item.text);
+      return !written && users < item.afterUserTurns + 1;
+    });
+  }
+
+  /** Move one ghost to a new status, wherever its delivery has got to. */
+  function setPendingStatus(id: string, status: PendingTurn['status']): void {
+    state.pending = state.pending.map((item) => (item.id === id ? { ...item, status } : item));
   }
 
   /** The claim a delivered turn was started under, re-checked when it lands. */
@@ -1066,18 +1121,21 @@ function rememberSession(
    */
   function completeTurn(claim: TurnClaim, result: PiTurnSendResult): void {
     clearRunning(claim.sessionFile);
-    // The run is over — pi drains its queues before settling — so nothing can
-    // still be waiting in the transcript. Whatever is left never landed.
-    if (state.openPath === claim.sessionFile) state.pending = [];
     // A turn that lands after a host switch is the old connection's (D8): its
     // session file means nothing here, and neither does its failure.
     if (hostId() !== claim.host) return;
     if (!result.ok) {
+      // The reply never came, so the reader's own lines stay: the file was not
+      // re-read, and dropping them would take their message off the screen
+      // along with the turn that failed.
       if (state.openPath === claim.sessionFile) {
         state.sendError = localiseTurnError(result.error);
       }
       return;
     }
+    // The run is over — pi drains its queues before settling — so nothing can
+    // still be waiting in this transcript: the reply's parse carries it.
+    if (state.openPath === claim.sessionFile) state.pending = [];
     const session = result.session;
     rememberSession(claim.host, claim.sessionFile, session);
     if (state.sessions.some((meta) => meta.path === claim.sessionFile)) {
@@ -1181,6 +1239,16 @@ function rememberSession(
     const token = ++sendToken;
     state.sending = true;
     state.sendError = null;
+    // Same as a delivered turn's own line: the words go on screen before the
+    // keystrokes are written, and the spinner follows the write.
+    const echo: PendingTurn = {
+      id: `pending-${token}`,
+      text: toTurnLine(text),
+      kind,
+      afterUserTurns: pendingBaseline(),
+      status: 'sending',
+    };
+    state.pending = [...state.pending, echo];
     let result: PiTurnQueueResult;
     try {
       result = await runner.queue(sessionFile, text, kind);
@@ -1197,21 +1265,31 @@ function rememberSession(
     const staleClaim =
       sendToken !== token || hostId() !== host || state.openPath !== sessionFile;
     if (!result.ok) {
+      // The keystrokes never landed, so the line is the reader's to deal with:
+      // its bubble keeps the retry mark instead of a spinner.
+      setPendingStatus(echo.id, 'failed');
       if (staleClaim) return 'error';
       state.sendError = localiseTurnError(result.error);
       return 'error';
     }
-    if (staleClaim) return 'sent';
-    state.pending = [
-      ...state.pending,
-      {
-        id: `pending-${token}`,
-        text: toTurnLine(text),
-        kind,
-        afterUserTurns: userTurnCount(state.open),
-      },
-    ];
+    // Pi has the line; it writes it to the file when it delivers it, and the
+    // ghost stands until then.
+    setPendingStatus(echo.id, staleClaim ? 'failed' : 'sent');
     return 'sent';
+  }
+
+  /**
+   * Hand a line Pi never got back to the reader: the bubble goes, so the same
+   * words are never in the transcript and the draft at once, and what the
+   * composer receives is exactly the line that failed — ready to be edited
+   * and sent again. Only a failed line can be taken back; one still on its way
+   * is in the middle of being delivered, and a second copy would double it.
+   */
+  function retryPending(id: string): string | null {
+    const item = state.pending.find((entry) => entry.id === id);
+    if (item === undefined || item.status !== 'failed') return null;
+    state.pending = state.pending.filter((entry) => entry.id !== id);
+    return item.text;
   }
 
   /**
@@ -1440,6 +1518,21 @@ function rememberSession(
       return 'sent';
     }
 
+    // The reader's own line goes on screen BEFORE the delivery starts: a send
+    // is seconds of SSH work (opening the pane, waiting for Pi, reading the
+    // file for its baseline), and a transcript that stayed empty through all
+    // of it reads as a message the app lost. The bubble carries a spinner
+    // until Pi has the bytes (`status: 'sending'`), and the session file's own
+    // copy of the line is what retires it (see `reconcilePending`).
+    const echo: PendingTurn = {
+      id: `sent-${token}`,
+      text: toTurnLine(text),
+      kind: 'send',
+      afterUserTurns: pendingBaseline(),
+      status: 'sending',
+    };
+    state.pending = [...state.pending, echo];
+
     let begun: PiTurnBegun;
     try {
       begun = startingNew
@@ -1467,6 +1560,11 @@ function rememberSession(
         : state.openPath !== sessionFile);
 
     if (!begun.ok) {
+      // The line never reached Pi, so its bubble stops pretending it is on its
+      // way: the spinner becomes the retry mark and the reader decides. A
+      // delivery that failed after the bytes left is the file's to retire —
+      // the words are still the test, so a line that DID land never sticks.
+      setPendingStatus(echo.id, 'failed');
       // Nothing reached Pi, so there is nothing to track and no chat to
       // report to when the claim is stale.
       if (staleClaim) return 'error';
@@ -1477,13 +1575,11 @@ function rememberSession(
     const startedFile = begun.sessionFile;
     const line = toTurnLine(text);
     markRunning(startedFile);
+    // Pi has the bytes: the spinner goes, the bubble stays until the file has
+    // the line itself and the reply lands through `completeTurn`.
+    setPendingStatus(echo.id, staleClaim ? 'failed' : 'sent');
 
     if (!staleClaim) {
-      // The user's own line goes on screen now: the reply is the only thing
-      // still in flight, and it lands through `completeTurn`.
-      const turns = state.open?.turns ?? [];
-      const optimistic: PiTurn = { role: 'user', text: line, timestampMs: Date.now() };
-      if (state.open !== null) state.open = { ...state.open, turns: [...turns, optimistic] };
       if (startingNew) {
         // The draft has a file now, so the chat and the list can name it.
         state.openPath = startedFile;
@@ -1617,6 +1713,7 @@ function rememberSession(
     refresh,
     closeChat,
     send,
+    retryPending,
     answerPendingDialog,
     noteCommandOutput,
     hostChanged,
@@ -2533,6 +2630,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     refresh: store.refresh,
     closeChat,
     send: store.send,
+    retryPending: store.retryPending,
     answerPendingDialog: store.answerPendingDialog,
     startSelection: store.startSelection,
     toggleSelected: store.toggleSelected,
