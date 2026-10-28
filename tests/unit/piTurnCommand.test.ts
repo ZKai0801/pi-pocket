@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { piNodePathPrelude, quoteShell } from '../../src/pi/piCommands';
+import { listTurnSessionFilesCommand, piNodePathPrelude, quoteShell } from '../../src/pi/piCommands';
 import {
   buildPiCloseCommand,
   buildPiHasSessionCommand,
   buildPiInnerCommand,
+  buildPiListTurnSessionsCommand,
   buildPiOpenCommand,
+  PI_TURN_LIST_END,
+  PI_TURN_LIST_MISSING,
   PI_TURN_TMUX_SOCKET,
   toTurnLine,
   turnSessionName,
+  turnSessionNameForFile,
 } from '../../src/pi/piTurn';
 
 // The turn runs as a non-login shell inside tmux too, so pi cannot count on
@@ -152,6 +156,34 @@ describe('pi turn teardown', () => {
     // so the probe must name our own server and quote the name.
     const name = turnSessionName('/r/a.jsonl', '/home/projects/x');
     expect(buildPiHasSessionCommand(name)).toBe(`${TMUX} has-session -t '${name}' 2>/dev/null`);
+  });
+
+  it('lists the live turns and marks the end of the listing', () => {
+    // The end marker is the whole contract: without it, "the host has no turn
+    // sessions" and "the host never answered" read the same, and the sweep
+    // would retire the records of turns that are still running.
+    const command = buildPiListTurnSessionsCommand();
+    expect(command).toContain(`${TMUX} list-sessions -F '#{session_name}'`);
+    expect(command).toContain(`printf '${PI_TURN_LIST_END}\\n'`);
+    // No tmux is reported as its own answer rather than as an empty listing.
+    expect(command).toContain(`printf '${PI_TURN_LIST_MISSING}\\n'`);
+    expect(command).toContain('command -v tmux');
+  });
+
+  it('lists every conversation file a live name can be matched back to', () => {
+    // A session name is a hash of its file, never the file itself: the match
+    // needs the candidate set, bounded to pi's own two-level layout.
+    expect(listTurnSessionFilesCommand('/home/kai/.pi/agent/sessions')).toBe(
+      "find '/home/kai/.pi/agent/sessions' -mindepth 2 -maxdepth 2 -name '*.jsonl' -print 2>/dev/null",
+    );
+  });
+
+  it('names a conversation the same way whether the file or the draft is asked', () => {
+    // The reverse lookup in `liveTurns.ts` recomputes this name from every
+    // candidate file, so the two paths must not drift apart.
+    const file = '/r/--home-kai-project--/a.jsonl';
+    expect(turnSessionNameForFile(file)).toBe(turnSessionName(file, '/home/kai/project'));
+    expect(turnSessionNameForFile(file)).toMatch(/^ps-pi-[a-z0-9]+$/);
   });
 });
 

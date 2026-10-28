@@ -207,6 +207,8 @@ describe('pending turns', () => {
     alive?: string[];
     /** The probe itself fails (an SSH hiccup), as opposed to answering "gone". */
     probeThrows?: boolean;
+    /** The host's live turn listing; omitted means it could not be asked. */
+    live?: { sessionName: string; sessionFile: string }[];
   }) {
     const readSession = vi.fn(async (path: string) => {
       const next = options.sessions[path] ?? new Error('no such file');
@@ -226,6 +228,7 @@ describe('pending turns', () => {
         host: 'box',
         list: async (host) =>
           options.entries.filter((entry) => (host === 'box' ? entry.host === 'box' : false)),
+        liveTurns: options.live,
         readSession,
         kill,
         hasSession,
@@ -258,7 +261,8 @@ describe('pending turns', () => {
 
     expect(settlement.closed).toBe(0);
     expect(settlement.running).toHaveLength(1);
-    expect(settlement.running[0]?.turn.sessionName).toBe('ps-pi-a');
+    expect(settlement.running[0]?.sessionName).toBe('ps-pi-a');
+    expect(settlement.running[0]?.target).toBe(2);
     // The parse comes back with it: the caller needs the conversation's own
     // directory to build a runner for a chat that is not open.
     expect(settlement.running[0]?.session).toBe(session);
@@ -278,10 +282,104 @@ describe('pending turns', () => {
       sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1, false) },
     });
 
-    await expect(sweep.run()).resolves.toMatchObject({ closed: 0, running: [{ turn }] });
+    await expect(sweep.run()).resolves.toMatchObject({
+      closed: 0,
+      running: [{ sessionName: 'ps-pi-a', target: 1 }],
+    });
 
     expect(sweep.kill).not.toHaveBeenCalled();
     expect(sweep.forget).not.toHaveBeenCalled();
+  });
+
+  it('reconcilePendingTurns: adopts a turn the host still runs when no record names it', async () => {
+    // The reinstall / "clear data" case: nothing local remembers this turn —
+    // the app's own storage was wiped — and the agent is still working. The
+    // host's session listing is the only thing that knows, which is why the
+    // running status has to come from there.
+    const session = sessionWithAssistantTurns(1, false);
+    const sweep = sweepWith({
+      entries: [],
+      sessions: { '/r/a.jsonl': session },
+      live: [{ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl' }],
+    });
+
+    const settlement = await sweep.run();
+
+    expect(settlement.running).toHaveLength(1);
+    expect(settlement.running[0]).toMatchObject({
+      sessionName: 'ps-pi-a',
+      sessionFile: '/r/a.jsonl',
+      // No record, so the file's own count is the baseline: it is already
+      // reached, which leaves the settled tail and the stop reason as the
+      // whole test — exactly "the run is still at work".
+      target: countAssistantTurns(session),
+    });
+    expect(sweep.kill).not.toHaveBeenCalled();
+  });
+
+  it('reconcilePendingTurns: closes a delivered turn the host still lists but is at rest', async () => {
+    // The reply landed while the phone was away; the pane is idle and this app
+    // delivered the turn, so the teardown D44 promises is this pass's job.
+    const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
+    const sweep = sweepWith({
+      entries: [turn],
+      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(2) },
+      live: [{ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl' }],
+    });
+
+    await expect(sweep.run()).resolves.toMatchObject({ closed: 1, running: [] });
+
+    expect(sweep.kill).toHaveBeenCalledWith('ps-pi-a');
+    expect(sweep.forget).toHaveBeenCalledWith('box', 'ps-pi-a');
+  });
+
+  it('reconcilePendingTurns: leaves an at-rest pane alone when no record says this app sent it', async () => {
+    // An at-rest file cannot tell "pi finished that turn" from "pi has not
+    // started writing the next one yet". With no record of having delivered
+    // the line, killing on that guess would destroy work the phone cannot see,
+    // so the pane is left exactly as it is — and nothing is reported running.
+    const sweep = sweepWith({
+      entries: [],
+      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(2) },
+      live: [{ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl' }],
+    });
+
+    await expect(sweep.run()).resolves.toMatchObject({ closed: 0, running: [] });
+
+    expect(sweep.kill).not.toHaveBeenCalled();
+  });
+
+  it('reconcilePendingTurns: keeps the recorded count for a live turn with more replies owed', async () => {
+    // One assistant turn is in the file, a steering line is still owed: only
+    // the record knows this run settles at two, and the host listing cannot
+    // supply it.
+    const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
+    const sweep = sweepWith({
+      entries: [turn],
+      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1) },
+      live: [{ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl' }],
+    });
+
+    await expect(sweep.run()).resolves.toMatchObject({
+      closed: 0,
+      running: [{ sessionName: 'ps-pi-a', target: 2 }],
+    });
+  });
+
+  it('reconcilePendingTurns: retires a record the host does not list', async () => {
+    // With the listing in hand, a session that is not in it is provably gone —
+    // no per-record probe needed.
+    const turn = record({ sessionName: 'ps-pi-a', sessionFile: '/r/a.jsonl', target: 2 });
+    const sweep = sweepWith({
+      entries: [turn],
+      sessions: { '/r/a.jsonl': sessionWithAssistantTurns(1) },
+      live: [],
+    });
+
+    await expect(sweep.run()).resolves.toMatchObject({ gone: 1, running: [] });
+
+    expect(sweep.forget).toHaveBeenCalledWith('box', 'ps-pi-a');
+    expect(sweep.kill).not.toHaveBeenCalled();
   });
 
   it('reconcilePendingTurns: drops a record whose tmux session no longer exists', async () => {

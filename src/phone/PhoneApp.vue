@@ -228,12 +228,17 @@ watch(
 // Pi in its tmux session — the runner that would have closed it is gone. The
 // sweep is gated on the connected phase, not on `generationId`: a generation
 // is minted when the dial starts, and nothing can be read before it lands.
+//
+// `immediate` covers the shell mounting on a live connection: the turn that is
+// still running is not a change to react to, it was already there, and the
+// answer has to be on screen the first time the list is drawn.
 watch(
   () => (snapshot.value?.phase === 'connected' ? snapshot.value.generationId : null),
   (next, previous) => {
     if (next === null || next === previous) return;
     void sessions.sweepPendingTurns();
   },
+  { immediate: true },
 );
 const keyboardVisible = ref(false);
 

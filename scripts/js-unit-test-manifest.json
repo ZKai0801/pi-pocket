@@ -863,6 +863,15 @@
         "refuses a changed key: both fingerprints, no first-contact wording, no trust action"
       ]
     },
+    "tests/unit/liveTurns.test.ts": {
+      "suite": "live turns",
+      "tests": [
+        "parseTurnSessionNames: reads the listed turns and drops everything that is not one",
+        "parseTurnSessionNames: distinguishes \"nothing is running\" from \"the host did not answer\"",
+        "matchTurnSessionFiles: maps a live name back to the file it was named after",
+        "matchTurnSessionFiles: drops a name no file produces and a name two files produce"
+      ]
+    },
     "tests/unit/mobileControlSelection.test.ts": {
       "suite": "mobile control long-press hardening",
       "tests": [
@@ -913,6 +922,11 @@
         "reconcilePendingTurns: closes and forgets a session whose turn was answered while nobody watched",
         "reconcilePendingTurns: hands a still-running turn back so it can be watched again",
         "reconcilePendingTurns: leaves a session alone when the count is reached but tools are still running",
+        "reconcilePendingTurns: adopts a turn the host still runs when no record names it",
+        "reconcilePendingTurns: closes a delivered turn the host still lists but is at rest",
+        "reconcilePendingTurns: leaves an at-rest pane alone when no record says this app sent it",
+        "reconcilePendingTurns: keeps the recorded count for a live turn with more replies owed",
+        "reconcilePendingTurns: retires a record the host does not list",
         "reconcilePendingTurns: drops a record whose tmux session no longer exists",
         "reconcilePendingTurns: keeps the record when the session probe cannot answer",
         "reconcilePendingTurns: keeps the record when the file cannot be read, so the next connection retries",
@@ -1466,6 +1480,18 @@
         {
           "suite": "pi turn teardown",
           "title": "asks the same private server whether a recorded turn is still alive"
+        },
+        {
+          "suite": "pi turn teardown",
+          "title": "lists the live turns and marks the end of the listing"
+        },
+        {
+          "suite": "pi turn teardown",
+          "title": "lists every conversation file a live name can be matched back to"
+        },
+        {
+          "suite": "pi turn teardown",
+          "title": "names a conversation the same way whether the file or the draft is asked"
         },
         {
           "suite": "toTurnLine",

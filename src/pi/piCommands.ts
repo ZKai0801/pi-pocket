@@ -27,6 +27,20 @@ export function listSessionFilesCommand(dir: string): string {
 }
 
 /**
+ * Every conversation file under the session root, one path per line: the
+ * candidate set a live turn's tmux session name is matched back against.
+ *
+ * The name is a hash of the file path, so the file cannot be recovered from it
+ * — the only way back is to hash the candidates and look for the one that
+ * produces the name. Depth 2 is pi's own layout (one encoded `--cwd--`
+ * directory below the root) and the same bound the session listings use, so
+ * this never walks an unrelated tree.
+ */
+export function listTurnSessionFilesCommand(root: string): string {
+  return `find ${quoteShell(root)} -mindepth 2 -maxdepth 2 -name '*.jsonl' -print 2>/dev/null`;
+}
+
+/**
  * One exec that answers everything a list row needs from a session file: the
  * file's tail (the turns the preview is taken from) followed by its LAST
  * `session_info` line — the conversation's name.

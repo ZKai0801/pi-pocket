@@ -81,6 +81,19 @@ export function turnSessionName(sessionFile: string | null, projectPath: string)
   if (sessionFile === null) {
     return `${TMUX_SESSION_PREFIX}-draft-${shortHash(projectPath)}-${Math.random().toString(36).slice(2, 8)}`;
   }
+  return turnSessionNameForFile(sessionFile);
+}
+
+/**
+ * The name a real conversation's turn runs under, from its file alone.
+ *
+ * Split out for the reverse lookup (`liveTurns.ts`): the host's tmux server
+ * knows which turns are alive by name, and the only way back to a file is to
+ * hash every candidate and see which one produces that name. A draft has no
+ * such name — it is deliberately unguessable — which is why a draft turn is
+ * the one case a cold start can still miss.
+ */
+export function turnSessionNameForFile(sessionFile: string): string {
   return `${TMUX_SESSION_PREFIX}-${shortHash(sessionFile)}`;
 }
 
@@ -167,6 +180,46 @@ export function buildPiCloseCommand(sessionName: string): string {
 export function buildPiHasSessionCommand(sessionName: string): string {
   const name = quoteShell(sessionName);
   return `tmux -L ${PI_TURN_TMUX_SOCKET} has-session -t ${name} 2>/dev/null`;
+}
+
+/**
+ * The marker that closes a successful listing: its presence is what proves the
+ * host actually answered the question ("here is every turn session"), as
+ * opposed to answering nothing at all.
+ */
+export const PI_TURN_LIST_END = '[ps-live-end]';
+
+/** Printed instead of the listing when the host has no tmux at all. */
+export const PI_TURN_LIST_MISSING = '[ps-live-no-tmux]';
+
+/**
+ * Every turn session alive on the host's private tmux server, one name per
+ * line, ended by {@link PI_TURN_LIST_END}.
+ *
+ * This is the app's only durable answer to "what is still running": the
+ * records of delivered turns live in the phone's own storage, and a reinstall,
+ * a data clear, or simply the phone not being the device that sent the turn
+ * leaves none behind — while the agent itself keeps working in its pane on the
+ * host. The server is therefore asked first, and the local records only fill
+ * in what a name cannot say (see `liveTurns.ts`).
+ *
+ * The end marker makes "no sessions" distinguishable from "the question was
+ * never answered": `tmux` exits non-zero both when the server has no sessions
+ * left and when it cannot run at all, and the two must not be confused — one
+ * means every stored record is cleanable, the other means nothing is known.
+ * Without tmux the turn runs as a bare `exec` (see the fallback in
+ * {@link buildPiOpenCommand}) and no session can exist, but the absence of the
+ * binary is also invisible to this shell, so it is reported as unknown too.
+ */
+export function buildPiListTurnSessionsCommand(): string {
+  return [
+    'if command -v tmux >/dev/null 2>&1; then',
+    `tmux -L ${PI_TURN_TMUX_SOCKET} list-sessions -F '#{session_name}' 2>/dev/null;`,
+    `printf '${PI_TURN_LIST_END}\\n';`,
+    'else',
+    `printf '${PI_TURN_LIST_MISSING}\\n';`,
+    'fi',
+  ].join(' ');
 }
 
 /** A multi-line message is delivered as one line of terminal input. */

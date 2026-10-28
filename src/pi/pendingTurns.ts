@@ -22,10 +22,19 @@
  * — rule 1 of this file is that the watcher dies with the app, and rule 2 is
  * that the turn does not.
  *
- * A record whose tmux session is gone (`hasSession` says so) is neither: the
- * agent exited without its reply ever landing, so there is nothing to watch
- * and nothing to kill, and the record is dropped so the chat stops claiming a
- * turn is running in a pane that no longer exists.
+ * These records are a cache, not the truth. They live in the phone's storage,
+ * so a reinstall, a "clear data", or a turn delivered from another device
+ * leaves none behind, while the agent keeps working in its pane. The
+ * authority is the host's own tmux server: `liveTurns.ts` lists the sessions
+ * that are alive and matches each to its file, and `reconcilePendingTurns`
+ * treats that listing as the candidate set whenever it is available. Records
+ * then only supply what a name cannot say — the count a steering turn settled
+ * on — and a record naming a session the host does not have is retired.
+ *
+ * A record whose tmux session is gone is neither: the agent exited without its
+ * reply ever landing, so there is nothing to watch and nothing to kill, and the
+ * record is dropped so the chat stops claiming a turn is running in a pane
+ * that no longer exists.
  *
  * Keyed by host and session name: the name is what tmux needs, the host is
  * where it lives. A record is overwritten when the same conversation's next
@@ -33,6 +42,7 @@
  * the store is bounded by a TTL and a cap so it cannot grow forever.
  */
 import type { ParsedPiSession } from './types';
+import type { LiveTurn } from './liveTurns';
 
 /** Bumped when the stored shape changes; older entries are discarded. */
 export const PENDING_TURN_SCHEMA = 1;
@@ -261,35 +271,56 @@ export interface PendingTurnSweepDeps {
   /** The host the connection just reached; nothing is checked without one. */
   host: string | null;
   list(host: string): Promise<PendingTurn[]>;
+  /**
+   * Every turn session alive on the host, with the file it is writing
+   * (`liveTurns.ts`). This — not the records — is the authority on what is
+   * running: a reinstall or a data clear leaves no record behind while the
+   * agent keeps working, and a record can outlive the pane it describes.
+   *
+   * `null`, `undefined` or absent means the host could not be asked; the
+   * records are then the only candidates, exactly as before.
+   */
+  liveTurns?: readonly LiveTurn[] | null;
   /** The same full read the runner polls, so the count means the same thing. */
   readSession(path: string): Promise<ParsedPiSession>;
   /** Close the conversation's tmux session. Best-effort by contract. */
   kill(sessionName: string): Promise<void>;
   /**
-   * Whether the record's tmux session still exists. Absent, or a probe that
-   * fails, means "cannot tell": the record is kept for the next sweep instead
-   * of being dropped. Only a session that is provably gone retires a record.
+   * Whether a record's tmux session still exists — used only on the
+   * records-only path, where no live listing was available. Absent, or a
+   * probe that fails, means "cannot tell": the record is kept for the next
+   * sweep instead of being dropped. Only a session that is provably gone
+   * retires a record.
    */
   hasSession?(sessionName: string): Promise<boolean>;
   forget(host: string, sessionName: string): Promise<void>;
 }
 
-/** A record whose turn is still in flight, with the parse that proves it. */
-export interface PendingTurnRun {
-  turn: PendingTurn;
+/**
+ * A turn that is still in flight, with the parse that proves it.
+ *
+ * `target` comes from the record when there is one, because a turn that took
+ * steering has more than one owed reply. Without a record the file's own count
+ * is the only baseline there is, and it is sound: reaching it is what the tail
+ * already says, so the answer test there reduces to "the run is at rest".
+ */
+export interface LiveTurnRun {
+  sessionName: string;
+  sessionFile: string;
+  target: number;
   session: ParsedPiSession;
 }
 
 /**
- * What one pass over the host's records found. The caller acts on the last
- * group: a turn that is still running is one to watch again, not one to close
- * — that is the whole point of the records surviving the app.
+ * What one pass over the host found. The caller acts on the last group: a turn
+ * that is still running is one to watch again, not one to close — that is the
+ * whole point of the records surviving the app.
  */
 export interface PendingTurnSettlement {
   /** Sessions closed because their turn had been answered. */
   closed: number;
-  /** Records still owing work: take the watch over. */
-  running: PendingTurnRun[];
+  /** Turns still owing work: take the watch over. */
+  running: LiveTurnRun[];
   /** Records dropped because their tmux session no longer exists. */
   gone: number;
   /** Records kept because nothing could be read; the next pass retries. */
@@ -297,15 +328,23 @@ export interface PendingTurnSettlement {
 }
 
 /**
- * Reconcile the host's recorded turns with what the host actually has:
- * answered runs are closed and forgotten, live runs are handed back to the
- * caller to watch, and runs whose session is gone are dropped.
+ * Reconcile the host's live turn sessions — and the records of turns this
+ * phone delivered — with what has actually been answered.
+ *
+ * Live sessions are the candidate set when the host can list them, so a turn
+ * nobody recorded here — a reinstall, a cleared store, another device — is
+ * still found and watched. A live session whose file is at rest and which a
+ * record names is closed (the reply landed while the phone was not looking, and
+ * nobody is left to tear the pane down); one that still owes work is handed
+ * back to be watched; and a record naming a session the host does not have is
+ * dropped, because a pane that no longer exists can neither be watched nor
+ * killed. A session this phone never delivered is never killed: an at-rest file
+ * on such a pane cannot distinguish a finished turn from one the agent has not
+ * started writing yet, and guessing wrong there destroys work.
  *
  * The read is the only authority on "answered": a file that cannot be read
- * leaves its record in place for the next pass, and a count below the target
- * means Pi is still working. Only a session that `hasSession` reports as
- * missing retires an unfinished record, and only because there is then
- * nothing left to watch or to close.
+ * leaves its turn for the next pass, and a count below the target means Pi is
+ * still working.
  */
 export async function reconcilePendingTurns(
   deps: PendingTurnSweepDeps,
@@ -319,39 +358,89 @@ export async function reconcilePendingTurns(
   // No host means no connection was reached: there is nothing to read, and a
   // record must not be acted on through some other host's transport.
   if (deps.host === null || deps.host === '') return settlement;
-  const turns = await deps.list(deps.host).catch(() => []);
-  for (const turn of turns) {
+  const records = await deps.list(deps.host).catch(() => []);
+
+  interface Candidate {
+    sessionName: string;
+    sessionFile: string;
+    /** The recorded count, or null when the turn was never recorded here. */
+    target: number | null;
+    /**
+     * Whether this phone delivered the turn. Only a delivered turn is one this
+     * app may tear down: a session it merely found is a pane whose line nobody
+     * here sent, and an at-rest file cannot tell "pi finished that turn" from
+     * "pi had not started it yet" — a kill on that guess would destroy work.
+     */
+    delivered: boolean;
+  }
+  const candidates: Candidate[] = [];
+  const live = deps.liveTurns ?? null;
+  if (live === null) {
+    for (const record of records) {
+      candidates.push({
+        sessionName: record.sessionName,
+        sessionFile: record.sessionFile,
+        target: record.target,
+        delivered: true,
+      });
+    }
+  } else {
+    const bySession = new Map(records.map((record) => [record.sessionName, record]));
+    const liveNames = new Set(live.map((turn) => turn.sessionName));
+    for (const record of records) {
+      if (liveNames.has(record.sessionName)) continue;
+      await deps.forget(record.host, record.sessionName).catch(() => undefined);
+      settlement.gone += 1;
+    }
+    for (const turn of live) {
+      const recorded = bySession.get(turn.sessionName);
+      candidates.push({
+        sessionName: turn.sessionName,
+        sessionFile: turn.sessionFile,
+        target: recorded?.target ?? null,
+        delivered: recorded !== undefined,
+      });
+    }
+  }
+
+  for (const candidate of candidates) {
     let session: ParsedPiSession;
     try {
-      session = await deps.readSession(turn.sessionFile);
+      session = await deps.readSession(candidate.sessionFile);
     } catch {
       settlement.unreadable += 1;
       continue;
     }
-    if (isRunAnswered(session, turn.target)) {
+    const target = candidate.target ?? countAssistantTurns(session);
+    if (isRunAnswered(session, target)) {
+      // A turn this phone did not deliver has no teardown owed here — and no
+      // way to tell an idle pane from one Pi is about to write into.
+      if (!candidate.delivered) continue;
       try {
-        await deps.kill(turn.sessionName);
+        await deps.kill(candidate.sessionName);
       } catch {
         // The kill never landed, so the session is probably still there: keep
         // the record rather than forget a cleanup that still has to happen.
         settlement.unreadable += 1;
         continue;
       }
-      await deps.forget(turn.host, turn.sessionName).catch(() => undefined);
+      await deps.forget(deps.host, candidate.sessionName).catch(() => undefined);
       settlement.closed += 1;
       continue;
     }
     // Still working — unless the pane it works in is gone, in which case the
     // agent died before its reply landed and no watcher can ever be joined in.
-    if (deps.hasSession !== undefined) {
+    // Only the records-only path has to ask: a listed session exists by
+    // definition.
+    if (live === null && deps.hasSession !== undefined) {
       let alive: boolean | null;
       try {
-        alive = await deps.hasSession(turn.sessionName);
+        alive = await deps.hasSession(candidate.sessionName);
       } catch {
         alive = null;
       }
       if (alive === false) {
-        await deps.forget(turn.host, turn.sessionName).catch(() => undefined);
+        await deps.forget(deps.host, candidate.sessionName).catch(() => undefined);
         settlement.gone += 1;
         continue;
       }
@@ -360,7 +449,12 @@ export async function reconcilePendingTurns(
         continue;
       }
     }
-    settlement.running.push({ turn, session });
+    settlement.running.push({
+      sessionName: candidate.sessionName,
+      sessionFile: candidate.sessionFile,
+      target,
+      session,
+    });
   }
   return settlement;
 }
