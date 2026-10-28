@@ -41,9 +41,19 @@ export function listTurnSessionFilesCommand(root: string): string {
 }
 
 /**
- * One exec that answers everything a list row needs from a session file: the
- * file's tail (the turns the preview is taken from) followed by its LAST
- * `session_info` line — the conversation's name.
+ * The separator that opens one file's block in
+ * {@link readSessionSummariesCommand}'s output. A JSONL line can only carry a
+ * control character escaped, so a record separator inside one is impossible:
+ * the parse can split on it without a quoting dance.
+ */
+export const SESSION_SUMMARY_MARKER = '\u001e';
+
+/**
+ * What one list row needs from one session file, as a command body: the file's
+ * tail (the turns the preview is taken from) followed by its LAST
+ * `session_info` line — the conversation's name. `pathRef` is the shell word
+ * naming the file: a quoted literal for the single-file command, the loop's
+ * variable for the batched one.
  *
  * The tail alone loses names: `/name` appends its entry where the user ran the
  * command, so a conversation that kept working afterwards grows past the tail
@@ -60,13 +70,43 @@ export function listTurnSessionFilesCommand(root: string): string {
  * `echo` closes the tail's final line — a file need not end with a newline, and
  * the grep output must never share a line with it.
  */
-export function readSessionSummaryCommand(path: string, maxBytes: number): string {
-  const quoted = quoteShell(path);
+function sessionSummaryBody(pathRef: string, maxBytes: number): string {
   return [
-    `tail -c ${maxBytes} -- ${quoted} 2>/dev/null`,
+    `tail -c ${maxBytes} -- ${pathRef} 2>/dev/null`,
     'echo',
-    `grep -a -E '^[{][[:space:]]*"type"[[:space:]]*:[[:space:]]*"session_info"' -- ${quoted} 2>/dev/null | tail -n 1`,
+    `grep -a -E '^[{][[:space:]]*"type"[[:space:]]*:[[:space:]]*"session_info"' -- ${pathRef} 2>/dev/null | tail -n 1`,
   ].join('; ');
+}
+
+/** One session file's summary, as its own exec. {@link readSessionSummariesCommand} is the batched twin. */
+export function readSessionSummaryCommand(path: string, maxBytes: number): string {
+  return sessionSummaryBody(quoteShell(path), maxBytes);
+}
+
+/**
+ * Many sessions' summaries in ONE exec: a `for` loop over the paths, each
+ * block opened by {@link SESSION_SUMMARY_MARKER} and the file's path.
+ *
+ * The row-by-row read was one SSH round trip per conversation, which is what
+ * made entering a project with a long history sit there: the work per row is
+ * small, but a phone on a mobile link pays the latency N times. One exec pays
+ * it once for the whole group, and the blocks are split apart on the host's
+ * own output rather than by ordering assumptions. `true` closes the command so
+ * a file that could not be read does not decide its exit code.
+ *
+ * The caller groups the paths: one exec's stdout is capped (1 MiB in the
+ * native transport), so a group is as many files as their tails fit.
+ */
+export function readSessionSummariesCommand(paths: readonly string[], maxBytes: number): string {
+  if (paths.length === 0) return 'true';
+  const words = paths.map((path) => quoteShell(path)).join(' ');
+  return [
+    `for pi_ss_file in ${words}; do`,
+    `  printf '\\036%s\\n' "$pi_ss_file"`,
+    `  ${sessionSummaryBody('"$pi_ss_file"', maxBytes)}`,
+    'done',
+    'true',
+  ].join('\n');
 }
 
 /**

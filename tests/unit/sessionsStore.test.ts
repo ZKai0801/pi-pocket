@@ -34,6 +34,36 @@ describe('sessions store', () => {
     expect(store.open?.turns).toHaveLength(1);
   });
 
+  it('reports the open session read in flight until its parse lands', async () => {
+    const read = deferred<ParsedPiSession>();
+    const store = createSessionsStore({ listSessions: vi.fn(), readSession: vi.fn(() => read.promise) } as never);
+    const opening = store.openSession('/r/a.jsonl');
+    expect(store.opening).toBe(true);
+    read.resolve(session);
+    await opening;
+    expect(store.opening).toBe(false);
+    expect(store.open?.turns).toHaveLength(1);
+  });
+
+  it('keeps reporting the read in flight behind a painted backup', async () => {
+    // What the chat shows is then the local backup, not the file: without the
+    // flag a slow open would look finished the moment the backup painted.
+    const read = deferred<ParsedPiSession>();
+    const store = createSessionsStore({
+      listSessions: vi.fn(),
+      readSession: vi.fn(() => read.promise),
+      loadCachedSession: vi.fn(async () => session),
+    } as never);
+    const opening = store.openSession('/r/a.jsonl');
+    await flush();
+    expect(store.open).not.toBeNull();
+    expect(store.opening).toBe(true);
+    read.resolve({ ...session, turns: [...session.turns, { role: 'assistant', text: 'more', timestampMs: 2 }] });
+    await opening;
+    expect(store.opening).toBe(false);
+    expect(store.open?.turns).toHaveLength(2);
+  });
+
   it('reports error instead of an empty list when the read fails', async () => {
     const store = createSessionsStore({ listSessions: vi.fn(async () => { throw new Error('sftp failed'); }), readSession: vi.fn() } as never);
     await store.load({ path: '/home/kai', name: 'kai' });

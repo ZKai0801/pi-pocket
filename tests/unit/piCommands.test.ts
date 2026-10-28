@@ -10,6 +10,7 @@ import {
   piPathProbeCommand,
   quoteShell,
   readProjectCwdCommand,
+  readSessionSummariesCommand,
   readSessionSummaryCommand,
 } from '../../src/pi/piCommands';
 
@@ -47,6 +48,22 @@ describe('pi commands', () => {
       "tail -c 4096 -- '/r/a.jsonl' 2>/dev/null; echo; "
       + "grep -a -E '^[{][[:space:]]*\"type\"[[:space:]]*:[[:space:]]*\"session_info\"' -- '/r/a.jsonl' 2>/dev/null | tail -n 1",
     );
+  });
+
+  it('commands: the batched row scan opens each file with its own marker line', () => {
+    // One exec for the whole project. The marker is what lets the parse split
+    // the blocks without trusting the order they came back in, and the same
+    // tail-plus-name body is reused per file, so a batch answers exactly what a
+    // row-by-row read answered.
+    const command = readSessionSummariesCommand(['/r/a.jsonl', "/r/it's.jsonl"], 4096);
+    expect(command.startsWith("for pi_ss_file in '/r/a.jsonl' '/r/it'\\''s.jsonl'; do")).toBe(true);
+    expect(command).toContain("printf '\\036%s\\n' \"$pi_ss_file\"");
+    expect(command).toContain('tail -c 4096 -- "$pi_ss_file" 2>/dev/null; echo; grep -a -E');
+    expect(command).toContain('-- "$pi_ss_file" 2>/dev/null | tail -n 1');
+    // `true` closes it: a file that could not be read must not decide the exit.
+    expect(command.endsWith('done\ntrue')).toBe(true);
+    // Nothing listed is not a command: an empty project runs nothing.
+    expect(readSessionSummariesCommand([], 4096)).toBe('true');
   });
 
   it('commands: probes the override, PATH and node glob for an executable', () => {

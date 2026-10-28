@@ -7,7 +7,9 @@ import {
   listSessionFilesCommand,
   readProjectCwdCommand,
   readSessionLinesCommand,
+  readSessionSummariesCommand,
   readSessionSummaryCommand,
+  SESSION_SUMMARY_MARKER,
 } from './piCommands';
 
 export interface PiTransport {
@@ -49,12 +51,17 @@ export class PiRepositoryError extends Error {
  * How much of a session file's end one list row reads: enough for the last
  * turns and the preview. The name is NOT limited to this window — it is read
  * from the same exec by its own `session_info` scan (see
- * {@link readSessionSummaryCommand}), because `/name` writes where the user ran
- * it rather than at the end of the file.
+ * {@link readSessionSummariesCommand}), because `/name` writes where the user
+ * ran it rather than at the end of the file.
  */
 const SESSION_TAIL_BYTES = 65536;
-/** Bytes per SFTP transfer when reading a whole session file. */
-const SESSION_READ_CHUNK_BYTES = 262144;
+/**
+ * Bytes per SFTP transfer when reading a whole session file: the transport's
+ * own bound, so a big session takes the fewest round trips it can. Each
+ * transfer is a phone-to-host hop, and a tool-heavy session is megabytes —
+ * half the chunk size is twice the wait before the chat shows its turns.
+ */
+const SESSION_READ_CHUNK_BYTES = 512 * 1024;
 /**
  * Safety bound for one session read. A conversation past this is not a
  * conversation; the parse keeps whatever was read and the chat shows it.
@@ -63,7 +70,50 @@ const SESSION_MAX_READ_BYTES = 16 * 1024 * 1024;
 /** Lines per exec page in the SFTP-unavailable fallback read. */
 const SESSION_READ_LINES = 4096;
 const EXEC_TIMEOUT_MS = 15000;
+/**
+ * How much of one exec's stdout a summary group may spend. The native exec
+ * caps a stream at 1 MiB and FAILS the call past it (`MAX_EXEC_OUTPUT_BYTES`
+ * in SshCapabilityPlugin), so a group carries only as many files as their
+ * tails fit — batching saves round trips, never bytes. Half the cap leaves
+ * room for the markers and the name lines.
+ */
+const SUMMARY_BATCH_BUDGET_BYTES = 512 * 1024;
+/** Marker line, path, and the name line a block adds around one tail. */
+const SUMMARY_BLOCK_OVERHEAD_BYTES = 1024;
+const SUMMARY_BATCH_FILES = Math.max(
+  1,
+  Math.floor(SUMMARY_BATCH_BUDGET_BYTES / (SESSION_TAIL_BYTES + SUMMARY_BLOCK_OVERHEAD_BYTES)),
+);
+/**
+ * A group is one exec, so its budget follows the group's size instead of
+ * restarting per row. It stays bounded: a group whose files are pathological
+ * loses its previews, not the list.
+ */
+const SUMMARY_EXEC_MAX_MS = 60000;
+const SUMMARY_EXEC_PER_FILE_MS = 1000;
 const SESSION_DIR_PATTERN = /^--.*--$/;
+
+function summariesTimeoutMs(count: number): number {
+  return Math.min(SUMMARY_EXEC_MAX_MS, EXEC_TIMEOUT_MS + count * SUMMARY_EXEC_PER_FILE_MS);
+}
+
+/**
+ * Split {@link readSessionSummariesCommand}'s output into path → summary text.
+ * Each block is the marker, the file's path, a newline, then the tail and the
+ * name line exactly as the single-file command printed them — so the parse
+ * downstream is the same one a row-by-row read fed.
+ */
+function parseSessionSummaries(stdout: string): Map<string, string> {
+  const summaries = new Map<string, string>();
+  for (const block of stdout.split(SESSION_SUMMARY_MARKER)) {
+    const newline = block.indexOf('\n');
+    if (newline === -1) continue;
+    const path = block.slice(0, newline).replace(/\r$/, '');
+    if (path === '') continue;
+    summaries.set(path, block.slice(newline + 1));
+  }
+  return summaries;
+}
 
 function projectNameFromPath(path: string): string {
   const index = path.lastIndexOf('/');
@@ -165,34 +215,74 @@ export class PiRepository {
       );
     }
 
-    const sessions: PiSessionMeta[] = [];
+    // The listing first, every row's summary after it: the two are one exec
+    // each, and only the listing's exit code is a verdict — a file that could
+    // not be read costs its row's preview, never the list.
+    const rows: Array<{ path: string; updatedAtMs: number }> = [];
     for (const rawLine of listing.stdout.split('\n')) {
       const match = rawLine.match(/^(\S+)\s+(.+)$/);
       if (!match) continue;
       const epoch = Number(match[1]);
       if (!Number.isFinite(epoch)) continue;
-      const path = match[2].trim();
-
-      const tail = await this.transport.exec(
-        readSessionSummaryCommand(path, SESSION_TAIL_BYTES),
-        EXEC_TIMEOUT_MS,
-      );
-      const parsed = parsePiSession(tail.stdout);
-      sessions.push({
+      rows.push({ path: match[2].trim(), updatedAtMs: Math.round(epoch * 1000) });
+    }
+    const summaries = await this.readSummaries(rows.map((row) => row.path));
+    const sessions: PiSessionMeta[] = rows.map(({ path, updatedAtMs }) => {
+      const parsed = parsePiSession(summaries.get(path) ?? '');
+      return {
         path,
         id: sessionIdFromPath(path),
         name: parsed.name,
-        updatedAtMs: Math.round(epoch * 1000),
+        updatedAtMs,
         preview: sessionPreview(parsed),
         turnCount: parsed.turns.length,
-      });
-    }
+      };
+    });
     // The listing's `sort -rn` already answers newest first; sorting on the
     // parsed timestamps keeps that promise even when the command's order
     // surprises us — `newestSessionFileOnActiveHost` reads `sessions[0]` as
     // exactly that.
     sessions.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
     return sessions;
+  }
+
+  /**
+   * The summary text for every listed file, in as few execs as the output cap
+   * allows ({@link SUMMARY_BATCH_FILES} files each).
+   *
+   * A group the transport fails outright (a dropped channel, a timeout on a
+   * huge project) is read row by row instead: slower, but a list whose rows
+   * still carry their names is worth the wait. A group that answers short is
+   * treated the same way, so a file the shell choked on costs its own read
+   * rather than its row's name.
+   */
+  private async readSummaries(paths: readonly string[]): Promise<Map<string, string>> {
+    const summaries = new Map<string, string>();
+    for (let start = 0; start < paths.length; start += SUMMARY_BATCH_FILES) {
+      const group = paths.slice(start, start + SUMMARY_BATCH_FILES);
+      let answered: Map<string, string> | null = null;
+      try {
+        const batch = await this.transport.exec(
+          readSessionSummariesCommand(group, SESSION_TAIL_BYTES),
+          summariesTimeoutMs(group.length),
+        );
+        answered = parseSessionSummaries(batch.stdout);
+      } catch {
+        answered = null;
+      }
+      if (answered !== null && answered.size === group.length) {
+        for (const [path, text] of answered) summaries.set(path, text);
+        continue;
+      }
+      for (const path of group) {
+        const tail = await this.transport.exec(
+          readSessionSummaryCommand(path, SESSION_TAIL_BYTES),
+          EXEC_TIMEOUT_MS,
+        );
+        summaries.set(path, tail.stdout);
+      }
+    }
+    return summaries;
   }
 
   async readSession(path: string): Promise<ParsedPiSession> {

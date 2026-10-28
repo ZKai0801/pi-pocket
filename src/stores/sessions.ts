@@ -26,12 +26,12 @@
  *
  * `load()` paints the project's remembered rows (the `loadCachedSessions` dep)
  * before it lists the server, so entering a project after a reconnect shows
- * its conversations at once instead of waiting out one `tail` per session
- * file. `stale` says the rows on screen are that backup, `refreshing` says the
- * listing behind them is still in flight; a sync that fails keeps the painted
- * rows and reports its error beside them rather than replacing a usable list
- * with an empty error screen. Rows that are already on screen are never
- * repainted from the backup: a refresh must not move the list under the
+ * its conversations at once instead of waiting out the server's scan of every
+ * session file. `stale` says the rows on screen are that backup, `refreshing`
+ * says the listing behind them is still in flight; a sync that fails keeps the
+ * painted rows and reports its error beside them rather than replacing a
+ * usable list with an empty error screen. Rows that are already on screen are
+ * never repainted from the backup: a refresh must not move the list under the
  * user's thumb.
  *
  * `loadRecents()` reads the conversations recently opened on this host into
@@ -194,6 +194,13 @@ export interface SessionsStoreState {
   stale: boolean;
   /** A server listing is in flight behind the rows already on screen. */
   refreshing: boolean;
+  /**
+   * The open conversation's file is being read right now — a cold open, or a
+   * re-read of the chat on screen. The chat's header spins on it: a cold open
+   * paints the local backup first and a refresh leaves what is on screen in
+   * place, so this is the only thing that can say the chat is still catching up.
+   */
+  opening: boolean;
   /** A turn is being written to Pi and awaited in the open chat. */
   sending: boolean;
   /** The last send failure, already in the UI's language. */
@@ -543,6 +550,7 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
     error: null,
     stale: false,
     refreshing: false,
+    opening: false,
     sending: false,
     sendError: null,
     sendNotice: null,
@@ -628,6 +636,8 @@ export function createSessionsStore(deps: SessionsStoreDeps): SessionsStore {
       state.openPath = null;
       openToken += 1;
       openInFlight = null;
+      // The read that was opening the old project's chat is abandoned with it.
+      state.opening = false;
       // The old project's chat is gone, so its in-flight turn and its failure
       // must go with it: a new project never inherits the last chat's error.
       sendToken += 1;
@@ -778,6 +788,10 @@ function rememberSession(
       return openInFlight.promise;
     }
     const token = ++openToken;
+    // Up before the first await, and owned by the newest claim: an open stays
+    // "in flight" for the chat's header until this run paints or fails — a
+    // painted backup included, since what it painted is not the server's word.
+    state.opening = true;
     openInFlight = {
       token,
       host,
@@ -837,7 +851,10 @@ function rememberSession(
           state.state = 'error';
           state.error = errorMessage(error);
         } finally {
-          if (openToken === token) openInFlight = null;
+          if (openToken === token) {
+            openInFlight = null;
+            state.opening = false;
+          }
         }
       })(),
     };
@@ -850,6 +867,8 @@ function rememberSession(
   function newConversation(project: PiProject): void {
     openToken += 1;
     openInFlight = null;
+    // The chat being replaced may still have been opening; the draft is not it.
+    state.opening = false;
     sendToken += 1;
     state.sending = false;
     state.startingNew = true;
@@ -1620,6 +1639,8 @@ function rememberSession(
     state.startingNew = false;
     state.open = null;
     state.openPath = null;
+    // Nothing is on screen to catch up on any more, so nothing may spin for it.
+    state.opening = false;
     state.pending = [];
     state.modelNotes = [];
     state.commandNotes = [];
@@ -1656,6 +1677,9 @@ function rememberSession(
     // host's to show, so neither the backup marker nor its sync survives.
     state.stale = false;
     state.refreshing = false;
+    // An open in flight was reading the old host's file; its claim is bumped
+    // above, so nothing will ever clear the flag on its behalf.
+    state.opening = false;
     // And neither are the conversations recently opened there.
     state.recents = [];
     loadInFlight = null;
@@ -1689,6 +1713,8 @@ function rememberSession(
     set stale(value: boolean) { state.stale = value; },
     get refreshing() { return state.refreshing; },
     set refreshing(value: boolean) { state.refreshing = value; },
+    get opening() { return state.opening; },
+    set opening(value: boolean) { state.opening = value; },
     get sending() { return state.sending; },
     set sending(value: boolean) { state.sending = value; },
     get sendError() { return state.sendError; },
@@ -2686,6 +2712,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     error: toRef(store, 'error'),
     stale: toRef(store, 'stale'),
     refreshing: toRef(store, 'refreshing'),
+    opening: toRef(store, 'opening'),
     sending: toRef(store, 'sending'),
     sendError: toRef(store, 'sendError'),
     sendNotice: toRef(store, 'sendNotice'),

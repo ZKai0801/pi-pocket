@@ -49,6 +49,16 @@ const emptyText = computed(() => {
 });
 
 /**
+ * The list is talking to the host right now: a server listing behind rows the
+ * backup painted, or a first load with nothing to show yet. Either way the
+ * header says so — the body cannot, since the rows already on screen are
+ * deliberately never replaced by a spinner. Nothing of this applies to the
+ * recent-conversations screen, which is the local memory of opens.
+ */
+const syncing = computed(() =>
+  projects.selected !== null && (store.refreshing || store.state === 'loading'));
+
+/**
  * The paths the tick list is acting on: whichever of the two lists is on
  * screen right now (a project's conversations, or the recently opened ones).
  */
@@ -120,6 +130,20 @@ async function confirmDelete(): Promise<void> {
       <h1 v-else class="sessions__title">{{ t('sessions.title') }}</h1>
 
       <div class="sessions__actions">
+        <!-- The rows may be the local backup while the server's listing is
+             still walking the project's files: the header is where that wait
+             shows, since nothing in the body may move under the user's thumb.
+             Hidden in selection mode, whose bar belongs to the ticks. -->
+        <span
+          v-if="syncing && !store.selecting"
+          class="sessions__busy"
+          role="status"
+          data-testid="sessions-syncing"
+        >
+          <AppIcon name="refresh" class="sessions__busy-icon" />
+          <span class="sr-only">{{ t('sessions.loading') }}</span>
+        </span>
+
         <template v-if="store.selecting">
           <button
             type="button"
@@ -307,6 +331,32 @@ async function confirmDelete(): Promise<void> {
   flex: 0 0 auto;
   align-items: center;
   gap: var(--sp-2);
+}
+
+/* The sync-in-flight marker: a fixed slot at the trailing edge, so the "+"
+   beside it never moves as the listing starts and settles. Deliberately slow
+   per turn — this rides out a whole project's scan, and a fast spin over that
+   long reads as a fault. */
+.sessions__busy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-secondary);
+}
+
+.sessions__busy-icon {
+  width: 18px;
+  height: 18px;
+  animation: sessions-spin 900ms linear infinite;
+}
+
+@keyframes sessions-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .sessions__title {

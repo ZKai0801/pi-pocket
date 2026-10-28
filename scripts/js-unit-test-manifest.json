@@ -1096,10 +1096,11 @@
       "tests": [
         "encodePiCwd: matches the observed dir names",
         "quoteShell: single-quotes and escapes embedded quotes",
-        "commands: lists session dirs under the root",
+        "commands: lists session dirs newest conversation first",
         "commands: reads the first header line of any session file in a dir",
         "commands: lists session files newest first with mtime",
         "commands: one exec reads a row: the byte-capped tail, then the last session_info",
+        "commands: the batched row scan opens each file with its own marker line",
         "commands: probes the override, PATH and node glob for an executable",
         "commands: asks for the model list in the project, stderr left intact",
         "commands: the built-ins-only retry drops extension discovery",
@@ -1314,10 +1315,14 @@
       "suite": "pi repository",
       "tests": [
         "listProjects: reads cwd from each dir header and de-duplicates",
+        "listProjects: a project whose newest session is fresher lists first regardless of name order",
         "listProjects: returns [] when the root has no dirs",
         "listProjects: throws a typed error when the listing command fails",
         "listSessions: maps find output to session metadata, newest first",
         "listSessions: names a conversation whose /name entry sits above the tail window",
+        "listSessions: reads every row in one exec, not one exec per row",
+        "listSessions: keeps each exec under the output cap, so a long project takes a few batches",
+        "listSessions: falls back to one read per row when the summary exec fails",
         "readSession: prefers SFTP and falls back to tail on failure",
         "readSession: reads a file past the old 256 KiB head truncation",
         "readSession: the exec fallback pages by lines, not bytes"
@@ -2042,6 +2047,8 @@
       "tests": [
         "loads a project session list",
         "opens a session into turns",
+        "reports the open session read in flight until its parse lands",
+        "keeps reporting the read in flight behind a painted backup",
         "reports error instead of an empty list when the read fails",
         "closeChat clears the open session and its path",
         "refresh re-reads the open session by its path",
@@ -2050,14 +2057,23 @@
         "keeps the previous chat intact when a re-read fails",
         "clamps the turn poll interval to the shared floor",
         "treats a dropped or redialled connection as the same host, not a switch",
-        "an adopted turn: marks the conversation running without painting anything into the chat",
-        "an adopted turn: its reply lands in the chat and its list row like any other",
-        "an adopted turn: a watch that gives up only ends the status, never the chat error",
         "host switch: drops a load result that resolves after the host changed",
         "host switch: drops an open-session result that resolves after the host changed",
         "host switch: starts a fresh run for another project on the same host, and the stale run cannot wipe the fresh claim",
         "host switch: joins a same-host same-project double load when a hostId dep is wired",
         "host switch: does not re-join a run invalidated by a host switch, even when the host returns",
+        {
+          "suite": "sessions store session backup",
+          "title": "an adopted turn: marks the conversation running without painting anything into the chat"
+        },
+        {
+          "suite": "sessions store session backup",
+          "title": "an adopted turn: its reply lands in the chat and its list row like any other"
+        },
+        {
+          "suite": "sessions store session backup",
+          "title": "an adopted turn: a watch that gives up only ends the status, never the chat error"
+        },
         {
           "suite": "sessions store session backup",
           "title": "paints the local backup instantly and replaces it with the fresh read"

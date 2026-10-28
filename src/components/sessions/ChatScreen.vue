@@ -485,6 +485,19 @@ function confirmResend(): void {
              which one that is: small, under the name, never in its way. -->
         <p v-if="currentModel !== null" class="chat__model-name" data-testid="chat-model-name">{{ currentModel }}</p>
       </div>
+      <!-- The file is being read: a cold open paints the local backup first and
+           a re-read leaves what is on screen in place, so the header is the one
+           place that can say the chat is still catching up. Silent during a
+           pull-to-refresh, whose own indicator is already at the top. -->
+      <span
+        v-if="store.opening && !refreshing"
+        class="chat__busy"
+        role="status"
+        data-testid="chat-opening"
+      >
+        <AppIcon name="refresh" class="chat__busy-icon" />
+        <span class="sr-only">{{ t('chat.opening') }}</span>
+      </span>
     </header>
 
     <div
@@ -764,6 +777,27 @@ function confirmResend(): void {
   font-size: var(--fs-200);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The read-in-flight marker at the header's trailing edge: one fixed slot, so
+   the title keeps its room and the bar does not grow when a slow read is
+   announced. Deliberately slower than the pull icon — this one can spin for
+   the length of a large session file, and a fast turn over that long reads as
+   a fault rather than as work. */
+.chat__busy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-secondary);
+}
+
+.chat__busy-icon {
+  width: 18px;
+  height: 18px;
+  animation: chat-spin 900ms linear infinite;
 }
 
 /* Vertical only: the transcript must never pan sideways. A bubble that used
