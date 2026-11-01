@@ -369,7 +369,7 @@ export async function reconcilePendingTurns(
      * Whether this phone delivered the turn. Only a delivered turn is one this
      * app may tear down: a session it merely found is a pane whose line nobody
      * here sent, and an at-rest file cannot tell "pi finished that turn" from
-     * "pi had not started it yet" — a kill on that guess would destroy work.
+     * "pi had not started it yet" — killing on that guess would destroy work.
      */
     delivered: boolean;
   }

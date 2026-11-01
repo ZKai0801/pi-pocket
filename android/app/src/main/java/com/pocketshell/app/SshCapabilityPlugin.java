@@ -94,6 +94,23 @@ public final class SshCapabilityPlugin extends Plugin {
     private static final int MAX_ACTIVE_FORWARDS = 8;
     private static final int MAX_CONNECT_CANCELLATION_TOMBSTONES = 256;
     private static final long CONNECT_CANCELLATION_TTL_MS = 120_000L;
+    /**
+     * How often an otherwise idle SSH transport sends a heartbeat, in seconds.
+     *
+     * Nothing on the phone holds the transport open: Doze severs it on its own
+     * schedule and the grace window is bounded. What this DOES buy is every
+     * idle minute in between — a NAT, a carrier middlebox or a Wi-Fi AP that
+     * drops a silent TCP flow after a few minutes no longer ends the session,
+     * so returning to the app reuses the connection instead of spending a
+     * whole dial (KEX + userauth + a fresh discovery chain). 30 s is far below
+     * every common idle timeout and costs about six bytes each time.
+     */
+    private static final int DEFAULT_KEEP_ALIVE_INTERVAL_SEC = 30;
+    private static final int MAX_KEEP_ALIVE_INTERVAL_SEC = 300;
+    /** Bytes per pushed stream event; bounded so one event cannot thrash the bridge. */
+    private static final int MAX_STREAM_EVENT_BYTES = 32 * 1024;
+    /** Long-lived exec channels per connection. They share MAX_CHANNELS_PER_CONNECTION. */
+    private static final int MAX_ACTIVE_STREAMS = 4;
     private static final Semaphore FORWARD_PERMITS = new Semaphore(MAX_ACTIVE_FORWARDS);
     private static final ExecutorService FORWARD_EXECUTOR = Executors.newFixedThreadPool(MAX_ACTIVE_FORWARDS, runnable -> {
         Thread thread = new Thread(runnable, "pocketshell-ssh-forward");
@@ -119,6 +136,8 @@ public final class SshCapabilityPlugin extends Plugin {
     private final Map<String, SshConnection> connections = new ConcurrentHashMap<>();
     private final Map<String, SshPty> ptys = new ConcurrentHashMap<>();
     private final Map<String, SshForward> forwards = new ConcurrentHashMap<>();
+    /** Long-lived exec channels: the RPC and file-watch transport. */
+    private final Map<String, SshStream> streams = new ConcurrentHashMap<>();
     private final Object connectLock = new Object();
     private final Map<String, ConnectAttempt> pendingConnects = new HashMap<>();
     private final LinkedHashMap<String, Long> connectCancellationTombstones = new LinkedHashMap<>();
@@ -301,6 +320,10 @@ public final class SshCapabilityPlugin extends Plugin {
         int connectTimeout = options.has("gateway")
             ? boundedInt(options, "connectTimeoutMs", 5_000, 90_000, 60_000)
             : boundedInt(options, "connectTimeoutMs", 1000, 30_000, 20_000);
+        // 0 disables the heartbeat. Core's pinned contract carries no such
+        // option, so the default is what every dial gets today; the key exists
+        // so a future core (or a JVM test) can move it.
+        int keepAliveIntervalSec = boundedInt(options, "keepAliveIntervalSec", 0, MAX_KEEP_ALIVE_INTERVAL_SEC, DEFAULT_KEEP_ALIVE_INTERVAL_SEC);
         JSObject credential = options.getJSObject("credential");
         if (credential == null) throw new PluginFailure("INVALID_ARGUMENT", "SSH credential is missing.");
         String credentialKind = requiredString(credential, "kind");
@@ -397,6 +420,11 @@ public final class SshCapabilityPlugin extends Plugin {
                 throw new PluginFailure("INVALID_ARGUMENT", "SSH credential kind is not supported.");
             }
             checkConnectNotCancelled(attempt);
+            // Armed after userauth, never before: sshj's keepalive lives on the
+            // connection service, which only exists once authentication has
+            // completed. Best-effort by design — a heartbeat that cannot be
+            // armed must not fail a dial that already succeeded.
+            armKeepAlive(client, keepAliveIntervalSec);
 
             connection = new SshConnection(UUID.randomUUID().toString(), generationId, hostId, requestId, client);
             final SshConnection connected = connection;
@@ -652,6 +680,156 @@ public final class SshCapabilityPlugin extends Plugin {
                 connection.channelPermits.release();
             }
         });
+    }
+
+    /**
+     * Arm sshj's heartbeat for a connection that just authenticated.
+     *
+     * sshj's keep-alive thread is a daemon, exits on interrupt, and kills the
+     * transport when a heartbeat cannot be sent — so a link that really is
+     * gone still surfaces as the ordinary `lost` event instead of as a
+     * connection that looks alive and is not. Best-effort: a heartbeat that
+     * cannot be armed must never fail a dial that already succeeded.
+     */
+    private static void armKeepAlive(SSHClient client, int intervalSec) {
+        if (intervalSec <= 0) return;
+        try {
+            net.schmizz.keepalive.KeepAlive keepAlive = client.getConnection().getKeepAlive();
+            keepAlive.setKeepAliveInterval(intervalSec);
+            keepAlive.setName("pocketshell-ssh-keepalive");
+            keepAlive.start();
+        } catch (Exception | LinkageError ignored) {
+            // Deliberately silent: this is an optimization, not a capability.
+        }
+    }
+
+    /**
+     * Open a long-lived exec channel — the RPC / file-watch transport.
+     *
+     * Unlike {@link #exec}, nothing here joins the channel: it stays open and
+     * every read is pushed to JS as a `streamOutput` event, so a host-side
+     * command that produces output for minutes costs one channel instead of a
+     * dial per poll. The command owns its own stderr merge (`exec 2>&1`);
+     * only stdout and the exit status are reported.
+     */
+    @PluginMethod
+    public void openStream(PluginCall call) {
+        run(call, options -> {
+            String requestId = requiredString(options, "requestId");
+            SshConnection connection = requireConnection(options);
+            String command = requiredString(options, "command");
+            if (command.length() > MAX_EXEC_COMMAND_CHARS) throw new PluginFailure("INVALID_ARGUMENT", "SSH command is too long.");
+            int live = 0;
+            for (SshStream existing : streams.values()) {
+                if (existing.connection == connection) live++;
+            }
+            if (live >= MAX_ACTIVE_STREAMS) throw new PluginFailure("CHANNEL_LIMIT", "This SSH connection already has four long-lived channels.");
+            acquireChannel(connection);
+            SessionChannel channel = null;
+            try {
+                channel = (SessionChannel) connection.client.startSession();
+                Session.Command commandChannel = channel.exec(command);
+                SshStream stream = new SshStream(UUID.randomUUID().toString(), connection, channel, commandChannel);
+                streams.put(stream.channelId, stream);
+                startStreamReader(stream);
+                return new JSObject()
+                    .put("requestId", requestId)
+                    .put("connectionId", connection.connectionId)
+                    .put("generationId", connection.generationId)
+                    .put("channelId", stream.channelId);
+            } catch (Exception error) {
+                closeQuietly(channel);
+                connection.channelPermits.release();
+                throw failureFor(error);
+            }
+        });
+    }
+
+    /** Write to a stream's stdin. The far end is a shell, so the caller frames. */
+    @PluginMethod
+    public void writeStream(PluginCall call) {
+        run(call, options -> {
+            String requestId = requiredString(options, "requestId");
+            SshStream stream = requireStream(options);
+            String dataBase64 = requiredString(options, "dataBase64");
+            byte[] bytes;
+            try {
+                bytes = Base64.decode(dataBase64, Base64.DEFAULT);
+            } catch (IllegalArgumentException error) {
+                throw new PluginFailure("INVALID_ARGUMENT", "Stream data is not valid base64.");
+            }
+            if (bytes.length == 0 || bytes.length > MAX_STREAM_EVENT_BYTES) {
+                throw new PluginFailure("INVALID_ARGUMENT", "Stream data is outside its supported size.");
+            }
+            try {
+                OutputStream output = stream.command.getOutputStream();
+                output.write(bytes);
+                output.flush();
+            } catch (Exception error) {
+                throw failureFor(error);
+            }
+            return ack(requestId).put("channelId", stream.channelId);
+        });
+    }
+
+    @PluginMethod
+    public void closeStream(PluginCall call) {
+        run(call, options -> {
+            String requestId = requiredString(options, "requestId");
+            SshStream stream = requireStream(options);
+            closeStream(stream);
+            return ack(requestId).put("channelId", stream.channelId);
+        });
+    }
+
+    private SshStream requireStream(JSObject options) throws PluginFailure {
+        String channelId = requiredString(options, "channelId");
+        SshStream stream = streams.get(channelId);
+        if (stream == null) throw new PluginFailure("CHANNEL_NOT_FOUND", "SSH stream is no longer available.");
+        return stream;
+    }
+
+    private void startStreamReader(SshStream stream) {
+        Thread thread = new Thread(trackedWorker(ACTIVE_EXEC_STREAM_READERS, () -> {
+            byte[] buffer = new byte[8192];
+            try {
+                InputStream input = stream.command.getInputStream();
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    if (read > 0) emitStreamEvent(stream, "stdout", trim(buffer, read));
+                }
+            } catch (Exception ignored) {
+                // A closed or severed channel ends the read; both are exits.
+            } finally {
+                Integer exitCode = null;
+                try {
+                    exitCode = stream.command.getExitStatus();
+                } catch (Exception ignored) {
+                    // A channel lost before it reported one has no status.
+                }
+                emitStreamEvent(stream, "exit", new byte[0], exitCode);
+                CLEANUP_EXECUTOR.execute(() -> closeStream(stream));
+            }
+        }), "pocketshell-ssh-stream");
+        thread.setDaemon(true);
+        thread.start();
+        stream.reader = thread;
+    }
+
+    private void emitStreamEvent(SshStream stream, String kind, byte[] bytes) {
+        emitStreamEvent(stream, kind, bytes, null);
+    }
+
+    private void emitStreamEvent(SshStream stream, String kind, byte[] bytes, Integer exitCode) {
+        if (stream.closed.get()) return;
+        JSObject event = new JSObject()
+            .put("channelId", stream.channelId)
+            .put("connectionId", stream.connection.connectionId)
+            .put("generationId", stream.connection.generationId)
+            .put("kind", kind);
+        if (exitCode != null) event.put("exitCode", exitCode.intValue());
+        if (bytes.length > 0) event.put("dataBase64", Base64.encodeToString(bytes, Base64.NO_WRAP));
+        mainHandler.post(() -> notifyListeners("streamOutput", event));
     }
 
     @PluginMethod
@@ -1977,6 +2155,9 @@ public final class SshCapabilityPlugin extends Plugin {
         for (SshPty pty : new ArrayList<>(ptys.values())) {
             if (pty.connection == connection) closePty(pty);
         }
+        for (SshStream stream : new ArrayList<>(streams.values())) {
+            if (stream.connection == connection) closeStream(stream);
+        }
         for (SshForward forward : new ArrayList<>(forwards.values())) {
             if (forward.connection == connection) closeForward(forward);
         }
@@ -2012,6 +2193,17 @@ public final class SshCapabilityPlugin extends Plugin {
         });
         forward.connection.channelPermits.release();
         FORWARD_PERMITS.release();
+    }
+
+    void closeStream(SshStream stream) {
+        if (!stream.closed.compareAndSet(false, true)) return;
+        closeThenRemove(streams, stream.channelId, stream, () -> {
+            closeQuietly(stream.channel);
+            return null;
+        });
+        Thread reader = stream.reader;
+        if (reader != null) reader.interrupt();
+        stream.connection.channelPermits.release();
     }
 
     /** Keep production resource counts visible until native close returns, then return close evidence. */
@@ -2127,6 +2319,12 @@ public final class SshCapabilityPlugin extends Plugin {
 
     private static ClientCloseResult closeClient(SSHClient client) {
         Socket socket = client.getSocket();
+        // The heartbeat is a daemon thread, but it sleeps out the rest of the
+        // process if nothing stops it: interrupt it before the transport goes.
+        try {
+            client.getConnection().getKeepAlive().interrupt();
+        } catch (Exception ignored) {
+        }
         try {
             client.setTimeout(1000);
         } catch (Exception ignored) {}
@@ -2415,6 +2613,23 @@ public final class SshCapabilityPlugin extends Plugin {
             this.hostId = hostId;
             this.connectRequestId = connectRequestId;
             this.client = client;
+        }
+    }
+
+    /** A long-lived exec channel: the stdin/stdout half of the RPC transport. */
+    static final class SshStream {
+        final String channelId;
+        final SshConnection connection;
+        final SessionChannel channel;
+        final Session.Command command;
+        final AtomicBoolean closed = new AtomicBoolean(false);
+        volatile Thread reader;
+
+        SshStream(String channelId, SshConnection connection, SessionChannel channel, Session.Command command) {
+            this.channelId = channelId;
+            this.connection = connection;
+            this.channel = channel;
+            this.command = command;
         }
     }
 

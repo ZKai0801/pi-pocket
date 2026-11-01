@@ -61,6 +61,7 @@ import { installComposerAttach, type ComposerAttachLive } from '../session/compo
 import { platformInput } from '../session/platformInput';
 import { createAndroidAttachmentPort } from '../platform/android/attachmentPort';
 import { createPiTransport } from '../pi/piTransport';
+import { createAndroidStreamSource } from '../platform/android/piStreamSource';
 import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
 import { useSessionsStore } from '../stores/sessions';
 import { useConnectionsStore } from '../stores/connections';
@@ -437,6 +438,13 @@ const piTransport = createPiTransport(
   },
 );
 
+/**
+ * The Android stream transport, bound to whatever connection is live when a
+ * channel is opened — a channel belongs to one connection, so it cannot
+ * outlive the reconnect that would replace it.
+ */
+const piStreamSource = createAndroidStreamSource({ target: liveConnectionRef });
+
 const piLiveImplementation: PiLive = {
   transport() {
     return piTransport;
@@ -463,6 +471,9 @@ const piLiveImplementation: PiLive = {
       .map((entry) => ({ name: entry.name, path: entry.path }))
       .sort((left, right) => left.name.localeCompare(right.name));
   },
+  // The RPC / watch transport: one channel per command, output pushed instead
+  // of polled. Opened on the live connection, so it dies with it.
+  streamSource: () => piStreamSource,
 };
 
 /* ------------------------------------------------------------ attachments */

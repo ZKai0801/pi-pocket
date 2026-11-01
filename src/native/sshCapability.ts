@@ -108,6 +108,37 @@ export interface NativeSftpDeleteResult {
   requestId: string;
 }
 
+/** One pushed event of a long-lived exec channel (the RPC transport). */
+export interface NativeStreamEvent {
+  channelId: string;
+  connectionId: string;
+  generationId: string;
+  kind: 'stdout' | 'exit';
+  /** Present when the event carries bytes; absent on `exit`. */
+  dataBase64?: string;
+  /** Present on `exit` when the remote command reported one. */
+  exitCode?: number | null;
+}
+
+export interface NativeSshStreamOpenOptions {
+  requestId: string;
+  connectionId: string;
+  generationId: string;
+  command: string;
+}
+
+export interface NativeSshStreamOpenResult {
+  requestId: string;
+  connectionId: string;
+  generationId: string;
+  channelId: string;
+}
+
+export interface NativeSshStreamChannelOptions {
+  requestId: string;
+  channelId: string;
+}
+
 /** Capacitor registration for the platform-neutral core effects contract. */
 export type SshCapabilityPlugin = Plugin & SshCapability;
 
@@ -127,6 +158,14 @@ export type NativeSshCapabilityPlugin = Plugin & {
    * `SshCapability` contract — the phone is the only surface that prunes.
    */
   sftpDelete(options: NativeSftpDeleteOptions): Promise<NativeSftpDeleteResult>;
+  /**
+   * A long-lived exec channel: opened once, read by pushed events. Android
+   * only — the pinned core contract has no streaming exec, and every other
+   * platform simply never calls these.
+   */
+  openStream(options: NativeSshStreamOpenOptions): Promise<NativeSshStreamOpenResult>;
+  writeStream(options: NativeSshStreamChannelOptions & { dataBase64: string }): Promise<{ requestId: string; channelId: string }>;
+  closeStream(options: NativeSshStreamChannelOptions): Promise<{ requestId: string; channelId: string }>;
 };
 
 function isResourceSnapshot(value: unknown, requestId: string): value is SshResourceSnapshot {
@@ -226,3 +265,69 @@ export const loadSshTransportCapabilities = () =>
 
 /** Normalize Capacitor's plain bridge error object to the core error type. */
 export const readSshError = readSshCapabilityError;
+
+let streamRequestSequence = 0;
+
+/** The live-connection identity a stream is opened on. */
+export interface SshStreamTarget {
+  connectionId: string;
+  generationId: string;
+}
+
+export interface NativeStreamSession {
+  channelId: string;
+  /** Write to the channel's stdin. Unused by the watch, used by an RPC. */
+  write(dataBase64: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+/**
+ * Open a long-lived exec channel on the live connection.
+ *
+ * Android-only: the pinned core contract has no streaming exec, so this talks
+ * to the plugin directly and every other platform simply never calls it.
+ * Throws when the native build has no such method (an older plugin).
+ */
+export async function openNativeStream(
+  target: SshStreamTarget,
+  command: string,
+): Promise<NativeStreamSession> {
+  streamRequestSequence += 1;
+  const requestId = `ssh-stream-${streamRequestSequence}`;
+  const opened = await nativeSshCapability.openStream({ ...target, requestId, command });
+  if (opened.requestId !== requestId) throw new Error('SSH stream open returned a stale request.');
+  const channelId = opened.channelId;
+  return {
+    channelId,
+    async write(dataBase64: string): Promise<void> {
+      streamRequestSequence += 1;
+      const writeRequestId = `ssh-stream-${streamRequestSequence}`;
+      await nativeSshCapability.writeStream({ requestId: writeRequestId, channelId, dataBase64 });
+    },
+    async close(): Promise<void> {
+      streamRequestSequence += 1;
+      const closeRequestId = `ssh-stream-${streamRequestSequence}`;
+      try {
+        await nativeSshCapability.closeStream({ requestId: closeRequestId, channelId });
+      } catch {
+        // A channel the transport already took down is already closed.
+      }
+    },
+  };
+}
+
+/**
+ * Receive every open channel's pushed output. The listener is global — the
+ * plugin identifies the channel on each event — and the returned function
+ * removes it.
+ */
+export async function listenToStreamOutput(
+  listener: (event: NativeStreamEvent) => void,
+): Promise<() => void> {
+  const handle = await nativeSshCapability.addListener('streamOutput', (event: NativeStreamEvent) => {
+    listener(event);
+  });
+  return () => {
+    void handle.remove();
+  };
+}

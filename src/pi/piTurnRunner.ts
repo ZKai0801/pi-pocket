@@ -6,6 +6,8 @@ import {
 } from '../session/composerDelivery';
 import type { TurnPtyGeometry, TurnPtyHandle } from '../session/turnPty';
 import { countAssistantTurns, isRunAnswered } from './pendingTurns';
+import { parsePiSession } from './parsePiSession';
+import type { PiSessionWatch } from './piStream';
 import { parseSlashLine, takesOverTerminal } from './piInteractivity';
 import { buildPiOpenCommand, PI_TURN_CREATED_MARKER, toTurnLine, turnSessionName } from './piTurn';
 import {
@@ -97,6 +99,13 @@ export interface PiTurnRunnerDeps {
   piCommand: string;
   projectPath: string;
   readSession(path: string): Promise<ParsedPiSession>;
+  /**
+   * Follow the session file instead of re-reading it: one channel that pushes
+   * whatever pi appends, so a running turn costs no round trips at all.
+   * Resolves null when this platform cannot stream, and the runner falls back
+   * to {@link PiTurnRunnerDeps.readSession} on a timer.
+   */
+  watchSession?(path: string): Promise<PiSessionWatch | null>;
   newestSessionFile(projectPath: string): Promise<string | null>;
   /**
    * Destroy the conversation's server-side tmux session. Called only once a
@@ -539,35 +548,36 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     return { ok: true };
   }
 
-  async function pollForReplies(active: ActiveRun): Promise<PiTurnSendResult> {
+  /**
+   * The settle decision, shared by the watch and the read loop: the answer is
+   * either "the run is over, here is the session" or "keep waiting".
+   *
+   * The test is the count AND a settled tail AND a final stop reason: pi
+   * writes an assistant's text before the tool calls in that same message run,
+   * so the count alone is reached seconds into a run that narrates before it
+   * works — settling there is what used to kill turns mid-flight.
+   *
+   * A run pi gave up on shows up differently: the failed call left an
+   * assistant message with no text at all, so the assistant-turn count never
+   * reaches the target and the whole `answered` test can never hold. The tail
+   * saying `error` is the run's own end — without it the chat reports
+   * "running" until the ten-minute deadline and the failure never reaches the
+   * screen.
+   */
+  function createSettleTracker(active: ActiveRun): {
+    test(session: ParsedPiSession): ParsedPiSession | null;
+  } {
     // The watch behind NON_FINAL_TAIL_GRACE_MS: when the file last looked
     // finished, and how many entries it held then.
     let settledSinceMs = now();
     let settledEntryCount: number | undefined;
-    while (true) {
-      if (disposed) return { ok: false, error: DISPOSED_ERROR };
-      try {
-        // The deadline is re-read every pass: a queued message pushes it out.
-        const session = await readAbortable(active.sessionFile, active.deadline);
-        if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
-        if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
-        // The settle test is the count AND a settled tail AND a final stop
-        // reason: pi writes an assistant's text before the tool calls in that
-        // same message run, so the count alone is reached seconds into a run
-        // that narrates before it works — settling there is what used to kill
-        // turns mid-flight.
-        if (isRunAnswered(session, active.target)) return { ok: true, session };
+    return {
+      test(session: ParsedPiSession): ParsedPiSession | null {
+        if (isRunAnswered(session, active.target)) return session;
         // Only a tail that has stopped for good gets here. The same shape is
         // what a failed turn leaves while pi waits out a retry backoff, so
         // give pi the entry it appends before it continues to appear: a file
         // that has not grown since is a run that is over after all.
-        //
-        // A run pi gave up on shows up differently: the failed call left an
-        // assistant message with no text at all, so the assistant-turn count
-        // never reaches the target and the whole `answered` test above can
-        // never hold. The tail saying `error` is the run's own end — without
-        // this the chat reports "running" until the ten-minute deadline and
-        // the failure never reaches the screen.
         const over =
           session.settled === true &&
           (countAssistantTurns(session) >= active.target || session.stopReason === 'error');
@@ -575,9 +585,73 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
           settledEntryCount = session.entryCount;
           settledSinceMs = now();
         }
-        if (over && now() - settledSinceMs >= NON_FINAL_TAIL_GRACE_MS) {
-          return { ok: true, session };
-        }
+        if (over && now() - settledSinceMs >= NON_FINAL_TAIL_GRACE_MS) return session;
+        return null;
+      },
+    };
+  }
+
+  /** The follow ended before the run was settled: not a verdict, nor a failure. */
+  const WATCH_UNFINISHED = Symbol('watch unfinished');
+
+  async function pollForReplies(active: ActiveRun): Promise<PiTurnSendResult> {
+    const settle = createSettleTracker(active);
+    if (deps.watchSession) {
+      const followed = await pollWithWatch(active, settle);
+      // A follow that ended mid-run is not a verdict — the file may well have
+      // the answer already — so the read loop finishes the turn.
+      if (followed !== WATCH_UNFINISHED) return followed;
+    }
+    return pollByReading(active, settle);
+  }
+
+  /**
+   * Follow the file: the host pushes every append, so this loop spends no
+   * round trip to learn that something changed.
+   */
+  async function pollWithWatch(
+    active: ActiveRun,
+    settle: { test(session: ParsedPiSession): ParsedPiSession | null },
+  ): Promise<PiTurnSendResult | typeof WATCH_UNFINISHED> {
+    let watch: PiSessionWatch | null = null;
+    try {
+      watch = await deps.watchSession?.(active.sessionFile) ?? null;
+    } catch {
+      watch = null;
+    }
+    if (!watch) return WATCH_UNFINISHED;
+    try {
+      while (true) {
+        if (disposed) return { ok: false, error: DISPOSED_ERROR };
+        const answered = settle.test(parsePiSession(watch.text()));
+        if (answered) return { ok: true, session: answered };
+        // The deadline is re-read every pass: a queued message pushes it out.
+        if (now() >= active.deadline) return { ok: false, error: TURN_TIMEOUT_ERROR };
+        const changed = await watch.waitForChange(
+          Math.min(pollIntervalMs, Math.max(0, active.deadline - now())),
+        );
+        if (disposed) return { ok: false, error: DISPOSED_ERROR };
+        if (watch.closed && !changed) return WATCH_UNFINISHED;
+      }
+    } finally {
+      watch.close();
+    }
+  }
+
+  /** The fallback: read the whole file on a timer, as before. */
+  async function pollByReading(
+    active: ActiveRun,
+    settle: { test(session: ParsedPiSession): ParsedPiSession | null },
+  ): Promise<PiTurnSendResult> {
+    while (true) {
+      if (disposed) return { ok: false, error: DISPOSED_ERROR };
+      try {
+        // The deadline is re-read every pass: a queued message pushes it out.
+        const session = await readAbortable(active.sessionFile, active.deadline);
+        if (session === DISPOSED || disposed) return { ok: false, error: DISPOSED_ERROR };
+        if (session === TURN_DEADLINE) return { ok: false, error: TURN_TIMEOUT_ERROR };
+        const answered = settle.test(session);
+        if (answered) return { ok: true, session: answered };
       } catch {
         // A transient read failure is retried until the deadline.
       }

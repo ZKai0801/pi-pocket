@@ -7,6 +7,7 @@
  * only ever sees `transport()` / `remoteContext()` / `listDirectories(path)`.
  */
 import type { PiTransport } from '../pi/piRepository';
+import type { PiStreamSource } from '../pi/piStream';
 
 /** A subdirectory entry of the native `sftpList` listing (directories only). */
 export interface PiDirectoryEntry {
@@ -27,6 +28,13 @@ export interface PiLive {
   remoteContext(): Promise<PiRemoteContext>;
   /** The subdirectories of the remote directory, sorted by name. */
   listDirectories(path: string): Promise<PiDirectoryEntry[]>;
+  /**
+   * The long-lived exec channel of this connection, or null when the platform
+   * cannot stream one (the browser dev bridge). Optional because a live owner
+   * that cannot stream is still a usable Pi surface — every consumer of this
+   * has a polling fallback.
+   */
+  streamSource?(): PiStreamSource | null;
 }
 
 let installed: PiLive | null = null;

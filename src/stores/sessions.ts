@@ -82,6 +82,7 @@ import {
 } from '../pi/pendingTurns';
 import { resolvePiCommand } from '../pi/resolvePiCommand';
 import { resolveSessionRoot } from '../pi/resolveSessionRoot';
+import { watchSessionFile } from '../pi/piStream';
 import type { ParsedPiSession } from '../pi/types';
 import { piLive } from '../session/piLive';
 import { turnPtyOpener } from '../session/turnPty';
@@ -2361,6 +2362,13 @@ export const useSessionsStore = defineStore('sessions', () => {
         // PiRepository bounds its own fallback exec; the turn's overall deadline
         // is the runner's, not a single read's.
         readSession: readSessionOnActiveHost,
+        // Follow the file instead of re-reading it once a second: one channel,
+        // pushed appends, no round trip per poll. Null (no stream on this
+        // platform) leaves the runner on its read loop.
+        watchSession: (path) => {
+          const source = piLive().streamSource?.() ?? null;
+          return source === null ? Promise.resolve(null) : watchSessionFile(source, path);
+        },
         newestSessionFile: newestSessionFileOnActiveHost,
         closeSession: closeTurnSessionOnActiveHost,
         // The turn's tmux session is killed by its runner, and the runner dies
