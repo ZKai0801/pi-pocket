@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { createApp, defineComponent, h, nextTick, reactive, type App } from 'vue';
+import { createPinia } from 'pinia';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SavedHost } from '../../src/platform/android/hostStore';
 
@@ -151,6 +152,9 @@ function mount(render: () => ReturnType<typeof h>): { app: App; root: HTMLElemen
   const root = document.createElement('div');
   document.body.append(root);
   const app = createApp(defineComponent({ setup: () => render }));
+  // The connections store here is a fake, but the list also reads the real
+  // host-metrics store for its load badge — and that one is only a Pinia store.
+  app.use(createPinia());
   app.mount(root);
   live.push(app);
   return { app, root };

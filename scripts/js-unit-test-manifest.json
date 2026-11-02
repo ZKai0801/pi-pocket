@@ -956,7 +956,8 @@
         "lands on the 会话 tab when a project is tapped",
         "remembers the probed root and preloads the editor from it",
         "stacks the key vault sheet on the 连接 tab instead of adding a fourth tab (R31/R34)",
-        "reuses the one key manager and the one vault screen (R32)"
+        "reuses the one key manager and the one vault screen (R32)",
+        "owns the 主机状态 view and samples the host only while it can be seen"
       ]
     },
     "tests/unit/phoneTokens.test.ts": {
@@ -2394,6 +2395,100 @@
         "marks a line that never arrived, and asks before handing it back",
         "puts the failed line in the composer and leaves the words alone when cancelled",
         "says nothing about a line the store has already taken back"
+      ]
+    },
+    "tests/unit/hostMetricsCommand.test.ts": {
+      "suite": "The host metrics sample command",
+      "tests": [
+        "tags every section the parser reads, so a stray line cannot masquerade as one",
+        "installs nothing, writes nothing, and redirects nothing to a file (D45)",
+        "probes for the GPU tool instead of assuming it, and keeps a no-tool AMD path",
+        "runs under sh whatever the login shell is, with its quoting intact",
+        "bounds the payload by rows and by time",
+        "never asks for zero or a fractional number of processes",
+        "keeps one POSIX script on one line, so no multi-line exec ever reaches sshd"
+      ]
+    },
+    "tests/unit/hostMetricsParse.test.ts": {
+      "suite": "Parsing a host metrics sample",
+      "tests": [
+        "reads a complete Linux sample with two GPUs",
+        "counts the processes down by CPU, whatever order the host sent them in",
+        "excludes idle and iowait from the busy window and rounds to a tenth",
+        "has no reading at all when the window advanced by nothing",
+        "has no reading when a counter went backwards, instead of claiming 0%",
+        "refuses to invent a percentage from a missing or malformed stat line",
+        "reads a whole window of idle as a real zero, not as a missing value",
+        "takes the GPU numbers from the end so a comma in the model name is harmless",
+        "reads a driver that answers [N/A] or [Not Supported] as no value",
+        "drops a GPU row that is too short to be one",
+        "reads an AMD card from sysfs as utilisation only, named after its path",
+        "keeps a command name that contains spaces, and drops a header row",
+        "reads a host with no /proc as unreadable rather than as idle",
+        "ignores blank lines, unknown lines and a host that printed nothing",
+        "parses each section independently, so one broken line costs only its field",
+        "reads a load average and a meminfo line on their own",
+        "draws a missing figure as a dash and a real zero as zero",
+        "labels video memory in the GiB a card is sold as"
+      ]
+    },
+    "tests/unit/hostMetricsStore.test.ts": {
+      "suite": "The host metrics store",
+      "tests": [
+        "takes one sample and keeps it with the host it belongs to",
+        "refuses to sample a host that is not connected",
+        "keeps the last numbers and only reports an error when a read fails",
+        "reports a host that answered nothing it could read, without calling it idle",
+        "drops the numbers the moment a different host becomes the live one",
+        "drops the numbers when the connection itself goes away",
+        "lets the newer read win when two are in flight",
+        "polls only while the badge is on screen, and only once per arming",
+        "waits a full interval before re-sampling a reading that is still fresh",
+        "tears the poll and the in-flight sample both down on reset"
+      ]
+    },
+    "tests/unit/hostStatusView.test.ts": {
+      "suite": "The 连接 row host-load badge",
+      "tests": [
+        "draws an unread host as a dash, never as a zero",
+        "shows the busy percent beside the one-minute load once there is a reading",
+        "opens the host screen on tap, and does not toggle the connection",
+        {
+          "suite": "The 主机状态 screen",
+          "title": "names the failure instead of painting a panel of dashes when nothing was read"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "says there is nothing to read when no connection is live"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "keeps the old numbers and says when they were taken when a refresh fails"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "marks a host that gave no /proc data as partial rather than idle"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "says no GPU was detected instead of drawing an empty card"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "draws one card per GPU, with its video memory, temperature and power"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "lists the busiest processes with their pid and owner"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "says when a host returned no process list at all"
+        },
+        {
+          "suite": "The 主机状态 screen",
+          "title": "samples the host again from the refresh button"
+        }
       ]
     }
   }

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { computed, createApp, defineComponent, h, nextTick, type App } from 'vue';
+import { createPinia } from 'pinia';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SshKeyMetadata } from '../../src/native/sshKeyVault';
 import type { SavedHost } from '../../src/platform/android/hostStore';
@@ -125,6 +126,9 @@ function mountShell(hosts: SavedHost[] = []): Shell {
       },
     }),
   }));
+  // The list reads the real host-metrics store for its load badge, so it needs
+  // a Pinia even though the connections store here is a fake.
+  app.use(createPinia());
   app.mount(root);
   live.push(app);
   return { root, stack, back };

@@ -33,6 +33,36 @@ recommended (D44 degradation). See
 [js-first-rewrite-inventory.md](js-first-rewrite-inventory.md) and
 [design-system.md](design-system.md).
 
+### Host load without a terminal (0.6.0)
+
+The shared desktop/web shell answers "what is this host doing" by typing `htop`
+into a bare login shell (core's `app/maintenance.ts`) — an approach chosen over
+a panel that samples the host. The phone has no terminal to hand that question
+to (D45), so it asks the host directly and draws the numbers itself:
+
+- `src/host/hostMetrics.ts` — one `sh -c` script over `/proc`, `ps` and
+  `nvidia-smi`/`gpu_busy_percent`, plus the parse of its tagged stdout and the
+  formatters. Pure: the command is a string, the parse is a function of that
+  string, the clock arrives as an argument, and nothing is installed on the host
+  (D45). A section that does not answer parses to null, not to zero, so an
+  unreadable host never reads as an idle one.
+- `src/stores/hostMetrics.ts` — one snapshot owned by the host it was read from,
+  read through the existing `piLive().transport()` seam rather than a second
+  road to the connection. A failed refresh keeps the previous numbers and only
+  sets an error; a host switch or a disconnect drops them.
+- `src/components/host/HostLoadBadge.vue` and `HostStatusScreen.vue` — the badge
+  on the live 连接 row and the pushed 主机状态 view it opens.
+
+**Sampling is polled, deliberately.** The long-lived exec channel
+(`src/pi/piStream.ts`, `piLive().streamSource()`) exists and could push a
+continuous series, but the Android SSH plugin caps a connection at eight
+channels shared between PTYs, execs and forwards: a stream that runs while
+nobody is looking spends that budget on a status read. So the poll is armed only
+while the 连接 tab is visible and a connection is live (every 45 s), the screen's
+other reads are on demand, and each sample is one bounded exec (15 s timeout,
+`head -n 15` on the process list). Auto-refresh from a stream is the obvious next
+version; it is not this one.
+
 ### Local backups (0.6.0)
 
 Both 项目 and 会话 paint a local backup first and let the server's answer

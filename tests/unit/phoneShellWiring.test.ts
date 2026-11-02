@@ -50,7 +50,13 @@ describe('phone shell wiring', () => {
     expect(phoneAppSource).toContain("backStack.push('connections', 'keys')");
     expect(phoneAppSource).toContain('@update:keys-open="setKeysOpen"');
     // A sheet above the editor must not unmount the form that owns the handle.
-    expect(phoneAppSource).toContain(':editor-open="connectionView !== null"');
+    // The shell now has a third pushed view — 主机状态 — that DOES close the
+    // editor, so the predicate is named rather than `!== null`; it still has to
+    // be open for both views stacked above the form.
+    expect(phoneAppSource).toContain(':editor-open="connectionEditorOpen"');
+    expect(phoneAppSource).toContain(
+      "connectionView.value === 'editor' || connectionView.value === 'keys'",
+    );
     expect(phoneAppSource).toContain(":keys-open=\"connectionView === 'keys'\"");
     expect(connectionsListSource).toContain('@update:keys-open=');
     expect(connectionsListSource).toContain(':keys-open="keysOpen === true"');
@@ -65,5 +71,25 @@ describe('phone shell wiring', () => {
     expect(connectionEditorSource).toContain(':manager="androidKeyManager"');
     // No second manager on this path; the singleton comes from hosts.ts.
     expect(connectionEditorSource).not.toContain('new CredentialKeyManager');
+  });
+
+  it('owns the 主机状态 view and samples the host only while it can be seen', () => {
+    // The screen is a pushed view of the 连接 tab, so Back pops it (spec §8.1)
+    // rather than closing the app, and only the shell holds the tab stack.
+    expect(phoneAppSource).toContain("backStack.push('connections', 'host')");
+    expect(phoneAppSource).toContain("if (backStack.current('connections') === 'host') backStack.pop('connections')");
+    expect(phoneAppSource).toContain('<HostStatusScreen');
+    expect(phoneAppSource).toContain("connectionView === 'host'");
+    expect(connectionsListSource).toContain("emit('openHost')");
+    // Each sample is a channel out of the plugin's eight-per-connection budget,
+    // so the poll runs only while the badge or its screen can show it: the tab,
+    // a live connection, and nothing covering the list but 主机状态 itself.
+    expect(phoneAppSource).toContain('[activeTab, () => connections.status, connectionView]');
+    expect(phoneAppSource).toContain("const badgeVisible = view === null || view === 'host'");
+    expect(phoneAppSource).toContain(
+      "metrics.setWatched(tab === 'connections' && status === 'connected' && badgeVisible)",
+    );
+    // Teardown takes the timer and the numbers with it.
+    expect(phoneAppSource).toContain('metrics.reset()');
   });
 });

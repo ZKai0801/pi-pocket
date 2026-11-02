@@ -25,6 +25,7 @@ import ProjectsList from '../components/projects/ProjectsList.vue';
 import SessionList from '../components/sessions/SessionList.vue';
 import ChatScreen from '../components/sessions/ChatScreen.vue';
 import SettingsTab from '../components/settings/SettingsTab.vue';
+import HostStatusScreen from '../components/host/HostStatusScreen.vue';
 import { installThemeSync } from './themeSync';
 import { installLocaleSync } from './localeSync';
 import {
@@ -66,6 +67,7 @@ import { PI_SESSION_DIR_ENV } from '../pi/sessionRoot';
 import { useSessionsStore } from '../stores/sessions';
 import { useConnectionsStore } from '../stores/connections';
 import { useProjectsStore } from '../stores/projects';
+import { useHostMetricsStore } from '../stores/hostMetrics';
 import { sshCapability, type SftpReadWithOffsetOptions } from '../native/sshCapability';
 import { keyboardInsets, type KeyboardInsetsState } from '../native/keyboardInsets';
 import { createKeyboardInsetsStateSync } from '../native/keyboardInsetsState';
@@ -88,6 +90,7 @@ const activeTab = ref<PhoneTab>('connections');
 const sessions = useSessionsStore();
 const connections = useConnectionsStore();
 const projects = useProjectsStore();
+const metrics = useHostMetricsStore();
 const sharedSettings = useSettingsStore();
 
 const snapshot = ref<ConnectionSnapshot | null>(null);
@@ -189,6 +192,46 @@ function setKeysOpen(open: boolean): void {
   }
   if (backStack.current('connections') === 'keys') backStack.pop('connections');
 }
+
+/**
+ * 主机状态 is a third pushed view of the 连接 tab, so Back pops it and lands on
+ * the list — the same contract the editor and the key sheet have. It is not
+ * stacked above the editor: the badge that opens it only renders on the list.
+ */
+function setHostOpen(open: boolean): void {
+  if (open) {
+    backStack.push('connections', 'host');
+    // An unread host gets its first sample the moment it is asked about, rather
+    // than waiting for the badge's next tick.
+    if (metrics.snapshot === null) void metrics.refresh();
+    return;
+  }
+  if (backStack.current('connections') === 'host') backStack.pop('connections');
+}
+
+/** The editor renders only for the two views that stack above it. */
+const connectionEditorOpen = computed(
+  () => connectionView.value === 'editor' || connectionView.value === 'keys',
+);
+
+/**
+ * The badge polls while it can be seen, and not one sample longer.
+ *
+ * The tab is `v-show`n rather than mounted, so the list is alive on every tab;
+ * and every sample is an SSH channel out of the plugin's eight-per-connection
+ * budget that a turn's PTY and the port forwards also spend. Leaving the tab,
+ * losing the connection, or the editor and key sheet covering the list
+ * therefore stops the poll outright — while 主机状态 being open keeps it, since
+ * that screen paints the same snapshot.
+ */
+watch(
+  [activeTab, () => connections.status, connectionView],
+  ([tab, status, view]) => {
+    const badgeVisible = view === null || view === 'host';
+    metrics.setWatched(tab === 'connections' && status === 'connected' && badgeVisible);
+  },
+  { immediate: true },
+);
 
 // A chat is a pushed view of the 会话 tab, so Back can pop it (spec §8.1).
 watch(
@@ -881,6 +924,7 @@ onBeforeUnmount(() => {
   removeBackButton?.();
   disposeAppStateLifecycle?.();
   installBackNavigation(null);
+  metrics.reset();
   sessions.disposeTurnRunner();
   installTurnPtyOpener(null);
   void closeController();
@@ -902,11 +946,17 @@ onBeforeUnmount(() => {
 
     <div class="phone-shell__content" :class="{ 'phone-shell__content--chat': sessions.open !== null }">
       <ConnectionsList
-        v-show="activeTab === 'connections'"
-        :editor-open="connectionView !== null"
+        v-show="activeTab === 'connections' && connectionView !== 'host'"
+        :editor-open="connectionEditorOpen"
         :keys-open="connectionView === 'keys'"
         @update:editor-open="setEditorOpen"
         @update:keys-open="setKeysOpen"
+        @open-host="setHostOpen(true)"
+      />
+      <!-- Pushed above the list, so Back pops it (see `setHostOpen`). -->
+      <HostStatusScreen
+        v-show="activeTab === 'connections' && connectionView === 'host'"
+        @close="setHostOpen(false)"
       />
       <ProjectsList v-show="activeTab === 'projects'" @open="openProjectSessions" />
       <SettingsTab v-show="activeTab === 'settings'" />

@@ -2,17 +2,20 @@
 /**
  * Connections (tab 1, spec §8.2): the saved-host list. Green/red dot per host,
  * name and `host · user`, a key glyph for key-authed hosts, a lock for a host
- * that keeps a sealed credential, `…` for edit/delete, `+` in the header to
- * add. Empty state: a big 新增连接 button. Tapping a row connects it (or closes
- * it when it is already the live one); switching hosts closes the current
- * connection first (D8), which the store owns.
+ * that keeps a sealed credential, a live-load badge on the host that is actually
+ * connected, `…` for edit/delete, `+` in the header to add. Empty state: a big
+ * 新增连接 button. Tapping a row connects it (or closes it when it is already the
+ * live one); switching hosts closes the current connection first (D8), which the
+ * store owns. The badge is not a connect toggle — it opens 主机状态.
  */
 import { computed, onMounted, ref } from 'vue';
 import AppIcon from '@ui/components/AppIcon.vue';
 import KeyIcon from '../KeyIcon.vue';
 import LockIcon from './LockIcon.vue';
 import ConnectionEditor from './ConnectionEditor.vue';
+import HostLoadBadge from '../host/HostLoadBadge.vue';
 import { useConnectionsStore } from '../../stores/connections';
+import { useHostMetricsStore } from '../../stores/hostMetrics';
 import { redactForLog } from '../../credentials/redactForLog';
 import {
   SAVED_HOST_SENTENCE,
@@ -25,9 +28,12 @@ const props = defineProps<{ editorOpen?: boolean; keysOpen?: boolean }>();
 const emit = defineEmits<{
   'update:editorOpen': [open: boolean];
   'update:keysOpen': [open: boolean];
+  /** The badge was tapped: the shell pushes the 主机状态 view. */
+  openHost: [];
 }>();
 
 const store = useConnectionsStore();
+const metrics = useHostMetricsStore();
 
 /**
  * The editor's words for each saved-host validation problem (R35). The store
@@ -178,6 +184,24 @@ function toggleConnect(host: SavedHost): void {
   if (store.activeName === host.name && store.status === 'connected') void store.disconnect();
   else void store.requestConnect(host.name);
 }
+
+/**
+ * The badge belongs to the row whose host the sample came from, not to whichever
+ * row happens to read green: `owner` is set when the numbers are taken, so a
+ * reconnect to another host cannot leave the old host's CPU on the new row.
+ */
+function badgeFor(host: SavedHost): { cpuPercent: number | null; load1: number | null; pending: boolean } | null {
+  if (store.activeName !== host.name || store.status !== 'connected') return null;
+  if (metrics.owner !== host.name) return null;
+  return {
+    cpuPercent: metrics.snapshot?.cpu.usedPercent ?? null,
+    load1: metrics.snapshot?.cpu.load1 ?? null,
+    pending: metrics.loading,
+  };
+}
+
+/** One row as painted: the saved host plus the badge it owns, resolved once. */
+const rows = computed(() => store.hosts.map((host) => ({ host, badge: badgeFor(host) })));
 </script>
 
 <template>
@@ -244,7 +268,7 @@ function toggleConnect(host: SavedHost): void {
         class="connections__list"
         :class="{ 'connections__list--menu-open': menuFor !== null }"
       >
-        <li v-for="host in store.hosts" :key="host.name" class="connections__row">
+        <li v-for="{ host, badge } in rows" :key="host.name" class="connections__row">
           <button
             type="button"
             class="connections__host"
@@ -271,6 +295,16 @@ function toggleConnect(host: SavedHost): void {
               <LockIcon :size="16" />
             </span>
           </button>
+
+          <!-- A sibling of the row button, not a child: a button inside a button
+               is invalid markup, and the badge has its own tap target. -->
+          <HostLoadBadge
+            v-if="badge"
+            :cpu-percent="badge.cpuPercent"
+            :load1="badge.load1"
+            :pending="badge.pending"
+            @open="emit('openHost')"
+          />
 
           <button
             type="button"
