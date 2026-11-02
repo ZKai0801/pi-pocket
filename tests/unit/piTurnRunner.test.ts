@@ -12,6 +12,16 @@ interface FakeHandle extends TurnPtyHandle {
   writes: string[];
   write: ReturnType<typeof vi.fn>;
   emit(chunk: string): void;
+  /** Model the host ending the session: the channel dies and stops carrying bytes. */
+  kill(): void;
+  killed: boolean;
+  /**
+   * How many times this handle reported its own death. A real handle reports it
+   * at most once (`PhoneApp.vue` guards it with the same `closed` flag that
+   * stops its writes), so a fake that notified twice would let a double-drop
+   * pass for the wrong reason.
+   */
+  closeNotifications: number;
   unsubscribe: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
 }
@@ -30,30 +40,88 @@ function sessionWithAssistantTurns(
   return { version: 3, id: 'a', cwd: '/home/kai/project', name: null, turns, settled };
 }
 
-function fakeHandle(options: { autoReady?: boolean; writeError?: Error } = {}): FakeHandle {
+function fakeHandle(
+  options: {
+    autoReady?: boolean;
+    writeError?: Error;
+    killAfterWrite?: number;
+    dieAfterWrite?: number;
+  } = {},
+): FakeHandle {
   const listeners = new Set<(chunk: string) => void>();
+  // Death watchers, mirroring `TurnPtyHandle.onClose`: the fake can be killed,
+  // and a runner that never subscribed would simply never hear about it.
+  const closeListeners = new Set<() => void>();
   const writes: string[] = [];
+  let notified = false;
   const unsubscribe = vi.fn((callback: (chunk: string) => void) => {
     listeners.delete(callback);
   });
-  const close = vi.fn();
-  return {
+
+  const handle: FakeHandle = {
     writes,
+    killed: false,
+    closeNotifications: 0,
     write: vi.fn((data: string) => {
       if (options.writeError) throw options.writeError;
+      // A dead channel accepts the bytes and loses them. The phone's `write` is
+      // fire-and-forget and swallows the rejection it eventually gets back
+      // (src/phone/PhoneApp.vue:640-657), so the caller sees neither a throw nor
+      // an ack. Throwing here would model the `writeError` shape instead and
+      // would let a test go green over the silent loss it is meant to catch.
+      if (handle.killed) return;
       writes.push(data);
+      if (options.killAfterWrite !== undefined && writes.length >= options.killAfterWrite) {
+        handle.kill();
+      }
+      // The other shape of death: the bytes are accepted, and the channel only
+      // reports its end a tick later. That is what the phone actually does —
+      // `write` hands the payload to a queue, and the rejection it eventually
+      // gets back becomes the close notification (src/phone/PhoneApp.vue:640-662).
+      // `killAfterWrite` above is the synchronous form, which no real write
+      // produces; a test that needs "the caller was never told" needs this one.
+      if (options.dieAfterWrite !== undefined && writes.length >= options.dieAfterWrite) {
+        queueMicrotask(() => handle.kill());
+      }
     }),
     onData: vi.fn((callback: (chunk: string) => void) => {
       listeners.add(callback);
       if (options.autoReady) callback(PI_INPUT_READY_MARKER);
       return () => unsubscribe(callback);
     }),
-    close,
+    close: vi.fn(() => {
+      // The runner put this handle down; its pump is gone, so nothing is left to
+      // report. Only the host ending the session notifies.
+      listeners.clear();
+    }),
     unsubscribe,
+    onClose(callback: () => void) {
+      // Same contract as the phone's handle: a death that already happened is
+      // reported to a late subscriber immediately, because a dead channel must
+      // never be written into again.
+      if (handle.closeNotifications > 0) {
+        callback();
+        return () => undefined;
+      }
+      closeListeners.add(callback);
+      return () => { closeListeners.delete(callback); };
+    },
     emit(chunk: string) {
+      if (handle.killed) return;
       for (const listener of [...listeners]) listener(chunk);
     },
+    kill() {
+      if (handle.killed) return;
+      handle.killed = true;
+      // One notification per handle: a real EOF is an edge, not a level, so a
+      // fake that fired twice would let a double-drop pass for the wrong reason.
+      if (notified || handle.close.mock.calls.length > 0) return;
+      notified = true;
+      handle.closeNotifications += 1;
+      for (const listener of [...closeListeners]) listener();
+    },
   };
+  return handle;
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -77,8 +145,19 @@ function harness(options: {
   turnTimeoutMs?: number;
   /** Give every reopened PTY its own handle, so a restart is visible. */
   freshHandles?: boolean;
+  /** Kill the session's handle when `closeSession` fires; the default is what really happens. */
+  killOnClose?: boolean;
+  /** Kill the handle from inside its own Nth write, to put a death mid-delivery. */
+  killAfterWrite?: number;
+  /** Let the handle report its death a tick *after* its Nth write, as the phone's queue does. */
+  dieAfterWrite?: number;
 }) {
-  const handle = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
+  const handle = fakeHandle({
+    autoReady: options.autoReady,
+    writeError: options.writeError,
+    killAfterWrite: options.killAfterWrite,
+    dieAfterWrite: options.dieAfterWrite,
+  });
   const handles: FakeHandle[] = [handle];
   let opens = 0;
   const reads = [...options.reads];
@@ -86,7 +165,12 @@ function harness(options: {
   const openPty = vi.fn(async (_command: string, _geometry: { cols: number; rows: number }) => {
     opens += 1;
     if (options.freshHandles !== true || opens === 1) return handle;
-    const next = fakeHandle({ autoReady: options.autoReady, writeError: options.writeError });
+    const next = fakeHandle({
+      autoReady: options.autoReady,
+      writeError: options.writeError,
+      killAfterWrite: options.killAfterWrite,
+      dieAfterWrite: options.dieAfterWrite,
+    });
     handles.push(next);
     return next;
   });
@@ -105,7 +189,16 @@ function harness(options: {
   const sleep = vi.fn(async (ms: number) => {
     nowMs += ms;
   });
-  const closeSession = vi.fn(async (_sessionName: string) => undefined);
+  /**
+   * Reality: `deps.closeSession` runs `tmux -L pocketshell-pi kill-session`, the
+   * attach ends and the PTY hits EOF, so the handle dies with the session it
+   * belongs to. A double whose session survives its own kill cannot express that
+   * (spec §3.3), so killing is the default and `killOnClose: false` is the
+   * opt-out a test has to justify.
+   */
+  const closeSession = vi.fn(async (_sessionName: string) => {
+    if (options.killOnClose !== false) for (const owned of handles) owned.kill();
+  });
   const rememberTurn = vi.fn(
     (_turn: { sessionName: string; sessionFile: string; target: number }) => undefined,
   );
@@ -285,16 +378,184 @@ describe('createPiTurnRunner', () => {
     expect(h.readSession).toHaveBeenCalledTimes(3);
   });
 
-  it('reuses the same handle for a later send after the first turn completes', async () => {
+  it('reopens the PTY when the first turn killed its session', async () => {
+    // The first turn's settlement runs `tmux kill-session`, so the handle it
+    // leaves behind is a corpse: reusing it for the next message is the loss
+    // spec §3.2 describes, observed on a real host (Stage 0, Task 1 §4).
     const firstCompleted = sessionWithAssistantTurns(1);
-    const h = harness({ autoReady: true, reads: [sessionWithAssistantTurns(0), firstCompleted] });
+    const h = harness({
+      autoReady: true,
+      freshHandles: true,
+      reads: [sessionWithAssistantTurns(0), firstCompleted],
+    });
+
+    await expect(h.runner.send('/r/a.jsonl', 'one')).resolves.toMatchObject({ ok: true });
+    expect(h.handle.killed).toBe(true);
+    h.reads.push(sessionWithAssistantTurns(2));
+    await expect(h.runner.send('/r/a.jsonl', 'two')).resolves.toMatchObject({ ok: true });
+
+    expect(h.openPty).toHaveBeenCalledTimes(2);
+    // The line has to reach the reopened channel. Asserting where the bytes
+    // landed, not how many times something was called, is the point.
+    expect(h.handles[1].writes).toEqual(['two', '\r']);
+    expect(h.handle.writes).toEqual(['one', '\r']);
+  });
+
+  it('reports a dead channel, not a ten-minute timeout, when the turn PTY dies mid-delivery', async () => {
+    // Death arrives between the line and the submit key — the shape the phone
+    // actually produces, where `write` is fire-and-forget and the rejection it
+    // gets back is swallowed (src/phone/PhoneApp.vue:640-657). The session file
+    // never gains an assistant turn, because pi never received the line.
+    const h = harness({
+      autoReady: true,
+      killAfterWrite: 1,
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const result = await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(result.ok).toBe(false);
+    // The hazard is the spin: reporting a timeout after the whole turn deadline
+    // means the runner treated a dead channel as usable and polled an unchanged
+    // file for ten minutes. It has to fail at the death instead.
+    expect(result.ok === false && result.error).not.toMatch(/timed out/i);
+    expect(h.readSession).toHaveBeenCalledTimes(1);
+    expect(h.handle.writes).toEqual(['hi']);
+  });
+
+  it('keeps the run to its reply when the PTY dies after the line is delivered', async () => {
+    // D44, pinned rather than read: the phone's channel dying must never stop a
+    // turn already in flight. `dropTurn()` forgets the PTY and touches nothing
+    // else — the reply poll follows the session file through `readSession`, a
+    // different channel entirely, so the run still answers.
+    const reply = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      freshHandles: true,
+      reads: [sessionWithAssistantTurns(0), reply.promise],
+    });
+
+    const pending = h.runner.send('/r/a.jsonl', 'hi');
+    await flushMicrotasks();
+    // The line and its submit key are on the pane, pi is working, and the first
+    // reply read is in flight.
+    expect(h.handle.writes).toEqual(['hi', '\r']);
+    h.handle.kill();
+
+    reply.resolve(sessionWithAssistantTurns(1));
+    await expect(pending).resolves.toMatchObject({ ok: true });
+
+    // The dead handle went down exactly once — from the death, not again at the
+    // settlement — and the turn still completed normally.
+    expect(h.handle.close).toHaveBeenCalledTimes(1);
+    expect(h.readSession).toHaveBeenCalledTimes(2);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('reports a transport loss, not a delivery, when the channel dies after accepting the line', async () => {
+    // `writeError` models a write that throws, and the runner fails by catching
+    // it. Reality is quieter: the phone's `write` hands the bytes to a queue and
+    // returns at once; the rejection that eventually comes back is swallowed
+    // into a close notification (src/phone/PhoneApp.vue:640-662). Nothing throws
+    // on this path, so only `onClose` can say the line never reached pi.
+    const h = harness({
+      autoReady: true,
+      dieAfterWrite: 1,
+      reads: [sessionWithAssistantTurns(0)],
+    });
+
+    const result = await h.runner.send('/r/a.jsonl', 'hi');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/transport/i);
+    // The submit key never went out, and the runner has to stop there instead of
+    // polling a file it knows nothing about.
+    expect(h.handle.writes).toEqual(['hi']);
+    expect(h.readSession).toHaveBeenCalledTimes(1);
+    expect(h.runner.isBusy()).toBe(false);
+  });
+
+  it('reopens on every send after each turn killed its own session', async () => {
+    // Recovery has to be repeatable, not once-only. Every answered turn ends
+    // with `tmux kill-session`, so each settlement leaves a dead handle behind —
+    // the third message needs the same fresh PTY the second did.
+    const h = harness({
+      autoReady: true,
+      freshHandles: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
 
     await expect(h.runner.send('/r/a.jsonl', 'one')).resolves.toMatchObject({ ok: true });
     h.reads.push(sessionWithAssistantTurns(2));
     await expect(h.runner.send('/r/a.jsonl', 'two')).resolves.toMatchObject({ ok: true });
+    h.reads.push(sessionWithAssistantTurns(3));
+    await expect(h.runner.send('/r/a.jsonl', 'three')).resolves.toMatchObject({ ok: true });
 
-    expect(h.openPty).toHaveBeenCalledTimes(1);
-    expect(h.handle.writes).toEqual(['one', '\r', 'two', '\r']);
+    expect(h.openPty).toHaveBeenCalledTimes(3);
+    // Each line landed on the handle its own send opened — no message ever went
+    // into a corpse.
+    expect(h.handles.map((owned) => owned.writes)).toEqual([
+      ['one', '\r'],
+      ['two', '\r'],
+      ['three', '\r'],
+    ]);
+    for (const owned of h.handles) expect(owned.killed).toBe(true);
+  });
+
+  it('reopens after a pi that died on its own without claiming a teardown it did not run', async () => {
+    // Nothing the runner did ended this session — pi crashed. The death still
+    // drops the handle, but a turn that got no answer must not report a kill it
+    // never made: spec §3.4's record only goes away with a session the runner
+    // actually destroyed.
+    const noAnswer = deferred<ParsedPiSession>();
+    const h = harness({
+      autoReady: true,
+      freshHandles: true,
+      reads: [sessionWithAssistantTurns(0), noAnswer.promise],
+    });
+
+    const crashed = h.runner.send('/r/a.jsonl', 'one');
+    await flushMicrotasks();
+    h.handle.kill();
+    noAnswer.resolve(sessionWithAssistantTurns(0));
+
+    await expect(crashed).resolves.toMatchObject({ ok: false });
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.forgetTurn).not.toHaveBeenCalled();
+    expect(h.handle.close).toHaveBeenCalledTimes(1);
+
+    // And the conversation is not stranded: the next send opens a clean PTY.
+    h.reads.push(sessionWithAssistantTurns(1));
+    await expect(h.runner.send('/r/a.jsonl', 'two')).resolves.toMatchObject({ ok: true });
+    expect(h.openPty).toHaveBeenCalledTimes(2);
+    expect(h.handles[1]?.writes).toEqual(['two', '\r']);
+  });
+
+  it('drops a superseded PTY once when the takeover session also dies', async () => {
+    // A terminal-owning command marks the handle `restartPending`, so the next
+    // line reopens it. When the host ends that session in between, the death has
+    // already dropped it: a second drop would close a handle the runner no
+    // longer owns, and a missed one would write into a corpse.
+    const h = harness({
+      autoReady: true,
+      freshHandles: true,
+      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+    });
+
+    await expect(h.runner.runCommand('/r/a.jsonl', '/tree'))
+      .resolves.toEqual({ ok: true, hiddenUi: true });
+    // The command may still be running, so nothing is closed yet — and then the
+    // host takes the session out from under it.
+    expect(h.handle.close).not.toHaveBeenCalled();
+    h.handle.kill();
+
+    await expect(h.runner.send('/r/a.jsonl', 'hi')).resolves.toMatchObject({ ok: true });
+
+    // One drop for two reasons to drop: the death put the handle down, and
+    // `dropTurnIfSuperseded()` found nothing left to put down.
+    expect(h.handle.close).toHaveBeenCalledTimes(1);
+    expect(h.openPty).toHaveBeenCalledTimes(2);
+    expect(h.handles[1]?.writes).toEqual(['hi', '\r']);
   });
 
   it('dispose closes the handle, unsubscribes and refuses later sends', async () => {
@@ -427,18 +688,27 @@ describe('createPiTurnRunner', () => {
   });
 
   it('startNew refuses to reuse a runner already attached to a session', async () => {
+    // Attached in the one way that still means something after Stage 1a: the
+    // turn was NOT answered, so D44 keeps its session — and keeps the live
+    // handle bound to that file — in place. A settled turn's session is killed,
+    // and its handle is now dropped as the dead channel it is, so nothing is
+    // attached and there is nothing to refuse.
     const h = harness({
       autoReady: true,
-      reads: [sessionWithAssistantTurns(0), sessionWithAssistantTurns(1)],
+      reads: [sessionWithAssistantTurns(0)],
+      turnTimeoutMs: 5_000,
     });
 
-    await expect(h.runner.send('/r/a.jsonl', 'hi')).resolves.toMatchObject({ ok: true });
+    await expect(h.runner.send('/r/a.jsonl', 'hi')).resolves.toMatchObject({ ok: false });
     const result = await h.runner.startNew('/home/kai/project', 'new');
 
     expect(result).toEqual({ ok: false, error: SESSION_ALREADY_OPEN_ERROR });
     expect(h.openPty).toHaveBeenCalledTimes(1);
     expect(h.newestSessionFile).not.toHaveBeenCalled();
     expect(h.runner.isBusy()).toBe(false);
+    // The session outlived the give-up: that survival is what makes the
+    // attachment real, and it is the D44 rule this guard protects.
+    expect(h.closeSession).not.toHaveBeenCalled();
   });
 
   it('startNew refuses an empty message without opening a PTY', async () => {

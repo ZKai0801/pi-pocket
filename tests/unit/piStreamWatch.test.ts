@@ -107,6 +107,8 @@ function fakeHandle(): TurnPtyHandle & { write: ReturnType<typeof vi.fn>; close:
     }),
     unsubscribe: vi.fn(),
     close: vi.fn(),
+    // This double is never killed, so the death watcher has nothing to hear.
+    onClose: vi.fn(() => () => undefined),
   } as unknown as TurnPtyHandle & { write: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> };
 }
 

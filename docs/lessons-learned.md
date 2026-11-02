@@ -23,11 +23,27 @@ doesn't actually constrain. Concrete disguises seen more than once:
 - The fix silently no-ops while reading correctly — a guard read its value
   via `$(...)`, which forks a subshell, so it compared a constant against
   itself.
+- The double cannot express the state under test — a reuse test asserted the
+  PTY opened once and both lines landed on that one handle, while its fake
+  survived the `closeSession` that really runs `tmux kill-session` behind it.
+  The behaviour it pinned cannot happen on a host, so the real defect (the next
+  message written into a corpse) stayed green. Two tells: the teardown
+  dependency is a bare `vi.fn` that changes nothing about the double, and the
+  assertion counts calls instead of naming where the bytes landed. Fix shape:
+  make the fake die when the dependency fires, and assert per-handle writes.
 
-The check that catches all four: name the specific mutation that must
+The check that catches all five: name the specific mutation that must
 redden this assertion, then apply it. If you can't state one, the assertion
 is decorative. Confirm selectivity too — the mutant should redden the new
 check and only the new check.
+
+A mutation that reddens nothing is not automatically a coverage gap. If the
+production object cannot produce the state either — a handle that reports its
+own death once and unsubscribes when it is put down — the guard is
+defence-in-depth, and the honest verdict is to say so in the review rather than
+invent a double that can reach it. Renaming or deleting a test that survives
+this sweep still has to move in `scripts/js-unit-test-manifest.json`, or the
+exact-result checker fails the run on the file/title set difference (G9).
 
 ## Contended dev-box environment facts
 

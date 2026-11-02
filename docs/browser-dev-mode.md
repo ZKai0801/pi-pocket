@@ -160,6 +160,33 @@ in mock mode. Click DEV to collapse it; `?devToolbar=0` hides it.
 `?devTrace=1` logs each SSH call (method, command, outcome code — never PTY
 bytes) to the browser console.
 
+## What live mode is authoritative for
+
+Live mode runs the same app code as the phone: the identical `PhoneApp.vue`,
+including its `turnPtyImplementation`
+([`src/phone/PhoneApp.vue:574`](../src/phone/PhoneApp.vue)) driving
+`openPty`/`readPty`/`writePty`/`closePty` over the bridge
+([`src/dev/browser/liveBridge.ts:13`](../src/dev/browser/liveBridge.ts)), and
+the same `src/pi/piTurnRunner.ts` behind it. So it is real evidence for which
+code runs and in what order, and for whether an app-level defect reproduces.
+What the 2026-11-03 pi-turn measurement established about its numbers:
+
+- The transport differs — a localhost WebSocket to a Node `ssh2` bridge, not the
+  phone's SSH session over Wi-Fi — so per-call latency is understated. Use it
+  for host-side cost comparisons, never as a packaged-app latency number. The
+  packaged emulator remains the acceptance gate.
+- A hidden driving tab is timer-throttled. Measured in one: `setTimeout(50)`
+  fired at 867 ms, `500` at 992, `1000` at 2010. Anything under about a second
+  reads as at least a second, so per-stage timings taken in the browser are
+  evidence of ordering and not of cost; take cost from the host clock and
+  host-side probes.
+- The page console is the only place app logs can be read at all. The Android
+  host runs with Capacitor `loggingBehavior: 'none'`, so `Logger.shouldLog()`
+  drops every `console.*` before it reaches logcat — a `[pi turn] …` line from
+  the phone does not exist for `adb logcat`. Flipping that setting is not a
+  debugging shortcut: the same gate keeps SSH private key material out of
+  anything that lands in a log.
+
 ## Never in the APK
 
 The shims are injected by a Vite plugin that only exists in the `mock`/`live`

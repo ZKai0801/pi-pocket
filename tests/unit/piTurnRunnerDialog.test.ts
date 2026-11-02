@@ -62,6 +62,8 @@ function handle(): TurnPtyHandle {
       return () => listeners.delete(callback);
     }),
     close: vi.fn(),
+    // These doubles are never killed, so the death watcher has nothing to hear.
+    onClose: vi.fn(() => () => undefined),
   };
 }
 

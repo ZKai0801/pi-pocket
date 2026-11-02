@@ -313,6 +313,14 @@ interface OpenTurn {
    * chat's own session file) before anything else is written.
    */
   restartPending: boolean;
+  /**
+   * Unsubscribes this handle's death watcher. Deliberately NOT released by
+   * `unsubscribeActive()`: a turn's settlement stops the data subscription and
+   * *then* kills the session, so a teardown tied to the data subscription would
+   * be gone before the death it exists to hear. It lives exactly as long as the
+   * handle is this runner's, and is released where the handle is put down.
+   */
+  closeUnsubscribe: () => void;
 }
 
 /**
@@ -496,9 +504,24 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
       { submitDelayMs: deps.submitDelayMs },
     );
     delivery.setTransportState('connected');
-    open = { handle, tracker, delivery, ready: false, restartPending: false };
+    const state: OpenTurn = {
+      handle,
+      tracker,
+      delivery,
+      ready: false,
+      restartPending: false,
+      closeUnsubscribe: () => undefined,
+    };
+    open = state;
     openSessionFile = sessionFile;
     openName = sessionName;
+    // Subscribed only once `open` points at this handle: a channel that is
+    // already dead reports itself synchronously, and the drop has to be able to
+    // see the handle it is dropping. The identity check keeps a late close from
+    // a superseded handle dropping the live one.
+    state.closeUnsubscribe = handle.onClose(() => {
+      if (open?.handle === handle) dropTurn();
+    });
     return { ok: true };
   }
 
@@ -509,6 +532,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     openSessionFile = null;
     unsubscribeActive();
     if (!state) return;
+    state.closeUnsubscribe();
     state.delivery.setTransportState('closed');
     try {
       state.handle.close();
@@ -1227,6 +1251,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     openSessionFile = null;
     unsubscribeActive();
     if (state) {
+      state.closeUnsubscribe();
       state.delivery.setTransportState('closed');
       try {
         state.handle.close();
@@ -1249,6 +1274,7 @@ export function createPiTurnRunner(deps: PiTurnRunnerDeps): PiTurnRunner {
     run = null;
     unsubscribeActive();
     if (state) {
+      state.closeUnsubscribe();
       state.delivery.setTransportState('closed');
       try {
         state.handle.close();

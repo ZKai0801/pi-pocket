@@ -594,11 +594,26 @@ const turnPtyImplementation: TurnPtyOpener = {
       channelId: opened.channelId,
     };
     const listeners = new Set<(chunk: string) => void>();
+    const closeListeners = new Set<() => void>();
     const turnDecoder = createTerminalTextDecoder();
     let closed = false;
+    let deathReported = false;
     let readSequence = 0;
     let writeSequence = 0;
     let writeQueue: Promise<void> = Promise.resolve();
+
+    /**
+     * Tell the runner its channel is gone. Once only, and never for a channel the
+     * runner put down itself: a close it asked for is not a loss it has to hear
+     * about. Every exit that stops this PTY's pump goes through here, because a
+     * channel that stops answering is unusable whether or not it sent a FIN.
+     */
+    function reportDeath(): void {
+      if (deathReported || closed) return;
+      deathReported = true;
+      listeners.clear();
+      for (const listener of [...closeListeners]) listener();
+    }
 
     void (async () => {
       while (!closed) {
@@ -613,10 +628,12 @@ const turnPtyImplementation: TurnPtyOpener = {
             waitMs: TURN_PTY_WAIT_MS,
           });
         } catch {
+          reportDeath();
           return;
         }
         if (closed) return;
         if (result.channelId !== pty.channelId || !isSshResponseFor(result, readRequestId, pty)) {
+          reportDeath();
           return;
         }
         if (result.sequence === readSequence + 1) {
@@ -626,9 +643,13 @@ const turnPtyImplementation: TurnPtyOpener = {
             for (const listener of listeners) listener(chunk);
           }
         } else if (result.sequence !== readSequence) {
+          reportDeath();
           return;
         }
-        if (result.eof) return;
+        if (result.eof) {
+          reportDeath();
+          return;
+        }
       }
     })();
 
@@ -637,10 +658,20 @@ const turnPtyImplementation: TurnPtyOpener = {
         listeners.add(callback);
         return () => { listeners.delete(callback); };
       },
+      onClose(callback) {
+        if (deathReported) {
+          callback();
+          return () => undefined;
+        }
+        closeListeners.add(callback);
+        return () => { closeListeners.delete(callback); };
+      },
       write(data) {
         const payload = encodeBase64Bytes(encoder.encode(data));
         // The seam's write is fire-and-forget; queue so two writes never race
-        // their sequence, and let the runner's poll report a failed turn.
+        // their sequence. The rejection is not discarded any more: a channel that
+        // refused the bytes is a dead channel, and saying so is the only way the
+        // runner can stop treating it as usable.
         writeQueue = writeQueue.then(async () => {
           if (closed) return;
           writeSequence += 1;
@@ -654,12 +685,15 @@ const turnPtyImplementation: TurnPtyOpener = {
           if (result.sequence !== writeSequence || !isSshResponseFor(result, writeRequestId, pty)) {
             throw new Error('发送通道拒绝了输入。');
           }
-        }).catch(() => undefined);
+        }).catch(() => {
+          reportDeath();
+        });
       },
       close() {
         if (closed) return;
         closed = true;
         listeners.clear();
+        closeListeners.clear();
         void sshCapability.closePty({ ...pty, requestId: nextRequestId() }).catch(() => undefined);
       },
     };

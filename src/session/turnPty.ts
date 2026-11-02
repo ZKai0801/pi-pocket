@@ -14,6 +14,14 @@ export interface TurnPtyGeometry {
 export interface TurnPtyHandle {
   /** Stream decoded output chunks; the returned function unsubscribes. */
   onData(callback: (chunk: string) => void): () => void;
+  /**
+   * Fires once when the channel dies — the far end closed, the read pump stopped
+   * answering, or a write was rejected. A handle that has reported its death must
+   * never be written into again, so a subscriber registered after the fact is
+   * called immediately rather than left waiting for an EOF that already happened.
+   * The returned function unsubscribes.
+   */
+  onClose(callback: () => void): () => void;
   /** Send terminal input to the turn PTY. */
   write(data: string): void;
   /** Close the PTY and stop its pump. Idempotent. */
