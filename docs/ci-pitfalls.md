@@ -756,3 +756,55 @@ Three things to carry forward:
 - **The same shape is a latent bug anywhere `set -o pipefail` is on**, which in this repo
   is nearly everywhere. Any early-exiting reader behind a pipe — `| head`, `| grep -m1`,
   `| sed -n 1p` — races identically once the writer outgrows one pipe buffer.
+
+## A lost exec bit fails CI at line 1, so the gate never runs and the red reads as a code failure
+
+Every `JS-first rewrite` run on `main` in this fork has been red, nine of them
+from `1caa444d` (2026-10-21) to `5cb3bae2` (2026-11-03), and not one of them got
+as far as the gate. The step's entire output is:
+
+```
+/home/runner/work/_temp/<uuid>.sh: line 1: scripts/check-js-unit-results.py: Permission denied
+##[error]Process completed with exit code 126.
+```
+
+`JS checks and Android debug APK` dies on that line every run; the runs that also
+got a `Docker agents fixture contract` job died identically on
+`scripts/test-agents-fixture-aplexer.sh`. The job fails ~30 s after the install
+step, and `upload-artifact` then warns the APK was never built — an *effect* of
+the gate step dying, easy to read as an APK-build failure.
+
+**Mechanism.** `git ls-files -s scripts/` reported **zero** `100755` entries. The
+Windows-first rewrite rebuilt the tree where `core.filemode` is false, so every
+mode bit was dropped on the way in; a workflow step whose first line is a bare
+path cannot exec it on a Linux runner. Nothing about the code under test, and
+nothing about the gate's logic, was involved — exit 126 is the shell refusing to
+start, before `run-js-unit-gate.sh` exists as a process.
+
+**Why it hid.** The identical commands are green on the dev box, because the
+Windows shell resolves the shebang itself, so only CI could see it — and CI's
+verdict was being read as "the unit gate is red" rather than "the step could not
+launch". `docs/fork-gate-posture.md` carefully records which guards *apply* to
+this fork; none of them had ever *run* here, so nobody had a baseline for what a
+real verdict looks like, and a per-push red was the normal state of the branch.
+
+**Fix.** `git update-index --chmod=+x` on every shebang-carrying `.sh`/`.py`
+under `scripts/` and `tests/scripts/` — 205 files, mode-only, zero content
+lines changed. Not the narrower alternative of prefixing each workflow line with
+`python3`/`bash`: this file's own first rule is that `.py` files run directly,
+`#!/usr/bin/python3 -I` was written to be honoured as a shebang, and a per-line
+patch leaves every other bare invocation — including the dormant guards
+`fork-gate-posture.md` says to wire up later — broken in the same way.
+
+**Carry forward.**
+
+- **`exit 126` / `Permission denied` on line 1 of a step is an execution
+  failure, not a verdict.** Read the step's first command before its job name.
+- **A mode-only regression is invisible on this box.** With `core.filemode`
+  false, `git diff --stat` shows nothing when a script loses its exec bit and a
+  local run is green. Audit with `git ls-files -s`, especially when adding a step
+  that invokes a script bare.
+- **`main` has never been green on this fork, so G7's "required check green
+  before merge" has had no teeth.** A commit whose CI evidence is "the same red
+  as its six neighbours" has no CI evidence at all — say the gate is unobserved
+  rather than citing the colour.
