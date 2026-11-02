@@ -1442,6 +1442,37 @@
         "accepts output from a probe whose last command reported failure"
       ]
     },
+    "tests/unit/piStreamWatch.test.ts": {
+      "suite": "sessionWatchCommand",
+      "tests": [
+        "follows the file from its first line and retries a file that is not there yet",
+        "quotes a path the shell would otherwise split",
+        {
+          "suite": "watchSessionFile",
+          "title": "accumulates every pushed chunk"
+        },
+        {
+          "suite": "watchSessionFile",
+          "title": "wakes a waiter once per burst of appends"
+        },
+        {
+          "suite": "watchSessionFile",
+          "title": "reports a closed watch as one that will never change again"
+        },
+        {
+          "suite": "watchSessionFile",
+          "title": "is null when the platform cannot stream, so the caller falls back"
+        },
+        {
+          "suite": "createPiTurnRunner with a follow",
+          "title": "answers a turn from pushed bytes and never re-reads the file"
+        },
+        {
+          "suite": "createPiTurnRunner with a follow",
+          "title": "falls back to reading the file when the follow ends mid-run"
+        }
+      ]
+    },
     "tests/unit/piTransport.test.ts": {
       "suite": "createPiTransport",
       "tests": [
