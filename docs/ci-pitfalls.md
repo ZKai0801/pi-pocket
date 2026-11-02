@@ -788,13 +788,19 @@ launch". `docs/fork-gate-posture.md` carefully records which guards *apply* to
 this fork; none of them had ever *run* here, so nobody had a baseline for what a
 real verdict looks like, and a per-push red was the normal state of the branch.
 
-**Fix.** `git update-index --chmod=+x` on every shebang-carrying `.sh`/`.py`
-under `scripts/` and `tests/scripts/` — 205 files, mode-only, zero content
-lines changed. Not the narrower alternative of prefixing each workflow line with
-`python3`/`bash`: this file's own first rule is that `.py` files run directly,
-`#!/usr/bin/python3 -I` was written to be honoured as a shebang, and a per-line
-patch leaves every other bare invocation — including the dormant guards
-`fork-gate-posture.md` says to wire up later — broken in the same way.
+**Fix.** `git update-index --chmod=+x` on every tracked file with a `#!` first
+line — 234 files, mode-only, zero content lines changed. Not the narrower
+alternative of prefixing each workflow line with `python3`/`bash`: this file's own
+first rule is that `.py` files run directly, `#!/usr/bin/python3 -I` was written to
+be honoured as a shebang, and a per-line patch leaves every other bare invocation
+broken in the same way. That was not hypothetical — the first landed pass covered
+`scripts/` and `tests/scripts/` (205 files), which took `Check exact JavaScript
+unit gate` green on CI for the first time
+(`PASS: Vitest executed 1317 registered tests across 122 registered file(s)`), and
+then the *next* step died identically on `sh: 1: ./android/gradlew: Permission
+denied`. `android/gradlew` and the `tests/docker/agent-bin/*` fixture executables
+sit outside `scripts/`, so the scan has to be "every shebang file in the tree", not
+"a directory list someone remembers".
 
 **Carry forward.**
 
